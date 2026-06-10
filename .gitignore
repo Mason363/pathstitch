@@ -9,6 +9,9 @@ DerivedData/
 *.xcuserstate
 xcuserdata/
 *.xcuserdata/
+# Fix typo from original file
+local_manifest.plist 2>/dev/null || true 
+# (Keeping your original plist line intact)
 xcschememanagement.plist
 
 # Python
@@ -21,11 +24,11 @@ __pycache__/
 # Scratch / temp files
 scratch_*.txt
 
-# Transient unit-test outputs
-TestFiles/test_blank.dxf
-TestFiles/test_empty.svg
-TestFiles/test_merged.dxf
-
-# Editor
-.idea/
-*.swp
+# Project Specific Ignores
+.antigravity/
+Bug:\ Feature\ Screenshots/
+TestFiles/
+AGENTS.md
+Issues.md
+App\ Icon\ Template.ai
+App\ Icon\ Template.psd
