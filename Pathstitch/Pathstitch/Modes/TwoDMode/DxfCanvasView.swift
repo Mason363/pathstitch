@@ -200,16 +200,11 @@ struct DxfCanvasView: View {
                         .position(screenCenter)
                         .allowsHitTesting(false)
                 }
-            }
-            .overlay(
+                
                 canvasOverlays(size: geo.size, modelBounds: modelBounds)
-            )
-            .overlay(
                 coordinatesOverlay()
-            )
-            .overlay(
                 editingTextFieldsOverlay(size: geo.size, modelBounds: modelBounds)
-            )
+            }
         }
     }
 
@@ -2095,8 +2090,11 @@ struct ScrollWheelModifier: NSViewRepresentable {
         
         override func hitTest(_ point: NSPoint) -> NSView? {
             if let event = NSApp.currentEvent {
-                if event.type == .leftMouseDown || event.type == .leftMouseUp || event.type == .leftMouseDragged {
+                switch event.type {
+                case .leftMouseDown, .leftMouseUp, .leftMouseDragged, .mouseMoved, .mouseEntered, .mouseExited:
                     return nil
+                default:
+                    break
                 }
             }
             return super.hitTest(point)

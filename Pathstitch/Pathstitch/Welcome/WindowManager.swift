@@ -252,21 +252,23 @@ class PathstitchDocumentWindow: NSWindow {
         }
         
         // Spacebar Panning (Photoshop style)
-        if event.keyCode == 49 { // Spacebar
-            if event.type == .keyDown {
-                if !event.isARepeat {
-                    if appState.currentTool != .pan {
-                        preSpaceTool = appState.currentTool
-                        appState.currentTool = .pan
+        if event.type == .keyDown || event.type == .keyUp {
+            if event.keyCode == 49 { // Spacebar
+                if event.type == .keyDown {
+                    if !event.isARepeat {
+                        if appState.currentTool != .pan {
+                            preSpaceTool = appState.currentTool
+                            appState.currentTool = .pan
+                        }
                     }
+                    return
+                } else if event.type == .keyUp {
+                    if let oldTool = preSpaceTool {
+                        appState.currentTool = oldTool
+                        preSpaceTool = nil
+                    }
+                    return
                 }
-                return
-            } else if event.type == .keyUp {
-                if let oldTool = preSpaceTool {
-                    appState.currentTool = oldTool
-                    preSpaceTool = nil
-                }
-                return
             }
         }
         
