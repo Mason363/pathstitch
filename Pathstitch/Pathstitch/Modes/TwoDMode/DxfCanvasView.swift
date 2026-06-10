@@ -265,14 +265,8 @@ struct DxfCanvasView: View {
                                 }
                         )
                     
-                    // Blue Rotation handle (Line & Circle)
+                    // Blue Rotation handle (Circle)
                     ZStack {
-                        Path { p in
-                            p.move(to: CGPoint(x: 0, y: 0))
-                            p.addLine(to: CGPoint(x: 0, y: -100))
-                        }
-                        .stroke(Color.blue, lineWidth: 2)
-                        
                         Circle()
                             .fill(Color.blue)
                             .frame(width: 16, height: 16)
@@ -288,14 +282,31 @@ struct DxfCanvasView: View {
                         DragGesture(coordinateSpace: .global)
                             .onChanged { val in
                                 isDraggingRotation = true
-                                let angleRad = atan2(Double(val.location.x - centerScreen.x), Double(-(val.location.y - centerScreen.y)))
-                                gizmoDragRotation = angleRad * 180.0 / .pi
+                                let startAngleRad = atan2(Double(val.startLocation.x - centerScreen.x), Double(-(val.startLocation.y - centerScreen.y)))
+                                let startAngleDeg = startAngleRad * 180.0 / .pi
+                                
+                                let currentAngleRad = atan2(Double(val.location.x - centerScreen.x), Double(-(val.location.y - centerScreen.y)))
+                                let currentAngleDeg = currentAngleRad * 180.0 / .pi
+                                
+                                var delta = currentAngleDeg - startAngleDeg
+                                while delta > 180 { delta -= 360 }
+                                while delta < -180 { delta += 360 }
+                                
+                                gizmoDragRotation = delta
                             }
                             .onEnded { val in
                                 isDraggingRotation = false
-                                let angleRad = atan2(Double(val.location.x - centerScreen.x), Double(-(val.location.y - centerScreen.y)))
-                                let angleDeg = angleRad * 180.0 / .pi
-                                state.rotateSelected(angleDegrees: angleDeg, center: [Double(centerModel.x), Double(centerModel.y)])
+                                let startAngleRad = atan2(Double(val.startLocation.x - centerScreen.x), Double(-(val.startLocation.y - centerScreen.y)))
+                                let startAngleDeg = startAngleRad * 180.0 / .pi
+                                
+                                let currentAngleRad = atan2(Double(val.location.x - centerScreen.x), Double(-(val.location.y - centerScreen.y)))
+                                let currentAngleDeg = currentAngleRad * 180.0 / .pi
+                                
+                                var delta = currentAngleDeg - startAngleDeg
+                                while delta > 180 { delta -= 360 }
+                                while delta < -180 { delta += 360 }
+                                
+                                state.rotateSelected(angleDegrees: -delta, center: [Double(centerModel.x), Double(centerModel.y)])
                                 gizmoDragRotation = 0.0
                             }
                     )
