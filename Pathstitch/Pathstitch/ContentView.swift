@@ -227,8 +227,20 @@ struct ContentView: View {
             }.keyboardShortcut(.escape, modifiers: [])
             Button("") { state.undo() }.keyboardShortcut("z", modifiers: [.command])
             Button("") { state.redo() }.keyboardShortcut("z", modifiers: [.command, .shift])
-            Button("") { state.deleteSelectedEntities() }.keyboardShortcut(.delete, modifiers: [])
-            Button("") { state.deleteSelectedEntities() }.keyboardShortcut(.deleteForward, modifiers: [])
+            Button("") {
+                if state.selectedMeasurement != nil {
+                    state.deleteSelectedMeasurement()
+                } else {
+                    state.deleteSelectedEntities()
+                }
+            }.keyboardShortcut(.delete, modifiers: [])
+            Button("") {
+                if state.selectedMeasurement != nil {
+                    state.deleteSelectedMeasurement()
+                } else {
+                    state.deleteSelectedEntities()
+                }
+            }.keyboardShortcut(.deleteForward, modifiers: [])
         }
         .frame(width: 0, height: 0)
         .opacity(0)

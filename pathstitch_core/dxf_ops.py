@@ -15,6 +15,7 @@ from typing import Dict, List, Any, Tuple, Optional
 
 import ezdxf
 import ezdxf.colors
+from ezdxf.math import Matrix44
 from ezdxf.path import make_path, Path
 from shapely.geometry import LineString, LinearRing, MultiLineString, Point as ShapelyPoint
 from shapely.ops import linemerge
@@ -2717,6 +2718,39 @@ def op_new_dxf(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"status": "error", "message": f"Failed to create new DXF: {str(e)}"}
 
 
+def op_rotate_entities(args: Dict[str, Any]) -> Dict[str, Any]:
+    input_path = args.get("input")
+    output_path = args.get("output")
+    handles = args.get("handles", [])
+    angle = float(args.get("angle", 0.0))
+    center = args.get("center", [0.0, 0.0])
+    
+    if not input_path or not os.path.exists(input_path):
+        return {"status": "error", "message": f"Input file not found: {input_path}"}
+    if not output_path:
+        return {"status": "error", "message": "Output path must be specified."}
+        
+    try:
+        doc = ezdxf.readfile(input_path)
+        msp = doc.modelspace()
+        
+        cx, cy = float(center[0]), float(center[1])
+        angle_rad = math.radians(angle)
+        
+        m = Matrix44.translate(-cx, -cy, 0.0) @ Matrix44.z_rotation(angle_rad) @ Matrix44.translate(cx, cy, 0.0)
+        
+        db = doc.entitydb
+        for h in handles:
+            if h in db:
+                entity = db[h]
+                entity.transform(m)
+                
+        doc.saveas(output_path)
+        return {"status": "ok"}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to rotate entities: {str(e)}"}
+
+
 # Module-level dispatch table so both the CLI (`main`) and the persistent
 # worker (`pathstitch_core.worker`) share one source of truth for op routing.
 OPERATIONS = {
@@ -2735,6 +2769,7 @@ OPERATIONS = {
     "import_pdf": op_import_pdf,
     "trace_raster": op_trace_raster,
     "translate_entities": op_translate_entities,
+    "rotate_entities": op_rotate_entities,
     "append_dxf": op_append_dxf,
     "import_distribute": op_import_distribute,
     "normalize_dxf": op_normalize_dxf,

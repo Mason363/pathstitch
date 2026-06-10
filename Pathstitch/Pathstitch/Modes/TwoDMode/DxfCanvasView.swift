@@ -20,6 +20,10 @@ struct DxfCanvasView: View {
     @State private var dragStartModelPt = CGPoint.zero
     @State private var isDraggingFillet = false
     @State private var isDraggingOffset = false
+    @State private var gizmoDragRotation: Double = 0.0
+    @State private var isDraggingRotation = false
+    @State private var isHoveringFilletHandle = false
+    @State private var isHoveringOffsetHandle = false
     
     @State private var editingDimension: MeasurementLine? = nil
     @State private var editingDimensionText: String = ""
@@ -55,340 +59,8 @@ struct DxfCanvasView: View {
             
             ZStack(alignment: .bottomLeading) {
                 Canvas { context, size in
-                    // Draw Grid
-                    if state.gridVisible {
-                        drawGrid(context: context, size: size, bounds: modelBounds)
-                    }
-                    
-                    // Draw visual origin axes at (0,0)
-                    let originScreen = toScreen(dx: 0.0, dy: 0.0, size: size, bounds: modelBounds)
-                    var xAxisPath = SwiftUI.Path()
-                    xAxisPath.move(to: CGPoint(x: 0, y: originScreen.y))
-                    xAxisPath.addLine(to: CGPoint(x: size.width, y: originScreen.y))
-                    context.stroke(xAxisPath, with: .color(Color.red.opacity(0.4)), lineWidth: 1.0)
-                    
-                    var yAxisPath = SwiftUI.Path()
-                    yAxisPath.move(to: CGPoint(x: originScreen.x, y: 0))
-                    yAxisPath.addLine(to: CGPoint(x: originScreen.x, y: size.height))
-                    context.stroke(yAxisPath, with: .color(Color.green.opacity(0.4)), lineWidth: 1.0)
-                    
-                    // Draw Entities
-                    for ent in state.entities {
-                        let layerVisible = state.layers.first(where: { $0.name == ent.layer })?.visible ?? true
-                        if !layerVisible { continue }
-                        
-                        let isSelected = state.selectedHandles.contains(ent.handle)
-                        let isHovered = (state.hoveredHandle == ent.handle)
-                        
-                        let baseColor = state.layers.first(where: { $0.name == ent.layer })?.color ?? Color.text_primary
-                        let isOriginal = ent.layer.uppercased() == "ORIGINAL"
-                        let strokeColor: Color
-                        if isSelected {
-                            strokeColor = isOriginal ? Color.accent : baseColor
-                        } else if isHovered {
-                            strokeColor = isOriginal ? Color.accent.opacity(0.5) : baseColor.opacity(0.6)
-                        } else {
-                            strokeColor = baseColor
-                        }
-                        let strokeWidth = isSelected ? 1.8 : (isHovered ? 1.4 : 0.8)
-                        
-                        let dxOffset = isSelected ? gizmoDragOffset.width : 0.0
-                        let dyOffset = isSelected ? gizmoDragOffset.height : 0.0
-                        
-                        var path = SwiftUI.Path()
-                        if ent.type == "LINE", let s = ent.start, let e = ent.end {
-                            let p1 = toScreen(dx: s[0], dy: s[1], size: size, bounds: modelBounds)
-                            let p2 = toScreen(dx: e[0], dy: e[1], size: size, bounds: modelBounds)
-                            path.move(to: CGPoint(x: p1.x + dxOffset, y: p1.y + dyOffset))
-                            path.addLine(to: CGPoint(x: p2.x + dxOffset, y: p2.y + dyOffset))
-                            context.stroke(path, with: .color(strokeColor), lineWidth: strokeWidth)
-                        } else if ent.type == "CIRCLE", let center = ent.center, let radius = ent.radius {
-                            let sc = toScreen(dx: center[0], dy: center[1], size: size, bounds: modelBounds)
-                            let r = CGFloat(radius) * state.canvasScale
-                            let rect = CGRect(x: sc.x + dxOffset - r, y: sc.y + dyOffset - r, width: r * 2, height: r * 2)
-                            path.addEllipse(in: rect)
-                            context.stroke(path, with: .color(strokeColor), lineWidth: strokeWidth)
-                        } else if ent.type == "ARC", let center = ent.center, let radius = ent.radius,
-                                  let sa = ent.start_angle, let ea = ent.end_angle {
-                            let sc = toScreen(dx: center[0], dy: center[1], size: size, bounds: modelBounds)
-                            let r = CGFloat(radius) * state.canvasScale
-                            path.addArc(
-                                center: CGPoint(x: sc.x + dxOffset, y: sc.y + dyOffset),
-                                radius: r,
-                                startAngle: Angle(degrees: -sa),
-                                endAngle: Angle(degrees: -ea),
-                                clockwise: true
-                            )
-                            context.stroke(path, with: .color(strokeColor), lineWidth: strokeWidth)
-                        } else if let vertices = ent.vertices {
-                            if vertices.count >= 2 {
-                                let pStart = toScreen(dx: vertices[0][0], dy: vertices[0][1], size: size, bounds: modelBounds)
-                                path.move(to: CGPoint(x: pStart.x + dxOffset, y: pStart.y + dyOffset))
-                                for i in 1..<vertices.count {
-                                    let p = toScreen(dx: vertices[i][0], dy: vertices[i][1], size: size, bounds: modelBounds)
-                                    path.addLine(to: CGPoint(x: p.x + dxOffset, y: p.y + dyOffset))
-                                }
-                                if ent.closed == true {
-                                    path.closeSubpath()
-                                }
-                                context.stroke(path, with: .color(strokeColor), lineWidth: strokeWidth)
-                            }
-                        } else if ent.type == "TEXT", let textStr = ent.text, let start = ent.start {
-                            if state.isEditingText && state.editingTextHandle == ent.handle {
-                                continue
-                            }
-                            let sc = toScreen(dx: start[0], dy: start[1], size: size, bounds: modelBounds)
-                            let h = CGFloat(ent.height ?? 5.0) * state.canvasScale
-                            let resolvedText = context.resolve(Text(textStr).font(.system(size: h)).foregroundColor(strokeColor))
-                            context.draw(resolvedText, at: CGPoint(x: sc.x + dxOffset, y: sc.y + dyOffset), anchor: .bottomLeading)
-                        }
-                    }
-                    
-                    // Draw Live Preview Entities (Dashed Orange Lines)
-                    for ent in state.previewEntities {
-                        let strokeColor = Color.status_warn
-                        let strokeStyle = StrokeStyle(lineWidth: 1.2, lineCap: .round, lineJoin: .round, dash: [4, 4])
-                        
-                        var path = SwiftUI.Path()
-                        if ent.type == "LINE", let s = ent.start, let e = ent.end {
-                            let p1 = toScreen(dx: s[0], dy: s[1], size: size, bounds: modelBounds)
-                            let p2 = toScreen(dx: e[0], dy: e[1], size: size, bounds: modelBounds)
-                            path.move(to: p1)
-                            path.addLine(to: p2)
-                            context.stroke(path, with: .color(strokeColor), style: strokeStyle)
-                        } else if ent.type == "CIRCLE", let center = ent.center, let radius = ent.radius {
-                            let sc = toScreen(dx: center[0], dy: center[1], size: size, bounds: modelBounds)
-                            let r = CGFloat(radius) * state.canvasScale
-                            let rect = CGRect(x: sc.x - r, y: sc.y - r, width: r * 2, height: r * 2)
-                            path.addEllipse(in: rect)
-                            context.stroke(path, with: .color(strokeColor), style: strokeStyle)
-                        } else if ent.type == "ARC", let center = ent.center, let radius = ent.radius,
-                                  let sa = ent.start_angle, let ea = ent.end_angle {
-                            let sc = toScreen(dx: center[0], dy: center[1], size: size, bounds: modelBounds)
-                            let r = CGFloat(radius) * state.canvasScale
-                            path.addArc(
-                                center: sc,
-                                radius: r,
-                                startAngle: Angle(degrees: -sa),
-                                endAngle: Angle(degrees: -ea),
-                                clockwise: true
-                            )
-                            context.stroke(path, with: .color(strokeColor), style: strokeStyle)
-                        } else if let vertices = ent.vertices {
-                            if vertices.count >= 2 {
-                                let pStart = toScreen(dx: vertices[0][0], dy: vertices[0][1], size: size, bounds: modelBounds)
-                                path.move(to: pStart)
-                                for i in 1..<vertices.count {
-                                    let p = toScreen(dx: vertices[i][0], dy: vertices[i][1], size: size, bounds: modelBounds)
-                                    path.addLine(to: p)
-                                }
-                                if ent.closed == true {
-                                    path.closeSubpath()
-                                }
-                                context.stroke(path, with: .color(strokeColor), style: strokeStyle)
-                            }
-                        }
-                    }
-                    
-                    // Draw Locked Measurement Lines
-                    for measure in state.measurements {
-                        if measure.isAutoDimension {
-                            if let handle = measure.entityHandle, !state.selectedHandles.contains(handle) {
-                                continue
-                            }
-                        }
-                        
-                        let isSelected = state.selectedMeasurement?.id == measure.id
-                        let isMeasuringSelectedEntity = (measure.entityHandle != nil && state.selectedHandles.contains(measure.entityHandle!))
-                        let mDxOffset = isMeasuringSelectedEntity ? gizmoDragOffset.width : 0.0
-                        let mDyOffset = isMeasuringSelectedEntity ? gizmoDragOffset.height : 0.0
-                        
-                        let baseStartScreen = toScreen(dx: measure.start.x, dy: measure.start.y, size: size, bounds: modelBounds)
-                        let baseEndScreen = toScreen(dx: measure.end.x, dy: measure.end.y, size: size, bounds: modelBounds)
-                        let startScreen = CGPoint(x: baseStartScreen.x + mDxOffset, y: baseStartScreen.y + mDyOffset)
-                        let endScreen = CGPoint(x: baseEndScreen.x + mDxOffset, y: baseEndScreen.y + mDyOffset)
-                        
-                        var mPath = SwiftUI.Path()
-                        mPath.move(to: startScreen)
-                        mPath.addLine(to: endScreen)
-                        
-                        let color: Color
-                        let strokeStyle: StrokeStyle
-                        
-                        if isSelected {
-                            color = Color.white // Selected highlight
-                            strokeStyle = StrokeStyle(lineWidth: 2.5, lineCap: .round)
-                        } else if measure.isAutoDimension {
-                            color = Color.cyan // Auto dimension (Solid)
-                            strokeStyle = StrokeStyle(lineWidth: 1.5, lineCap: .round)
-                        } else {
-                            color = Color.orange // Manual measurement (Dotted)
-                            strokeStyle = StrokeStyle(lineWidth: 1.5, lineCap: .round, dash: [4, 4])
-                        }
-                        
-                        context.stroke(mPath, with: .color(color), style: strokeStyle)
-                        
-                        var dot1 = SwiftUI.Path()
-                        dot1.addEllipse(in: CGRect(x: startScreen.x - 4, y: startScreen.y - 4, width: 8, height: 8))
-                        context.fill(dot1, with: .color(color))
-                        
-                        var dot2 = SwiftUI.Path()
-                        dot2.addEllipse(in: CGRect(x: endScreen.x - 4, y: endScreen.y - 4, width: 8, height: 8))
-                        context.fill(dot2, with: .color(color))
-                        
-                        let midScreen = CGPoint(
-                            x: (startScreen.x + endScreen.x) / 2,
-                            y: (startScreen.y + endScreen.y) / 2
-                        )
-                        let labelText = String(format: "%.2f mm", measure.distanceMm)
-                        context.draw(
-                            Text(labelText)
-                                .font(.system(size: 10, weight: isSelected ? .black : .bold))
-                                .foregroundColor(color),
-                            at: CGPoint(x: midScreen.x, y: midScreen.y - 10),
-                            anchor: .center
-                        )
-                    }
-                    
-                    // Draw Live Measurement Line
-                    if state.currentTool == .measure, let startModel = state.activeMeasureStart {
-                        let startScreen = toScreen(dx: startModel.x, dy: startModel.y, size: size, bounds: modelBounds)
-                        var mPath = SwiftUI.Path()
-                        mPath.move(to: startScreen)
-                        mPath.addLine(to: mouseLocation)
-                        context.stroke(mPath, with: .color(Color.status_warn), style: StrokeStyle(lineWidth: 1.5, lineCap: .round, dash: [4, 4]))
-                        
-                        let endModel = toModel(point: mouseLocation, size: size, bounds: modelBounds)
-                        let dist = Double(hypot(startModel.x - endModel.x, startModel.y - endModel.y))
-                        let labelText = String(format: "%.2f mm", dist)
-                        
-                        let midScreen = CGPoint(
-                            x: (startScreen.x + mouseLocation.x) / 2,
-                            y: (startScreen.y + mouseLocation.y) / 2
-                        )
-                        context.draw(
-                            Text(labelText)
-                                .font(.system(size: 10, weight: .bold))
-                                .foregroundColor(.status_warn),
-                            at: CGPoint(x: midScreen.x, y: midScreen.y - 10),
-                            anchor: .center
-                        )
-                    }
-                    
-                    // Draw Sketch Tools Live Preview
-                    if state.currentTool == .sketchLine, let startModel = sketchStartPoint {
-                        let snapped = snappedMouseLocation(size: size, bounds: modelBounds)
-                        let endModel = snapped.point
-                        let startScreen = toScreen(dx: startModel.x, dy: startModel.y, size: size, bounds: modelBounds)
-                        let endScreen = toScreen(dx: endModel.x, dy: endModel.y, size: size, bounds: modelBounds)
-                        
-                        var path = SwiftUI.Path()
-                        path.move(to: startScreen)
-                        path.addLine(to: endScreen)
-                        context.stroke(path, with: .color(Color.accent), style: StrokeStyle(lineWidth: 1.5, dash: [4, 4]))
-                        
-                        let dist = Double(hypot(startModel.x - endModel.x, startModel.y - endModel.y))
-                        let labelText = String(format: "L: %.2f mm", dist)
-                        context.draw(Text(labelText).font(.system(size: 10, weight: .bold)).foregroundColor(.accent), at: CGPoint(x: endScreen.x, y: endScreen.y - 10), anchor: .center)
-                    } else if state.currentTool == .sketchCircle, let startModel = sketchStartPoint {
-                        let snapped = snappedMouseLocation(size: size, bounds: modelBounds)
-                        let endModel = snapped.point
-                        let startScreen = toScreen(dx: startModel.x, dy: startModel.y, size: size, bounds: modelBounds)
-                        let endScreen = toScreen(dx: endModel.x, dy: endModel.y, size: size, bounds: modelBounds)
-                        let rModel = Double(hypot(startModel.x - endModel.x, startModel.y - endModel.y))
-                        let rScreen = CGFloat(rModel) * state.canvasScale
-                        
-                        var path = SwiftUI.Path()
-                        path.addEllipse(in: CGRect(x: startScreen.x - rScreen, y: startScreen.y - rScreen, width: rScreen * 2, height: rScreen * 2))
-                        context.stroke(path, with: .color(Color.accent), style: StrokeStyle(lineWidth: 1.5, dash: [4, 4]))
-                        
-                        var radLine = SwiftUI.Path()
-                        radLine.move(to: startScreen)
-                        radLine.addLine(to: endScreen)
-                        context.stroke(radLine, with: .color(Color.accent.opacity(0.5)), lineWidth: 1.0)
-                        
-                        let labelText = String(format: "R: %.2f mm", rModel)
-                        context.draw(Text(labelText).font(.system(size: 10, weight: .bold)).foregroundColor(.accent), at: CGPoint(x: endScreen.x, y: endScreen.y - 10), anchor: .center)
-                    } else if state.currentTool == .sketchRectangle, let startModel = sketchStartPoint {
-                        let snapped = snappedMouseLocation(size: size, bounds: modelBounds)
-                        let endModel = snapped.point
-                        let p1 = toScreen(dx: startModel.x, dy: startModel.y, size: size, bounds: modelBounds)
-                        let p2 = toScreen(dx: endModel.x, dy: endModel.y, size: size, bounds: modelBounds)
-                        
-                        let pts = pointsOnRoundedRectangle(p1: startModel, p2: endModel, r: state.sketchFilletRadius)
-                        if pts.count >= 2 {
-                            var path = SwiftUI.Path()
-                            let pStart = toScreen(dx: pts[0].x, dy: pts[0].y, size: size, bounds: modelBounds)
-                            path.move(to: pStart)
-                            for i in 1..<pts.count {
-                                let p = toScreen(dx: pts[i].x, dy: pts[i].y, size: size, bounds: modelBounds)
-                                path.addLine(to: p)
-                            }
-                            path.closeSubpath()
-                            context.stroke(path, with: .color(Color.accent), style: StrokeStyle(lineWidth: 1.5, dash: [4, 4]))
-                        }
-                        
-                        let w = abs(endModel.x - startModel.x)
-                        let h = abs(endModel.y - startModel.y)
-                        let labelText = String(format: "W: %.2f | H: %.2f mm", w, h)
-                        context.draw(Text(labelText).font(.system(size: 10, weight: .bold)).foregroundColor(.accent), at: CGPoint(x: p2.x, y: p2.y - 10), anchor: .center)
-                    } else if state.currentTool == .sketchText, let startModel = sketchStartPoint {
-                        let snapped = snappedMouseLocation(size: size, bounds: modelBounds)
-                        let endModel = snapped.point
-                        let startScreen = toScreen(dx: startModel.x, dy: startModel.y, size: size, bounds: modelBounds)
-                        let endScreen = toScreen(dx: endModel.x, dy: endModel.y, size: size, bounds: modelBounds)
-                        
-                        let rect = CGRect(
-                            x: min(startScreen.x, endScreen.x),
-                            y: min(startScreen.y, endScreen.y),
-                            width: abs(startScreen.x - endScreen.x),
-                            height: abs(startScreen.y - endScreen.y)
-                        )
-                        var boxPath = SwiftUI.Path()
-                        boxPath.addRect(rect)
-                        context.stroke(boxPath, with: .color(Color.accent), style: StrokeStyle(lineWidth: 1.5, dash: [4, 4]))
-                        
-                        let w = abs(endModel.x - startModel.x)
-                        let h = abs(endModel.y - startModel.y)
-                        let labelText = String(format: "W: %.2f | H: %.2f mm", w, h)
-                        context.draw(Text(labelText).font(.system(size: 10, weight: .bold)).foregroundColor(.accent), at: CGPoint(x: endScreen.x, y: endScreen.y - 10), anchor: .center)
-                    }
-                    
-                    // Draw Snapping Hover Indicator
-                    if let hover = hoverCoords {
-                        let hoverScreen = toScreen(dx: Double(hover.x), dy: Double(hover.y), size: size, bounds: modelBounds)
-                        if let snap = getSnappedPoint(for: hoverScreen, size: size, bounds: modelBounds) {
-                            let snapPt = snap.snappedScreenPt
-                            let snapRect = CGRect(x: snapPt.x - 4, y: snapPt.y - 4, width: 8, height: 8)
-                            var snapPath = SwiftUI.Path()
-                            snapPath.addRect(snapRect)
-                            context.stroke(snapPath, with: .color(Color.orange), lineWidth: 2.0)
-                            
-                            let font = Font.system(size: 9, weight: .semibold)
-                            let text = context.resolve(Text(snap.type.rawValue).font(font).foregroundColor(.orange))
-                            context.draw(text, at: CGPoint(x: snapPt.x + 8, y: snapPt.y - 4), anchor: .leading)
-                        }
-                    }
-                    
-                    // Draw Selection Rectangle
-                    if let start = dragSelectionStart, let end = dragSelectionEnd {
-                        let rect = CGRect(
-                            x: min(start.x, end.x),
-                            y: min(start.y, end.y),
-                            width: abs(start.x - end.x),
-                            height: abs(start.y - end.y)
-                        )
-                        var boxPath = SwiftUI.Path()
-                        boxPath.addRect(rect)
-                        context.fill(boxPath, with: .color(Color.accent.opacity(0.12)))
-                        context.stroke(boxPath, with: .color(Color.accent), style: StrokeStyle(lineWidth: 1.0, dash: [4, 4]))
-                    }
-                    
-                    // Draw Fillet Control Arrow
-                    drawFilletControlArrow(&context, size: size, modelBounds: modelBounds)
-                    
-                    // Draw Offset Control Arrow (Perpendicular style)
-                    drawOffsetControlArrow(&context, size: size, modelBounds: modelBounds)
+                    var ctx = context
+                    renderCanvas(&ctx, size: size, modelBounds: modelBounds)
                 }
                 .background(Color.bg_base)
                 .contentShape(Rectangle())
@@ -530,170 +202,545 @@ struct DxfCanvasView: View {
                 }
             }
             .overlay(
-                ZStack {
-                    // Translation Gizmo Layer
-                    if let centerModel = selectionCenterModel {
-                        let centerScreen = toScreen(dx: Double(centerModel.x), dy: Double(centerModel.y), size: geo.size, bounds: modelBounds)
-                        
-                        ZStack {
-                            // X-axis constraint handle (Red Line & Arrow)
-                            Path { p in
-                                p.move(to: CGPoint(x: 0, y: 0))
-                                p.addLine(to: CGPoint(x: 50, y: 0))
-                            }
-                            .stroke(Color.red, lineWidth: 2)
-                            
-                            Image(systemName: "play.fill")
-                                .resizable()
-                                .foregroundColor(.red)
-                                .frame(width: 8, height: 10)
-                                .offset(x: 48)
-                                .gesture(
-                                    DragGesture(coordinateSpace: .global)
-                                        .onChanged { val in
-                                            gizmoDragOffset = CGSize(width: val.translation.width, height: 0)
-                                        }
-                                        .onEnded { val in
-                                            let dx = val.translation.width / state.canvasScale
-                                            state.translateSelected(dx: dx, dy: 0)
-                                            gizmoDragOffset = .zero
-                                        }
-                                )
-                            
-                            // Y-axis constraint handle (Green Line & Arrow)
-                            Path { p in
-                                p.move(to: CGPoint(x: 0, y: 0))
-                                p.addLine(to: CGPoint(x: 0, y: -50))
-                            }
-                            .stroke(Color.green, lineWidth: 2)
-                            
-                            Image(systemName: "play.fill")
-                                .resizable()
-                                .foregroundColor(.green)
-                                .frame(width: 8, height: 10)
-                                .rotationEffect(.degrees(-90))
-                                .offset(y: -48)
-                                .gesture(
-                                    DragGesture(coordinateSpace: .global)
-                                        .onChanged { val in
-                                            gizmoDragOffset = CGSize(width: 0, height: val.translation.height)
-                                        }
-                                        .onEnded { val in
-                                            let dy = -val.translation.height / state.canvasScale
-                                            state.translateSelected(dx: 0, dy: dy)
-                                            gizmoDragOffset = .zero
-                                        }
-                                )
-                            
-                            // Center free movement box (Yellow square)
-                            Rectangle()
-                                .fill(Color.yellow)
-                                .frame(width: 10, height: 10)
-                                .border(Color.black, width: 1)
-                                .gesture(
-                                    DragGesture(coordinateSpace: .global)
-                                        .onChanged { val in
-                                            gizmoDragOffset = val.translation
-                                        }
-                                        .onEnded { val in
-                                            let dx = val.translation.width / state.canvasScale
-                                            let dy = -val.translation.height / state.canvasScale
-                                            state.translateSelected(dx: dx, dy: dy)
-                                            gizmoDragOffset = .zero
-                                        }
-                                )
-                        }
-                        .offset(gizmoDragOffset)
-                        .position(centerScreen)
-                    }
-                    
-                    // Calibration Points visual markers
-                    if state.isCalibrationActive {
-                        ForEach(Array(state.calibrationPoints.enumerated()), id: \.offset) { idx, pt in
-                            Circle()
-                                .fill(Color.red)
-                                .frame(width: 8, height: 8)
-                                .position(pt)
-                                .overlay(
-                                    Text("Point \(idx + 1)")
-                                        .font(.caption)
-                                        .foregroundColor(.red)
-                                        .offset(y: -12)
-                                        .position(pt)
-                                )
-                        }
-                    }
-                }
+                canvasOverlays(size: geo.size, modelBounds: modelBounds)
             )
             .overlay(
-                Group {
-                    // Overlay Coordinate Display (Plasticity Style)
-                    if let coords = hoverCoords {
-                        HStack(spacing: 8) {
-                            Text("X: \(String(format: "%.2f", coords.x)) mm")
-                            Text("Y: \(String(format: "%.2f", coords.y)) mm")
-                        }
-                        .font(PlasticityFont.label)
-                        .foregroundColor(.text_secondary)
-                        .padding(6)
-                        .background(Color.bg_panel)
-                        .cornerRadius(4)
-                        .padding(12)
-                    }
-                },
-                alignment: .bottomLeading
+                coordinatesOverlay()
             )
             .overlay(
-                Group {
-                    if let editing = editingDimension {
-                        TextField("", text: $editingDimensionText, onCommit: {
-                            commitDimensionEdit()
-                        })
-                        .onSubmit {
-                            commitDimensionEdit()
-                        }
-                        .focused($isDimensionEditorFocused)
-                        .onKeyPress(.tab) {
-                            cycleDimension(size: geo.size, modelBounds: modelBounds)
-                            return .handled
-                        }
-                        .textFieldStyle(PlainTextFieldStyle())
-                        .font(.system(size: 11, weight: .bold))
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(Color.bg_panel)
-                        .foregroundColor(Color.text_primary)
-                        .cornerRadius(4)
-                        .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.accent, lineWidth: 1.5))
-                        .frame(width: 80)
-                        .position(editingDimensionScreenPos)
-                        .shadow(radius: 4)
-                    }
-                    
-                    if state.isEditingText {
-                        let sc = toScreen(dx: state.editingTextInsert.x, dy: state.editingTextInsert.y, size: geo.size, bounds: modelBounds)
-                        let fontSize = CGFloat(state.editingTextHeight) * state.canvasScale
-                        
-                        TextField("Enter text...", text: $state.editingTextString, onCommit: {
-                            state.commitTextEditing()
-                        })
-                        .textFieldStyle(PlainTextFieldStyle())
-                        .font(.system(size: max(8.0, fontSize)))
-                        .foregroundColor(Color.text_primary)
-                        .padding(4)
-                        .background(Color.bg_panel.opacity(0.85))
-                        .cornerRadius(4)
-                        .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.accent, lineWidth: 1.0))
-                        .frame(minWidth: 150)
-                        .position(sc)
-                        .focused($isTextEditorFocused)
-                        .onSubmit {
-                            state.commitTextEditing()
-                        }
-                    }
-                }
+                editingTextFieldsOverlay(size: geo.size, modelBounds: modelBounds)
             )
         }
+    }
+
+    @ViewBuilder
+    private func canvasOverlays(size viewSize: CGSize, modelBounds: CGRect) -> some View {
+        ZStack {
+            // Translation Gizmo Layer
+            if let centerModel = selectionCenterModel {
+                let centerScreen = toScreen(dx: Double(centerModel.x), dy: Double(centerModel.y), size: viewSize, bounds: modelBounds)
+                
+                ZStack {
+                    // X-axis constraint handle (Red Line & Arrow)
+                    Path { p in
+                        p.move(to: CGPoint(x: 0, y: 0))
+                        p.addLine(to: CGPoint(x: 70, y: 0))
+                    }
+                    .stroke(Color.red, lineWidth: 2)
+                    
+                    Image(systemName: "play.fill")
+                        .resizable()
+                        .foregroundColor(.red)
+                        .frame(width: 14, height: 16)
+                        .offset(x: 68)
+                        .gesture(
+                            DragGesture(coordinateSpace: .global)
+                                .onChanged { val in
+                                    gizmoDragOffset = CGSize(width: val.translation.width, height: 0)
+                                }
+                                .onEnded { val in
+                                    let dx = val.translation.width / state.canvasScale
+                                    state.translateSelected(dx: dx, dy: 0)
+                                    gizmoDragOffset = .zero
+                                }
+                        )
+                    
+                    // Y-axis constraint handle (Green Line & Arrow)
+                    Path { p in
+                        p.move(to: CGPoint(x: 0, y: 0))
+                        p.addLine(to: CGPoint(x: 0, y: -70))
+                    }
+                    .stroke(Color.green, lineWidth: 2)
+                    
+                    Image(systemName: "play.fill")
+                        .resizable()
+                        .foregroundColor(.green)
+                        .frame(width: 14, height: 16)
+                        .rotationEffect(.degrees(-90))
+                        .offset(y: -68)
+                        .gesture(
+                            DragGesture(coordinateSpace: .global)
+                                .onChanged { val in
+                                    gizmoDragOffset = CGSize(width: 0, height: val.translation.height)
+                                }
+                                .onEnded { val in
+                                    let dy = -val.translation.height / state.canvasScale
+                                    state.translateSelected(dx: 0, dy: dy)
+                                    gizmoDragOffset = .zero
+                                }
+                        )
+                    
+                    // Blue Rotation handle (Line & Circle)
+                    ZStack {
+                        Path { p in
+                            p.move(to: CGPoint(x: 0, y: 0))
+                            p.addLine(to: CGPoint(x: 0, y: -100))
+                        }
+                        .stroke(Color.blue, lineWidth: 2)
+                        
+                        Circle()
+                            .fill(Color.blue)
+                            .frame(width: 16, height: 16)
+                            .overlay(
+                                Circle()
+                                    .stroke(Color.white, lineWidth: 2)
+                            )
+                            .shadow(radius: 2)
+                            .offset(y: -100)
+                    }
+                    .rotationEffect(.degrees(gizmoDragRotation))
+                    .gesture(
+                        DragGesture(coordinateSpace: .global)
+                            .onChanged { val in
+                                isDraggingRotation = true
+                                let angleRad = atan2(Double(val.location.x - centerScreen.x), Double(-(val.location.y - centerScreen.y)))
+                                gizmoDragRotation = angleRad * 180.0 / .pi
+                            }
+                            .onEnded { val in
+                                isDraggingRotation = false
+                                let angleRad = atan2(Double(val.location.x - centerScreen.x), Double(-(val.location.y - centerScreen.y)))
+                                let angleDeg = angleRad * 180.0 / .pi
+                                state.rotateSelected(angleDegrees: angleDeg, center: [Double(centerModel.x), Double(centerModel.y)])
+                                gizmoDragRotation = 0.0
+                            }
+                    )
+                    
+                    // Center free movement box (Yellow square)
+                    Rectangle()
+                        .fill(Color.yellow)
+                        .frame(width: 16, height: 16)
+                        .border(Color.black, width: 1)
+                        .gesture(
+                            DragGesture(coordinateSpace: .global)
+                                .onChanged { val in
+                                    gizmoDragOffset = val.translation
+                                }
+                                .onEnded { val in
+                                    let dx = val.translation.width / state.canvasScale
+                                    let dy = -val.translation.height / state.canvasScale
+                                    state.translateSelected(dx: dx, dy: dy)
+                                    gizmoDragOffset = .zero
+                                }
+                        )
+                }
+                .offset(gizmoDragOffset)
+                .position(centerScreen)
+            }
+            
+            // Fillet Drag Handle Overlay
+            if let selected = state.selectedMeasurement,
+               let p1 = selected.rectP1,
+               let p2 = selected.rectP2 {
+                let filletRad = selected.filletRadius
+                let maxX = max(p1.x, p2.x)
+                let maxY = max(p1.y, p2.y)
+                let handleScreen = toScreen(dx: Double(maxX - filletRad), dy: Double(maxY - filletRad), size: viewSize, bounds: modelBounds)
+                
+                Circle()
+                    .fill(isHoveringFilletHandle || isDraggingFillet ? Color.accent.opacity(0.8) : Color.accent)
+                    .frame(width: 16, height: 16)
+                    .overlay(
+                        Circle()
+                            .stroke(Color.white, lineWidth: 2)
+                    )
+                    .shadow(radius: 2)
+                    .scaleEffect(isHoveringFilletHandle || isDraggingFillet ? 1.25 : 1.0)
+                    .animation(.spring(response: 0.2, dampingFraction: 0.6), value: isHoveringFilletHandle || isDraggingFillet)
+                    .position(handleScreen)
+                    .onHover { hovering in
+                        isHoveringFilletHandle = hovering
+                    }
+                    .gesture(
+                        DragGesture(coordinateSpace: .global)
+                            .onChanged { val in
+                                isDraggingFillet = true
+                                let modelPt = toModel(point: val.location, size: viewSize, bounds: modelBounds)
+                                let w = abs(p2.x - p1.x)
+                                let h = abs(p2.y - p1.y)
+                                let maxFillet = Double(min(w, h)) / 2.0
+                                let newFillet = 0.5 * (Double(maxX - modelPt.x) + Double(maxY - modelPt.y))
+                                let clampedFillet = max(0.0, min(maxFillet, newFillet))
+                                
+                                state.sketchFilletRadius = clampedFillet
+                                if let idx = state.measurements.firstIndex(where: { $0.id == selected.id }) {
+                                    state.measurements[idx].filletRadius = clampedFillet
+                                }
+                                state.selectedMeasurement?.filletRadius = clampedFillet
+                            }
+                            .onEnded { _ in
+                                isDraggingFillet = false
+                                state.updateSelectedRectangleFillet(newFillet: state.sketchFilletRadius)
+                            }
+                    )
+            }
+            
+            // Offset Drag Handle Overlay
+            if state.currentTool == .offset,
+               let handleInfo = getOffsetHandleInfo() {
+                let scaleDir: CGFloat = state.offsetSide == "left" ? 1.0 : -1.0
+                let handlePt = CGPoint(
+                    x: handleInfo.basePoint.x + handleInfo.normal.x * CGFloat(state.offsetDistance) * scaleDir,
+                    y: handleInfo.basePoint.y + handleInfo.normal.y * CGFloat(state.offsetDistance) * scaleDir
+                )
+                let handleScreen = toScreen(dx: Double(handlePt.x), dy: Double(handlePt.y), size: viewSize, bounds: modelBounds)
+                
+                Circle()
+                    .fill(isHoveringOffsetHandle || isDraggingOffset ? Color.status_warn.opacity(0.8) : Color.status_warn)
+                    .frame(width: 16, height: 16)
+                    .overlay(
+                        Circle()
+                            .stroke(Color.white, lineWidth: 2)
+                    )
+                    .shadow(radius: 2)
+                    .scaleEffect(isHoveringOffsetHandle || isDraggingOffset ? 1.25 : 1.0)
+                    .animation(.spring(response: 0.2, dampingFraction: 0.6), value: isHoveringOffsetHandle || isDraggingOffset)
+                    .position(handleScreen)
+                    .onHover { hovering in
+                        isHoveringOffsetHandle = hovering
+                    }
+                    .gesture(
+                        DragGesture(coordinateSpace: .global)
+                            .onChanged { val in
+                                isDraggingOffset = true
+                                let modelPt = toModel(point: val.location, size: viewSize, bounds: modelBounds)
+                                let vecX = modelPt.x - handleInfo.basePoint.x
+                                let vecY = modelPt.y - handleInfo.basePoint.y
+                                let proj = vecX * handleInfo.normal.x + vecY * handleInfo.normal.y
+                                state.offsetDistance = max(0.1, abs(proj))
+                                state.offsetSide = proj >= 0 ? "left" : "right"
+                            }
+                            .onEnded { _ in
+                                isDraggingOffset = false
+                                state.applyOffset()
+                            }
+                    )
+            }
+            
+            // Calibration Points visual markers
+            if state.isCalibrationActive {
+                ForEach(Array(state.calibrationPoints.enumerated()), id: \.offset) { idx, pt in
+                    Circle()
+                        .fill(Color.red)
+                        .frame(width: 8, height: 8)
+                        .position(pt)
+                        .overlay(
+                            Text("Point \(idx + 1)")
+                                .font(.caption)
+                                .foregroundColor(.red)
+                                .offset(y: -12)
+                                .position(pt)
+                        )
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func coordinatesOverlay() -> some View {
+        Group {
+            if let coords = hoverCoords {
+                HStack(spacing: 8) {
+                    Text("X: \(String(format: "%.2f", coords.x)) mm")
+                    Text("Y: \(String(format: "%.2f", coords.y)) mm")
+                }
+                .font(PlasticityFont.label)
+                .foregroundColor(.text_secondary)
+                .padding(6)
+                .background(Color.bg_panel)
+                .cornerRadius(4)
+                .padding(12)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func editingTextFieldsOverlay(size viewSize: CGSize, modelBounds: CGRect) -> some View {
+        @Bindable var state = state
+        Group {
+            if let editing = editingDimension {
+                TextField("", text: $editingDimensionText, onCommit: {
+                    commitDimensionEdit()
+                })
+                .onSubmit {
+                    commitDimensionEdit()
+                }
+                .focused($isDimensionEditorFocused)
+                .onKeyPress(.tab) {
+                    cycleDimension(size: viewSize, modelBounds: modelBounds)
+                    return .handled
+                }
+                .textFieldStyle(PlainTextFieldStyle())
+                .font(.system(size: 11, weight: .bold))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color.bg_panel)
+                .foregroundColor(Color.text_primary)
+                .cornerRadius(4)
+                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.accent, lineWidth: 1.5))
+                .frame(width: 80)
+                .position(editingDimensionScreenPos)
+                .shadow(radius: 4)
+            }
+            
+            if state.isEditingText {
+                let sc = toScreen(dx: state.editingTextInsert.x, dy: state.editingTextInsert.y, size: viewSize, bounds: modelBounds)
+                let fontSize = CGFloat(state.editingTextHeight) * state.canvasScale
+                
+                TextField("Enter text...", text: $state.editingTextString, onCommit: {
+                    state.commitTextEditing()
+                })
+                .textFieldStyle(PlainTextFieldStyle())
+                .font(.system(size: max(8.0, fontSize)))
+                .foregroundColor(Color.text_primary)
+                .padding(4)
+                .background(Color.bg_panel.opacity(0.85))
+                .cornerRadius(4)
+                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.accent, lineWidth: 1.0))
+                .frame(minWidth: 150)
+                .position(sc)
+                .focused($isTextEditorFocused)
+                .onSubmit {
+                    state.commitTextEditing()
+                }
+            }
+        }
+    }
+
+    private func renderCanvas(_ parentContext: inout GraphicsContext, size: CGSize, modelBounds: CGRect) {
+        var context = parentContext
+        defer { parentContext = context }
+        // Draw Grid
+        if state.gridVisible {
+            drawGrid(context: context, size: size, bounds: modelBounds)
+        }
+        
+        // Draw visual origin axes at (0,0)
+        let originScreen = toScreen(dx: 0.0, dy: 0.0, size: size, bounds: modelBounds)
+        var xAxisPath = SwiftUI.Path()
+        xAxisPath.move(to: CGPoint(x: 0, y: originScreen.y))
+        xAxisPath.addLine(to: CGPoint(x: size.width, y: originScreen.y))
+        context.stroke(xAxisPath, with: .color(Color.red.opacity(0.4)), lineWidth: 1.0)
+        
+        var yAxisPath = SwiftUI.Path()
+        yAxisPath.move(to: CGPoint(x: originScreen.x, y: 0))
+        yAxisPath.addLine(to: CGPoint(x: originScreen.x, y: size.height))
+        context.stroke(yAxisPath, with: .color(Color.green.opacity(0.4)), lineWidth: 1.0)
+        
+        // Draw Entities
+        for ent in state.entities {
+            let layerName: String = ent.layer
+            let matchedLayer = state.layers.first(where: { $0.name == layerName })
+            let layerVisible: Bool = matchedLayer?.visible ?? true
+            if !layerVisible { continue }
+            
+            let isSelected = state.selectedHandles.contains(ent.handle)
+            let isHovered = (state.hoveredHandle == ent.handle)
+            
+            let baseColor: Color = matchedLayer?.color ?? Color.text_primary
+            let isOriginal = layerName.uppercased() == "ORIGINAL"
+            let strokeColor: Color
+            if isSelected {
+                strokeColor = isOriginal ? Color.accent : baseColor
+            } else if isHovered {
+                strokeColor = isOriginal ? Color.accent.opacity(0.5) : baseColor.opacity(0.6)
+            } else {
+                strokeColor = baseColor
+            }
+            let strokeWidth = isSelected ? 1.8 : (isHovered ? 1.4 : 0.8)
+            
+            context.drawLayer { context in
+                if isSelected {
+                    let dxOffset = gizmoDragOffset.width
+                    let dyOffset = gizmoDragOffset.height
+                    context.translateBy(x: dxOffset, y: dyOffset)
+                    
+                    if let centerModel = selectionCenterModel {
+                        let centerScreen = toScreen(dx: Double(centerModel.x), dy: Double(centerModel.y), size: size, bounds: modelBounds)
+                        context.translateBy(x: centerScreen.x, y: centerScreen.y)
+                        context.rotate(by: Angle(degrees: gizmoDragRotation))
+                        context.translateBy(x: -centerScreen.x, y: -centerScreen.y)
+                    }
+                }
+                
+                drawEntity(ent, strokeColor: strokeColor, strokeWidth: strokeWidth, size: size, modelBounds: modelBounds, context: &context)
+            }
+        }
+        
+        // Draw Live Preview Entities (Dashed Orange Lines)
+        for ent in state.previewEntities {
+            let strokeColor = Color.status_warn
+            let strokeStyle = StrokeStyle(lineWidth: 1.2, lineCap: .round, lineJoin: .round, dash: [4, 4])
+            drawPreviewEntity(ent, strokeColor: strokeColor, strokeStyle: strokeStyle, size: size, modelBounds: modelBounds, context: &context)
+        }
+        
+        // Draw Locked Measurement Lines
+        for measure in state.measurements {
+            if measure.isAutoDimension {
+                if let handle = measure.entityHandle, !state.selectedHandles.contains(handle) {
+                    continue
+                }
+            }
+            
+            let isSelected = state.selectedMeasurement?.id == measure.id
+            let isMeasuringSelectedEntity = (measure.entityHandle != nil && state.selectedHandles.contains(measure.entityHandle!))
+            
+            context.drawLayer { context in
+                if isMeasuringSelectedEntity {
+                    let dxOffset = gizmoDragOffset.width
+                    let dyOffset = gizmoDragOffset.height
+                    context.translateBy(x: dxOffset, y: dyOffset)
+                    
+                    if let centerModel = selectionCenterModel {
+                        let centerScreen = toScreen(dx: Double(centerModel.x), dy: Double(centerModel.y), size: size, bounds: modelBounds)
+                        context.translateBy(x: centerScreen.x, y: centerScreen.y)
+                        context.rotate(by: Angle(degrees: gizmoDragRotation))
+                        context.translateBy(x: -centerScreen.x, y: -centerScreen.y)
+                    }
+                }
+                
+                drawMeasurement(measure, isSelected: isSelected, size: size, modelBounds: modelBounds, context: &context)
+            }
+        }
+        
+        // Draw Live Measurement Line
+        if state.currentTool == .measure, let startModel = state.activeMeasureStart {
+            let startScreen = toScreen(dx: startModel.x, dy: startModel.y, size: size, bounds: modelBounds)
+            var mPath = SwiftUI.Path()
+            mPath.move(to: startScreen)
+            mPath.addLine(to: mouseLocation)
+            context.stroke(mPath, with: .color(Color.status_warn), style: StrokeStyle(lineWidth: 1.5, lineCap: .round, dash: [4, 4]))
+            
+            let endModel = toModel(point: mouseLocation, size: size, bounds: modelBounds)
+            let dist = Double(hypot(startModel.x - endModel.x, startModel.y - endModel.y))
+            let labelText = String(format: "%.2f mm", dist)
+            
+            let midScreen = CGPoint(
+                x: (startScreen.x + mouseLocation.x) / 2,
+                y: (startScreen.y + mouseLocation.y) / 2
+            )
+            context.draw(
+                Text(labelText)
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.status_warn),
+                at: CGPoint(x: midScreen.x, y: midScreen.y - 10),
+                anchor: .center
+            )
+        }
+        
+        // Draw Sketch Tools Live Preview
+        if state.currentTool == .sketchLine, let startModel = sketchStartPoint {
+            let snapped = snappedMouseLocation(size: size, bounds: modelBounds)
+            let endModel = snapped.point
+            let startScreen = toScreen(dx: startModel.x, dy: startModel.y, size: size, bounds: modelBounds)
+            let endScreen = toScreen(dx: endModel.x, dy: endModel.y, size: size, bounds: modelBounds)
+            
+            var path = SwiftUI.Path()
+            path.move(to: startScreen)
+            path.addLine(to: endScreen)
+            context.stroke(path, with: .color(Color.accent), style: StrokeStyle(lineWidth: 1.5, dash: [4, 4]))
+            
+            let dist = Double(hypot(startModel.x - endModel.x, startModel.y - endModel.y))
+            let labelText = String(format: "L: %.2f mm", dist)
+            context.draw(Text(labelText).font(.system(size: 10, weight: .bold)).foregroundColor(.accent), at: CGPoint(x: endScreen.x, y: endScreen.y - 10), anchor: .center)
+        } else if state.currentTool == .sketchCircle, let startModel = sketchStartPoint {
+            let snapped = snappedMouseLocation(size: size, bounds: modelBounds)
+            let endModel = snapped.point
+            let startScreen = toScreen(dx: startModel.x, dy: startModel.y, size: size, bounds: modelBounds)
+            let endScreen = toScreen(dx: endModel.x, dy: endModel.y, size: size, bounds: modelBounds)
+            let rModel = Double(hypot(startModel.x - endModel.x, startModel.y - endModel.y))
+            let rScreen = CGFloat(rModel) * state.canvasScale
+            
+            var path = SwiftUI.Path()
+            path.addEllipse(in: CGRect(x: startScreen.x - rScreen, y: startScreen.y - rScreen, width: rScreen * 2, height: rScreen * 2))
+            context.stroke(path, with: .color(Color.accent), style: StrokeStyle(lineWidth: 1.5, dash: [4, 4]))
+            
+            var radLine = SwiftUI.Path()
+            radLine.move(to: startScreen)
+            radLine.addLine(to: endScreen)
+            context.stroke(radLine, with: .color(Color.accent.opacity(0.5)), lineWidth: 1.0)
+            
+            let labelText = String(format: "R: %.2f mm", rModel)
+            context.draw(Text(labelText).font(.system(size: 10, weight: .bold)).foregroundColor(.accent), at: CGPoint(x: endScreen.x, y: endScreen.y - 10), anchor: .center)
+        } else if state.currentTool == .sketchRectangle, let startModel = sketchStartPoint {
+            let snapped = snappedMouseLocation(size: size, bounds: modelBounds)
+            let endModel = snapped.point
+            let p1 = toScreen(dx: startModel.x, dy: startModel.y, size: size, bounds: modelBounds)
+            let p2 = toScreen(dx: endModel.x, dy: endModel.y, size: size, bounds: modelBounds)
+            
+            let pts = pointsOnRoundedRectangle(p1: startModel, p2: endModel, r: state.sketchFilletRadius)
+            if pts.count >= 2 {
+                var path = SwiftUI.Path()
+                let pStart = toScreen(dx: pts[0].x, dy: pts[0].y, size: size, bounds: modelBounds)
+                path.move(to: pStart)
+                for i in 1..<pts.count {
+                    let p = toScreen(dx: pts[i].x, dy: pts[i].y, size: size, bounds: modelBounds)
+                    path.addLine(to: p)
+                }
+                path.closeSubpath()
+                context.stroke(path, with: .color(Color.accent), style: StrokeStyle(lineWidth: 1.5, dash: [4, 4]))
+            }
+            
+            let w = abs(endModel.x - startModel.x)
+            let h = abs(endModel.y - startModel.y)
+            let labelText = String(format: "W: %.2f | H: %.2f mm", w, h)
+            context.draw(Text(labelText).font(.system(size: 10, weight: .bold)).foregroundColor(.accent), at: CGPoint(x: p2.x, y: p2.y - 10), anchor: .center)
+        } else if state.currentTool == .sketchText, let startModel = sketchStartPoint {
+            let snapped = snappedMouseLocation(size: size, bounds: modelBounds)
+            let endModel = snapped.point
+            let startScreen = toScreen(dx: startModel.x, dy: startModel.y, size: size, bounds: modelBounds)
+            let endScreen = toScreen(dx: endModel.x, dy: endModel.y, size: size, bounds: modelBounds)
+            
+            let rect = CGRect(
+                x: min(startScreen.x, endScreen.x),
+                y: min(startScreen.y, endScreen.y),
+                width: abs(startScreen.x - endScreen.x),
+                height: abs(startScreen.y - endScreen.y)
+            )
+            var boxPath = SwiftUI.Path()
+            boxPath.addRect(rect)
+            context.stroke(boxPath, with: .color(Color.accent), style: StrokeStyle(lineWidth: 1.5, dash: [4, 4]))
+            
+            let w = abs(endModel.x - startModel.x)
+            let h = abs(endModel.y - startModel.y)
+            let labelText = String(format: "W: %.2f | H: %.2f mm", w, h)
+            context.draw(Text(labelText).font(.system(size: 10, weight: .bold)).foregroundColor(.accent), at: CGPoint(x: endScreen.x, y: endScreen.y - 10), anchor: .center)
+        }
+        
+        // Draw Snapping Hover Indicator
+        if let hover = hoverCoords {
+            let hoverScreen = toScreen(dx: Double(hover.x), dy: Double(hover.y), size: size, bounds: modelBounds)
+            if let snap = getSnappedPoint(for: hoverScreen, size: size, bounds: modelBounds) {
+                let snapPt = snap.snappedScreenPt
+                let snapRect = CGRect(x: snapPt.x - 4, y: snapPt.y - 4, width: 8, height: 8)
+                var snapPath = SwiftUI.Path()
+                snapPath.addRect(snapRect)
+                context.stroke(snapPath, with: .color(Color.orange), lineWidth: 2.0)
+                
+                let font = Font.system(size: 9, weight: .semibold)
+                let text = context.resolve(Text(snap.type.rawValue).font(font).foregroundColor(.orange))
+                context.draw(text, at: CGPoint(x: snapPt.x + 8, y: snapPt.y - 4), anchor: .leading)
+            }
+        }
+        
+        // Draw Selection Rectangle
+        if let start = dragSelectionStart, let end = dragSelectionEnd {
+            let rect = CGRect(
+                x: min(start.x, end.x),
+                y: min(start.y, end.y),
+                width: abs(start.x - end.x),
+                height: abs(start.y - end.y)
+            )
+            var boxPath = SwiftUI.Path()
+            boxPath.addRect(rect)
+            context.fill(boxPath, with: .color(Color.accent.opacity(0.12)))
+            context.stroke(boxPath, with: .color(Color.accent), style: StrokeStyle(lineWidth: 1.0, dash: [4, 4]))
+        }
+        
+        // Draw Fillet Control Arrow
+        drawFilletControlArrow(&context, size: size, modelBounds: modelBounds)
+        
+        // Draw Offset Control Arrow (Perpendicular style)
+        drawOffsetControlArrow(&context, size: size, modelBounds: modelBounds)
     }
 
     private func handleDragChanged(val: DragGesture.Value, size: CGSize, modelBounds: CGRect) {
@@ -724,44 +771,11 @@ struct DxfCanvasView: View {
                 }
             }
             
-            // 2. Check if clicking near a rectangle fillet handle
-            var foundFilletHandle = false
-            if !foundEndpoint,
-               let selected = state.selectedMeasurement,
-               let p1 = selected.rectP1,
-               let p2 = selected.rectP2 {
-                let filletRad = selected.filletRadius
-                let maxX = max(p1.x, p2.x)
-                let maxY = max(p1.y, p2.y)
-                let handleScreen = toScreen(dx: Double(maxX - filletRad), dy: Double(maxY - filletRad), size: size, bounds: modelBounds)
-                if hypot(point.x - handleScreen.x, point.y - handleScreen.y) < 16.0 {
-                    foundFilletHandle = true
-                    isDraggingFillet = true
-                }
-            }
-            
-            // 3. Check if clicking near an offset arrow handle
-            var foundOffsetHandle = false
-            if !foundEndpoint && !foundFilletHandle,
-               state.currentTool == .offset,
-               let handleInfo = getOffsetHandleInfo() {
-                let scaleDir: CGFloat = state.offsetSide == "left" ? 1.0 : -1.0
-                let handlePt = CGPoint(
-                    x: handleInfo.basePoint.x + handleInfo.normal.x * CGFloat(state.offsetDistance) * scaleDir,
-                    y: handleInfo.basePoint.y + handleInfo.normal.y * CGFloat(state.offsetDistance) * scaleDir
-                )
-                let handleScreen = toScreen(dx: Double(handlePt.x), dy: Double(handlePt.y), size: size, bounds: modelBounds)
-                if hypot(point.x - handleScreen.x, point.y - handleScreen.y) < 16.0 {
-                    foundOffsetHandle = true
-                    isDraggingOffset = true
-                }
-            }
-            
-            // 4. Check if clicking on/near a selected entity to drag-translate it
+            // 2. Check if clicking on/near a selected entity to drag-translate it
             var clickedOnSelected = false
-            let hasNoActiveHandles: Bool = (!foundEndpoint) && (!foundFilletHandle) && (!foundOffsetHandle)
-            let isSelectTool: Bool = state.currentTool == .select
-            let hasSelectedHandles: Bool = !state.selectedHandles.isEmpty
+            let hasNoActiveHandles = !foundEndpoint
+            let isSelectTool = state.currentTool == .select
+            let hasSelectedHandles = !state.selectedHandles.isEmpty
             if hasNoActiveHandles && isSelectTool && hasSelectedHandles {
                 let clickedModelPt = toModel(point: point, size: size, bounds: modelBounds)
                 if let nearest = findNearestEntity(modelPt: clickedModelPt, maxDistanceScreen: 16.0, size: size, bounds: modelBounds),
@@ -772,8 +786,8 @@ struct DxfCanvasView: View {
                 }
             }
             
-            // 5. Default drag mode initialization
-            let shouldStartDefaultDrag: Bool = hasNoActiveHandles && (!clickedOnSelected)
+            // 3. Default drag mode initialization
+            let shouldStartDefaultDrag = hasNoActiveHandles && (!clickedOnSelected)
             if shouldStartDefaultDrag {
                 editingMeasureId = nil
                 isDraggingFillet = false
@@ -804,35 +818,7 @@ struct DxfCanvasView: View {
         self.hoverCoords = toModel(point: val.location, size: size, bounds: modelBounds)
         
         // Handle active dragging updates
-        if isDraggingFillet {
-            if let selected = state.selectedMeasurement,
-               let p1 = selected.rectP1,
-               let p2 = selected.rectP2 {
-                let maxX = max(p1.x, p2.x)
-                let maxY = max(p1.y, p2.y)
-                let modelPt = toModel(point: val.location, size: size, bounds: modelBounds)
-                let w = abs(p2.x - p1.x)
-                let h = abs(p2.y - p1.y)
-                let maxFillet = Double(min(w, h)) / 2.0
-                let newFillet = 0.5 * (Double(maxX - modelPt.x) + Double(maxY - modelPt.y))
-                let clampedFillet = max(0.0, min(maxFillet, newFillet))
-                
-                state.sketchFilletRadius = clampedFillet
-                if let idx = state.measurements.firstIndex(where: { $0.id == selected.id }) {
-                    state.measurements[idx].filletRadius = clampedFillet
-                }
-                state.selectedMeasurement?.filletRadius = clampedFillet
-            }
-        } else if isDraggingOffset {
-            if let handleInfo = getOffsetHandleInfo() {
-                let modelPt = toModel(point: val.location, size: size, bounds: modelBounds)
-                let vecX = modelPt.x - handleInfo.basePoint.x
-                let vecY = modelPt.y - handleInfo.basePoint.y
-                let proj = vecX * handleInfo.normal.x + vecY * handleInfo.normal.y
-                state.offsetDistance = max(0.1, abs(proj))
-                state.offsetSide = proj >= 0 ? "left" : "right"
-            }
-        } else if isDraggingSelection {
+        if isDraggingSelection {
             gizmoDragOffset = val.translation
         } else if let editId = editingMeasureId {
             let modelPt = toModel(point: val.location, size: size, bounds: modelBounds)
@@ -860,16 +846,6 @@ struct DxfCanvasView: View {
         isDragging = false
         if editingMeasureId != nil {
             editingMeasureId = nil
-            return
-        }
-        if isDraggingFillet {
-            isDraggingFillet = false
-            state.updateSelectedRectangleFillet(newFillet: state.sketchFilletRadius)
-            return
-        }
-        if isDraggingOffset {
-            isDraggingOffset = false
-            state.applyOffset()
             return
         }
         if isDraggingSelection {
@@ -1118,14 +1094,6 @@ struct DxfCanvasView: View {
         linePath.addLine(to: handleScreen)
         context.stroke(linePath, with: .color(Color.accent), lineWidth: 1.5)
         
-        var handlePath = SwiftUI.Path()
-        handlePath.addEllipse(in: CGRect(x: handleScreen.x - 6, y: handleScreen.y - 6, width: 12, height: 12))
-        context.fill(handlePath, with: .color(Color.accent))
-        
-        var borderPath = SwiftUI.Path()
-        borderPath.addEllipse(in: CGRect(x: handleScreen.x - 6, y: handleScreen.y - 6, width: 12, height: 12))
-        context.stroke(borderPath, with: .color(Color.white), lineWidth: 1.5)
-        
         if isDraggingFillet {
             let pts = pointsOnRoundedRectangle(p1: p1, p2: p2, r: state.sketchFilletRadius)
             if pts.count >= 2 {
@@ -1184,10 +1152,6 @@ struct DxfCanvasView: View {
             arrowPath.closeSubpath()
             context.fill(arrowPath, with: .color(Color.status_warn))
         }
-        
-        var handlePath = SwiftUI.Path()
-        handlePath.addEllipse(in: CGRect(x: handleScreen.x - 4, y: handleScreen.y - 4, width: 8, height: 8))
-        context.fill(handlePath, with: .color(Color.white))
         
         if isDraggingOffset {
             let strokeColor = Color.status_warn
@@ -1897,6 +1861,149 @@ struct DxfCanvasView: View {
             }
             editingDimension = nil
         }
+    }
+
+    private func drawEntity(_ ent: DXFEntity, strokeColor: Color, strokeWidth: Double, size: CGSize, modelBounds: CGRect, context: inout GraphicsContext) {
+        var path = SwiftUI.Path()
+        if ent.type == "LINE", let s = ent.start, let e = ent.end {
+            let p1 = toScreen(dx: s[0], dy: s[1], size: size, bounds: modelBounds)
+            let p2 = toScreen(dx: e[0], dy: e[1], size: size, bounds: modelBounds)
+            path.move(to: p1)
+            path.addLine(to: p2)
+            context.stroke(path, with: .color(strokeColor), lineWidth: strokeWidth)
+        } else if ent.type == "CIRCLE", let center = ent.center, let radius = ent.radius {
+            let sc = toScreen(dx: center[0], dy: center[1], size: size, bounds: modelBounds)
+            let r = CGFloat(radius) * state.canvasScale
+            let rect = CGRect(x: sc.x - r, y: sc.y - r, width: r * 2, height: r * 2)
+            path.addEllipse(in: rect)
+            context.stroke(path, with: .color(strokeColor), lineWidth: strokeWidth)
+        } else if ent.type == "ARC", let center = ent.center, let radius = ent.radius,
+                  let sa = ent.start_angle, let ea = ent.end_angle {
+            let sc = toScreen(dx: center[0], dy: center[1], size: size, bounds: modelBounds)
+            let r = CGFloat(radius) * state.canvasScale
+            path.addArc(
+                center: sc,
+                radius: r,
+                startAngle: Angle(degrees: -sa),
+                endAngle: Angle(degrees: -ea),
+                clockwise: true
+            )
+            context.stroke(path, with: .color(strokeColor), lineWidth: strokeWidth)
+        } else if let vertices = ent.vertices {
+            if vertices.count >= 2 {
+                let pStart = toScreen(dx: vertices[0][0], dy: vertices[0][1], size: size, bounds: modelBounds)
+                path.move(to: pStart)
+                for i in 1..<vertices.count {
+                    let p = toScreen(dx: vertices[i][0], dy: vertices[i][1], size: size, bounds: modelBounds)
+                    path.addLine(to: p)
+                }
+                if ent.closed == true {
+                    path.closeSubpath()
+                }
+                context.stroke(path, with: .color(strokeColor), lineWidth: strokeWidth)
+            }
+        } else if ent.type == "TEXT", let textStr = ent.text, let start = ent.start {
+            if state.isEditingText && state.editingTextHandle == ent.handle {
+                // Editing text is handled inline by text editor overlay
+            } else {
+                let sc = toScreen(dx: start[0], dy: start[1], size: size, bounds: modelBounds)
+                let baseHeight: Double = ent.height ?? 5.0
+                let scale: CGFloat = state.canvasScale
+                let h: CGFloat = CGFloat(baseHeight) * scale
+                let textFont: Font = .system(size: h)
+                let uiText: Text = Text(textStr).font(textFont).foregroundColor(strokeColor)
+                let resolvedText = context.resolve(uiText)
+                context.draw(resolvedText, at: sc, anchor: .bottomLeading)
+            }
+        }
+    }
+
+    private func drawPreviewEntity(_ ent: DXFEntity, strokeColor: Color, strokeStyle: StrokeStyle, size: CGSize, modelBounds: CGRect, context: inout GraphicsContext) {
+        var path = SwiftUI.Path()
+        if ent.type == "LINE", let s = ent.start, let e = ent.end {
+            let p1 = toScreen(dx: s[0], dy: s[1], size: size, bounds: modelBounds)
+            let p2 = toScreen(dx: e[0], dy: e[1], size: size, bounds: modelBounds)
+            path.move(to: p1)
+            path.addLine(to: p2)
+            context.stroke(path, with: .color(strokeColor), style: strokeStyle)
+        } else if ent.type == "CIRCLE", let center = ent.center, let radius = ent.radius {
+            let sc = toScreen(dx: center[0], dy: center[1], size: size, bounds: modelBounds)
+            let r = CGFloat(radius) * state.canvasScale
+            let rect = CGRect(x: sc.x - r, y: sc.y - r, width: r * 2, height: r * 2)
+            path.addEllipse(in: rect)
+            context.stroke(path, with: .color(strokeColor), style: strokeStyle)
+        } else if ent.type == "ARC", let center = ent.center, let radius = ent.radius,
+                  let sa = ent.start_angle, let ea = ent.end_angle {
+            let sc = toScreen(dx: center[0], dy: center[1], size: size, bounds: modelBounds)
+            let r = CGFloat(radius) * state.canvasScale
+            path.addArc(
+                center: sc,
+                radius: r,
+                startAngle: Angle(degrees: -sa),
+                endAngle: Angle(degrees: -ea),
+                clockwise: true
+            )
+            context.stroke(path, with: .color(strokeColor), style: strokeStyle)
+        } else if let vertices = ent.vertices {
+            if vertices.count >= 2 {
+                let pStart = toScreen(dx: vertices[0][0], dy: vertices[0][1], size: size, bounds: modelBounds)
+                path.move(to: pStart)
+                for i in 1..<vertices.count {
+                    let p = toScreen(dx: vertices[i][0], dy: vertices[i][1], size: size, bounds: modelBounds)
+                    path.addLine(to: p)
+                }
+                if ent.closed == true {
+                    path.closeSubpath()
+                }
+                context.stroke(path, with: .color(strokeColor), style: strokeStyle)
+            }
+        }
+    }
+
+    private func drawMeasurement(_ measure: MeasurementLine, isSelected: Bool, size: CGSize, modelBounds: CGRect, context: inout GraphicsContext) {
+        let startScreen = toScreen(dx: measure.start.x, dy: measure.start.y, size: size, bounds: modelBounds)
+        let endScreen = toScreen(dx: measure.end.x, dy: measure.end.y, size: size, bounds: modelBounds)
+        
+        var mPath = SwiftUI.Path()
+        mPath.move(to: startScreen)
+        mPath.addLine(to: endScreen)
+        
+        let color: Color
+        let strokeStyle: StrokeStyle
+        
+        if isSelected {
+            color = Color.white // Selected highlight
+            strokeStyle = StrokeStyle(lineWidth: 2.5, lineCap: .round)
+        } else if measure.isAutoDimension {
+            color = Color.cyan // Auto dimension (Solid)
+            strokeStyle = StrokeStyle(lineWidth: 1.5, lineCap: .round)
+        } else {
+            color = Color.orange // Manual measurement (Dotted)
+            strokeStyle = StrokeStyle(lineWidth: 1.5, lineCap: .round, dash: [4, 4])
+        }
+        
+        context.stroke(mPath, with: .color(color), style: strokeStyle)
+        
+        var dot1 = SwiftUI.Path()
+        dot1.addEllipse(in: CGRect(x: startScreen.x - 4, y: startScreen.y - 4, width: 8, height: 8))
+        context.fill(dot1, with: .color(color))
+        
+        var dot2 = SwiftUI.Path()
+        dot2.addEllipse(in: CGRect(x: endScreen.x - 4, y: endScreen.y - 4, width: 8, height: 8))
+        context.fill(dot2, with: .color(color))
+        
+        let midScreen = CGPoint(
+            x: (startScreen.x + endScreen.x) / 2,
+            y: (startScreen.y + endScreen.y) / 2
+        )
+        let labelText = String(format: "%.2f mm", measure.distanceMm)
+        context.draw(
+            Text(labelText)
+                .font(.system(size: 10, weight: isSelected ? .black : .bold))
+                .foregroundColor(color),
+            at: CGPoint(x: midScreen.x, y: midScreen.y - 10),
+            anchor: .center
+        )
     }
 }
 

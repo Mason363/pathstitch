@@ -140,6 +140,44 @@ struct DXFEntity: Identifiable, Codable, Equatable, Hashable {
             height: height
         )
     }
+
+    func rotated(angleDegrees: Double, centerPt: [Double]) -> DXFEntity {
+        let angleRad = angleDegrees * .pi / 180.0
+        let cosA = cos(angleRad)
+        let sinA = sin(angleRad)
+        let cx = centerPt[0]
+        let cy = centerPt[1]
+        
+        func rotPt(_ pt: [Double]) -> [Double] {
+            guard pt.count >= 2 else { return pt }
+            let x = pt[0]
+            let y = pt[1]
+            let rx = cx + (x - cx) * cosA - (y - cy) * sinA
+            let ry = cy + (x - cx) * sinA + (y - cy) * cosA
+            if pt.count > 2 {
+                return [rx, ry, pt[2]]
+            } else {
+                return [rx, ry]
+            }
+        }
+        
+        return DXFEntity(
+            handle: handle,
+            type: type,
+            layer: layer,
+            color: color,
+            start: start.map { rotPt($0) },
+            end: end.map { rotPt($0) },
+            center: center.map { rotPt($0) },
+            radius: radius,
+            start_angle: start_angle.map { $0 + angleDegrees },
+            end_angle: end_angle.map { $0 + angleDegrees },
+            vertices: vertices.map { pts in pts.map { rotPt($0) } },
+            closed: closed,
+            text: text,
+            height: height
+        )
+    }
 }
 
 struct DXFLayer: Identifiable, Hashable {
@@ -2639,6 +2677,94 @@ class AppState {
         
         self.reconcileTask = task
     }
+
+    func rotateSelected(angleDegrees: Double, center: [Double]) {
+        guard let url = currentFilePath, !selectedHandles.isEmpty else { return }
+        saveToHistory()
+        
+        let angleRad = angleDegrees * .pi / 180.0
+        let cosA = cos(angleRad)
+        let sinA = sin(angleRad)
+        let cx = center[0]
+        let cy = center[1]
+        
+        func rotPt(_ pt: CGPoint) -> CGPoint {
+            let dx = pt.x - cx
+            let dy = pt.y - cy
+            let rx = cx + dx * cosA - dy * sinA
+            let ry = cy + dx * sinA + dy * cosA
+            return CGPoint(x: rx, y: ry)
+        }
+        
+        // 1. Optimistic in-memory update for entities
+        self.entities = self.entities.map { entity in
+            if self.selectedHandles.contains(entity.handle) {
+                return entity.rotated(angleDegrees: angleDegrees, centerPt: center)
+            } else {
+                return entity
+            }
+        }
+        
+        // 2. Optimistic in-memory update for measurements
+        for idx in 0..<self.measurements.count {
+            if let handle = self.measurements[idx].entityHandle, self.selectedHandles.contains(handle) {
+                var m = self.measurements[idx]
+                m.start = rotPt(m.start)
+                m.end = rotPt(m.end)
+                if let p1 = m.rectP1 {
+                    m.rectP1 = rotPt(p1)
+                }
+                if let p2 = m.rectP2 {
+                    m.rectP2 = rotPt(p2)
+                }
+                self.measurements[idx] = m
+            }
+        }
+        
+        self.hasUnsavedChanges = true
+        logEntries.append(LogEntry(action: "Rotate Entities", details: "Rotated selected entities by angle: \(angleDegrees) around center: \(center)"))
+        
+        // 3. Asynchronous background reconciliation to disk
+        let selectedHandlesSnapshot = self.selectedHandles
+        let activeDxfURL = sessionTempDirectory.appendingPathComponent("active.dxf")
+        
+        let task = Task<Void, Never> {
+            // Wait for any running reconcileTask to finish first
+            await reconcileBufferIfNeeded()
+            
+            do {
+                _ = try await PythonBridge.shared.run(
+                    module: "dxf_ops",
+                    op: "rotate_entities",
+                    args: [
+                        "input": url.path,
+                        "output": activeDxfURL.path,
+                        "handles": Array(selectedHandlesSnapshot),
+                        "angle": angleDegrees,
+                        "center": center
+                    ]
+                )
+                await MainActor.run {
+                    self.currentFilePath = activeDxfURL
+                }
+            } catch {
+                // Background rotation failed; the in-memory state is still correct.
+                print("Background rotation failed: \(error)")
+            }
+        }
+        
+        self.reconcileTask = task
+    }
+
+    func deleteSelectedMeasurement() {
+        guard let selected = selectedMeasurement else { return }
+        saveToHistory()
+        measurements.removeAll { $0.id == selected.id }
+        selectedMeasurement = nil
+        hasUnsavedChanges = true
+        logAction("Delete Measurement", details: "Deleted selected measurement line")
+    }
+
 
     func applyDashedCreases() {
         guard let url = currentFilePath, !selectedHandles.isEmpty else { return }

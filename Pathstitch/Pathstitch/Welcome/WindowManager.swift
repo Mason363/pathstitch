@@ -149,7 +149,7 @@ class WindowManager: NSObject, NSApplicationDelegate {
     private func openDocumentWindow(with state: AppState) {
         let contentView = ContentView(state: state)
         let hostingController = NSHostingController(rootView: contentView)
-        let window = NSWindow(contentViewController: hostingController)
+        let window = PathstitchDocumentWindow(contentViewController: hostingController, appState: state)
         
         window.setContentSize(NSSize(width: 1200, height: 800))
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
@@ -225,5 +225,86 @@ class DocumentWindowDelegate: NSObject, NSWindowDelegate {
         if let window = window {
             WindowManager.shared.removeDocumentWindow(window)
         }
+    }
+}
+
+class PathstitchDocumentWindow: NSWindow {
+    let appState: AppState
+    private var preSpaceTool: TwoDTool? = nil
+    
+    init(contentViewController: NSViewController, appState: AppState) {
+        self.appState = appState
+        super.init(contentViewController: contentViewController)
+    }
+    
+    override func sendEvent(_ event: NSEvent) {
+        // If editing text (e.g. in a text field), bypass key intercepts to allow normal typing
+        if let responder = firstResponder,
+           responder.isKind(of: NSText.self) || responder.isKind(of: NSTextView.self) {
+            super.sendEvent(event)
+            return
+        }
+        
+        // Spacebar Panning (Photoshop style)
+        if event.keyCode == 49 { // Spacebar
+            if event.type == .keyDown {
+                if !event.isARepeat {
+                    if appState.currentTool != .pan {
+                        preSpaceTool = appState.currentTool
+                        appState.currentTool = .pan
+                    }
+                }
+                return
+            } else if event.type == .keyUp {
+                if let oldTool = preSpaceTool {
+                    appState.currentTool = oldTool
+                    preSpaceTool = nil
+                }
+                return
+            }
+        }
+        
+        if event.type == .keyDown {
+            // Check for Delete / Backspace keys (Backspace is 51, Delete/Forward Delete is 117)
+            if event.keyCode == 51 || event.keyCode == 117 {
+                if appState.selectedMeasurement != nil {
+                    appState.deleteSelectedMeasurement()
+                    return
+                } else if !appState.selectedHandles.isEmpty {
+                    appState.deleteSelectedEntities()
+                    return
+                }
+            }
+            
+            // Only process shortcuts when no modifier key (Cmd/Opt/Ctrl) is pressed
+            let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            if modifiers.isEmpty || modifiers == .capsLock {
+                if let chars = event.charactersIgnoringModifiers?.lowercased(), chars.count == 1 {
+                    switch chars {
+                    case "v":
+                        appState.currentTool = .select
+                        return
+                    case "h":
+                        appState.currentTool = .pan
+                        return
+                    case "o":
+                        appState.currentTool = .offset
+                        return
+                    case "s":
+                        appState.currentTool = .addHoles
+                        return
+                    case "j":
+                        appState.currentTool = .cleanup
+                        return
+                    case "m":
+                        appState.currentTool = .measure
+                    default:
+                        break
+                    }
+                }
+            }
+        }
+        
+        super.sendEvent(event)
     }
 }
