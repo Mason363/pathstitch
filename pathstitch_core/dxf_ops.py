@@ -984,11 +984,15 @@ def translate_to_positive_quadrant(doc, target_min: float = 10.0):
         
     dx = target_min - min_x
     dy = target_min - min_y
-    
+    translate_doc(doc, dx, dy)
+
+
+def translate_doc(doc, dx: float, dy: float):
+    """Translates every modelspace entity in `doc` by (dx, dy). Shared by the
+    positive-quadrant normaliser and the multi-file distribute importer."""
     if abs(dx) < 1e-4 and abs(dy) < 1e-4:
         return
-        
-    # Translate all entities
+    msp = doc.modelspace()
     for ent in msp:
         if ent.dxftype() == "LINE":
             ent.dxf.start = (ent.dxf.start.x + dx, ent.dxf.start.y + dy)
@@ -1013,6 +1017,74 @@ def translate_to_positive_quadrant(doc, target_min: float = 10.0):
                 ent.fit_points = [(p[0]+dx, p[1]+dy, p[2] if len(p) > 2 else 0.0) for p in ent.fit_points]
         elif ent.dxftype() == "TEXT":
             ent.dxf.insert = (ent.dxf.insert.x + dx, ent.dxf.insert.y + dy)
+
+
+def op_import_distribute(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Merges several DXF files into `primary`, laying them out side by side so
+    they never overlap (MAS-13). Each secondary is placed to the right of the
+    previous one (and to the right of `primary`'s existing geometry), aligned to
+    a common baseline, separated by `gap` mm."""
+    primary_path = args.get("primary")
+    output_path = args.get("output")
+    secondaries = args.get("secondaries", [])
+    gap = float(args.get("gap", 20.0))
+
+    if not primary_path or not os.path.exists(primary_path):
+        return {"status": "error", "message": f"Primary file not found: {primary_path}"}
+    if not output_path:
+        return {"status": "error", "message": "Output path must be specified."}
+
+    try:
+        primary_doc = ezdxf.readfile(primary_path)
+        primary_msp = primary_doc.modelspace()
+
+        # Start placing to the right of whatever already exists on the canvas.
+        pbounds = get_entities_bounds(primary_msp, [])
+        if pbounds:
+            cursor_x = pbounds[2] + gap
+            baseline_y = pbounds[1]
+        else:
+            cursor_x = 10.0
+            baseline_y = 10.0
+
+        merged = 0
+        for sec_path in secondaries:
+            if not sec_path or not os.path.exists(sec_path):
+                continue
+            try:
+                sec_doc = ezdxf.readfile(sec_path)
+            except Exception:
+                continue
+            sec_msp = sec_doc.modelspace()
+
+            sbounds = get_entities_bounds(sec_msp, [])
+            if sbounds:
+                s_min_x, s_min_y, s_max_x, s_max_y = sbounds
+                translate_doc(sec_doc, cursor_x - s_min_x, baseline_y - s_min_y)
+                width = s_max_x - s_min_x
+            else:
+                width = 0.0
+
+            # Merge layers (Layer attributes live under `.dxf`, cf. Rule 8).
+            for layer in sec_doc.layers:
+                layer_name = layer.dxf.name
+                if layer_name not in primary_doc.layers:
+                    primary_doc.layers.new(layer_name, dxfattribs={"color": layer.dxf.color})
+
+            for ent in sec_msp:
+                try:
+                    primary_msp.add_foreign_entity(ent)
+                except Exception:
+                    pass
+
+            cursor_x += width + gap
+            merged += 1
+
+        primary_doc.saveas(output_path)
+        return {"status": "ok", "data": {"merged": merged}}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to distribute import: {str(e)}"}
+
 
 def op_normalize_dxf(args: Dict[str, Any]) -> Dict[str, Any]:
     input_path = args.get("input")
@@ -2277,6 +2349,38 @@ def op_new_dxf(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"status": "error", "message": f"Failed to create new DXF: {str(e)}"}
 
 
+# Module-level dispatch table so both the CLI (`main`) and the persistent
+# worker (`pathstitch_core.worker`) share one source of truth for op routing.
+OPERATIONS = {
+    "list_entities": op_list_entities,
+    "offset_lines": op_offset_lines,
+    "add_holes": op_add_holes,
+    "cleanup": op_cleanup,
+    "export_svg": op_export_svg,
+    "chain_select": op_chain_select,
+    "add_entity": op_add_entity,
+    "offset_bbox": op_offset_bbox,
+    "update_entity": op_update_entity,
+    "set_layer": op_set_layer,
+    "import_svg": op_import_svg,
+    "export_pdf": op_export_pdf,
+    "import_pdf": op_import_pdf,
+    "trace_raster": op_trace_raster,
+    "translate_entities": op_translate_entities,
+    "append_dxf": op_append_dxf,
+    "import_distribute": op_import_distribute,
+    "normalize_dxf": op_normalize_dxf,
+    "export_dxf": op_export_dxf,
+    "add_dashed_creases": op_add_dashed_creases,
+    "add_glue_tabs": op_add_glue_tabs,
+    "pattern_grid": op_pattern_grid,
+    "pattern_path": op_pattern_path,
+    "add_text": op_add_text,
+    "delete_entities": op_delete_entities,
+    "new_dxf": op_new_dxf,
+}
+
+
 def main() -> None:
     """CLI entry point for JSON subprocess interactions."""
     parser = argparse.ArgumentParser(description="Pathstitch DXF operations CLI tool.")
@@ -2299,40 +2403,12 @@ def main() -> None:
     op = config.get("op")
     op_args = config.get("args", {})
 
-    operations = {
-        "list_entities": op_list_entities,
-        "offset_lines": op_offset_lines,
-        "add_holes": op_add_holes,
-        "cleanup": op_cleanup,
-        "export_svg": op_export_svg,
-        "chain_select": op_chain_select,
-        "add_entity": op_add_entity,
-        "offset_bbox": op_offset_bbox,
-        "update_entity": op_update_entity,
-        "set_layer": op_set_layer,
-        "import_svg": op_import_svg,
-        "export_pdf": op_export_pdf,
-        "import_pdf": op_import_pdf,
-        "trace_raster": op_trace_raster,
-        "translate_entities": op_translate_entities,
-        "append_dxf": op_append_dxf,
-        "normalize_dxf": op_normalize_dxf,
-        "export_dxf": op_export_dxf,
-        "add_dashed_creases": op_add_dashed_creases,
-        "add_glue_tabs": op_add_glue_tabs,
-        "pattern_grid": op_pattern_grid,
-        "pattern_path": op_pattern_path,
-        "add_text": op_add_text,
-        "delete_entities": op_delete_entities,
-        "new_dxf": op_new_dxf
-    }
-
-    if op not in operations:
+    if op not in OPERATIONS:
         print(json.dumps({"status": "error", "message": f"Unknown operation: {op}"}))
         sys.exit(1)
 
     try:
-        result = operations[op](op_args)
+        result = OPERATIONS[op](op_args)
         print(json.dumps(result))
     except Exception as e:
         print(json.dumps({"status": "error", "message": f"Operation failed: {str(e)}"}))

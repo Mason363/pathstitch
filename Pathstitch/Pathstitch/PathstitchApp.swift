@@ -56,7 +56,8 @@ struct PathstitchApp: App {
                 Button("Save Project") {
                     if let state = NSApp.activeAppState {
                         if let current = state.currentProjectPath {
-                            state.saveProject(to: current)
+                            // Flush optimistic in-memory edits, then persist (MAS-21).
+                            state.reconcileThenSave(to: current)
                         } else {
                             state.saveProjectWithDialog()
                         }

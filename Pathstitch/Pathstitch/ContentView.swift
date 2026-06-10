@@ -299,7 +299,8 @@ struct ContentView: View {
     
     private func saveProject() {
         if let current = state.currentProjectPath {
-            state.saveProject(to: current)
+            // Flush optimistic in-memory edits, then persist (MAS-21).
+            state.reconcileThenSave(to: current)
         } else {
             state.saveProjectWithDialog()
         }
@@ -1820,7 +1821,11 @@ extension ContentView {
                 
                 // Main 2D Viewport
                 ZStack {
-                    if state.svgContent != nil || state.refImage != nil {
+                    // A blank/empty document is a first-class, editable canvas
+                    // (MAS-8 / MAS-9 / MAS-49): show the canvas whenever a working
+                    // document exists, not only once geometry has been rendered.
+                    // The drop-zone is a fallback for the no-document state only.
+                    if state.currentFilePath != nil || state.svgContent != nil || state.refImage != nil {
                         DxfCanvasView(state: state)
                     } else {
                         // Empty State Viewport (Plasticity Style)
@@ -2165,18 +2170,13 @@ extension ContentView {
                 Text("MODE: \(state.activeMode == .twoD ? "2D DXF EDITOR" : "3D STEP IMPORTER")")
                     .font(PlasticityFont.label)
                     .foregroundColor(Color.accent)
-                
+
                 Spacer()
-                
-                if let fileUrl = state.currentFilePath {
-                    Text(fileUrl.lastPathComponent)
-                        .font(PlasticityFont.label)
-                        .foregroundColor(Color.text_secondary)
-                } else {
-                    Text("No file loaded")
-                        .font(PlasticityFont.label)
-                        .foregroundColor(Color.text_muted)
-                }
+
+                // Bottom-right slot reserved for the "Line details" overlay
+                // (MAS-43): selected-geometry info goes here. The old active.dxf
+                // working-buffer filename was removed — it exposed an internal
+                // temp file that meant nothing to the user.
             }
             .frame(height: 24)
             .padding(.horizontal, 12)

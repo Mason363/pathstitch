@@ -589,6 +589,16 @@ def op_project_edges(args: Dict[str, Any]) -> Dict[str, Any]:
         import traceback
         return {"status": "error", "message": f"Projection failed: {str(e)}\n{traceback.format_exc()}"}
 
+# Module-level dispatch table, shared by the CLI (`main`) and the persistent
+# worker (`pathstitch_core.worker`).
+OPERATIONS = {
+    "list_bodies": op_list_bodies,
+    "unfold_face": op_unfold_face,
+    "unfold_faces": op_unfold_faces,
+    "project_edges": op_project_edges,
+}
+
+
 def main() -> None:
     """CLI entry point for JSON subprocess interactions."""
     parser = argparse.ArgumentParser(description="Pathstitch STEP operations CLI tool.")
@@ -610,19 +620,12 @@ def main() -> None:
     op = config.get("op")
     op_args = config.get("args", {})
 
-    operations = {
-        "list_bodies": op_list_bodies,
-        "unfold_face": op_unfold_face,
-        "unfold_faces": op_unfold_faces,
-        "project_edges": op_project_edges
-    }
-
-    if op not in operations:
+    if op not in OPERATIONS:
         print(json.dumps({"status": "error", "message": f"Unknown operation: {op}"}))
         sys.exit(1)
 
     try:
-        result = operations[op](op_args)
+        result = OPERATIONS[op](op_args)
         print(json.dumps(result))
     except Exception as e:
         print(json.dumps({"status": "error", "message": f"Operation failed: {str(e)}"}))

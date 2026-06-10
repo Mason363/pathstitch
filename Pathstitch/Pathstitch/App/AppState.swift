@@ -296,7 +296,13 @@ class AppState {
     
     func undo() {
         guard !undoStack.isEmpty else { return }
-        
+
+        // A history restore replaces the whole working buffer, so drop any
+        // deferred optimistic deletions; a late reconcile must not clobber the
+        // restored snapshot (MAS-21).
+        pendingDeletedHandles.removeAll()
+        reconcileTask?.cancel()
+
         var currentDxfData: Data? = nil
         if let url = currentFilePath {
             currentDxfData = try? Data(contentsOf: url)
@@ -333,7 +339,11 @@ class AppState {
     
     func redo() {
         guard !redoStack.isEmpty else { return }
-        
+
+        // See undo(): drop deferred optimistic deletions before a full restore.
+        pendingDeletedHandles.removeAll()
+        reconcileTask?.cancel()
+
         var currentDxfData: Data? = nil
         if let url = currentFilePath {
             currentDxfData = try? Data(contentsOf: url)
@@ -573,6 +583,8 @@ class AppState {
         measurements.removeAll()
         undoStack.removeAll()
         redoStack.removeAll()
+        pendingDeletedHandles.removeAll()
+        reconcileTask?.cancel()
         hasUnsavedChanges = false
         activeMode = .twoD
     }
@@ -780,25 +792,70 @@ class AppState {
 
         guard !toMerge.isEmpty else { return }
 
-        // Merging additional vector files is an additive edit to the current
-        // document — it never prompts a save dialog and never errors on a
-        // supported format (.dxf/.svg/.pdf/images) (MAS-12/MAS-13).
+        // MAS-13 — the number of importable files dropped decides the workflow:
+        //   • 5 or more   → route them all into Batch mode (one card per file).
+        //   • fewer than 5 → auto-distribute them side by side on the canvas so
+        //     they never overlap. (The old merge ran every file through the
+        //     positive-quadrant normaliser, stacking them all at the same origin,
+        //     which looked like only one file had imported.)
         errorMessage = nil
+        if toMerge.count >= 5 {
+            activeMode = .batch
+            importFilesToBatch(toMerge)
+        } else {
+            distributeImportFiles(toMerge)
+        }
+    }
+
+    /// Imports 1–4 files and lays them out side by side on the current canvas
+    /// (MAS-13). Each file is converted to a standalone DXF, then a single
+    /// `import_distribute` call merges them all with no overlap. Additive — it
+    /// never prompts a save dialog and never errors on a supported format.
+    private func distributeImportFiles(_ urls: [URL]) {
         let activeURL = ensureActiveDXFFileExists()
         isProcessing = true
 
         Task {
             do {
-                for fileUrl in toMerge {
-                    try await importOrAppendSingleFile(fileUrl, activeURL: activeURL)
+                // Flush optimistic edits so we distribute onto current geometry.
+                await reconcileBufferIfNeeded()
+
+                var tempPaths: [String] = []
+                for url in urls {
+                    if let temp = try await convertToTempDXF(url) {
+                        tempPaths.append(temp.path)
+                    }
                 }
+
+                guard !tempPaths.isEmpty else {
+                    await MainActor.run {
+                        self.isProcessing = false
+                        self.errorMessage = "No importable geometry found in the dropped file(s)."
+                    }
+                    return
+                }
+
+                _ = try await PythonBridge.shared.run(
+                    module: "dxf_ops",
+                    op: "import_distribute",
+                    args: [
+                        "primary": activeURL.path,
+                        "secondaries": tempPaths,
+                        "output": activeURL.path,
+                        "gap": 20.0
+                    ]
+                )
+
+                for p in tempPaths { try? FileManager.default.removeItem(at: URL(fileURLWithPath: p)) }
+
                 await MainActor.run {
+                    self.currentFilePath = activeURL
                     self.activeMode = .twoD
                     self.selectedHandles.removeAll()
                     self.reloadDXF()
                     self.hasUnsavedChanges = true
                     self.isProcessing = false
-                    self.logAction("Import/Append Files", details: "Imported/merged \(toMerge.count) file(s).")
+                    self.logAction("Import & Distribute", details: "Imported and distributed \(tempPaths.count) file(s) side by side.")
                 }
             } catch {
                 await MainActor.run {
@@ -810,101 +867,57 @@ class AppState {
         }
     }
 
-    private func importOrAppendSingleFile(_ url: URL, activeURL: URL) async throws {
+    /// Converts any supported importable file (.dxf/.svg/.pdf/image) into a
+    /// single standalone temporary DXF and returns its URL (nil if unsupported
+    /// or empty). Heavy geometry conversion runs in Python; the caller owns the
+    /// returned temp file. Shared by distribute-import and batch-import.
+    private func convertToTempDXF(_ url: URL) async throws -> URL? {
         let ext = url.pathExtension.lowercased()
         let imageExtensions = ["png", "jpg", "jpeg", "bmp", "tiff", "gif"]
+        let tempDir = sessionTempDirectory
+        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let outURL = tempDir.appendingPathComponent("import_\(UUID().uuidString).dxf")
 
         let isSecurityScoped = url.startAccessingSecurityScopedResource()
         defer {
             if isSecurityScoped { url.stopAccessingSecurityScopedResource() }
         }
 
-        let tempDir = sessionTempDirectory
-
-        if ext == "svg" {
-            let tempSvgURL = tempDir.appendingPathComponent("temp_append_\(UUID().uuidString).svg")
-            let tempDxfURL = tempDir.appendingPathComponent("temp_svgvec_\(UUID().uuidString).dxf")
-            try? FileManager.default.removeItem(at: tempSvgURL)
-            try? FileManager.default.removeItem(at: tempDxfURL)
-            try FileManager.default.copyItem(at: url, to: tempSvgURL)
-
+        if ext == "dxf" {
+            try? FileManager.default.removeItem(at: outURL)
+            try FileManager.default.copyItem(at: url, to: outURL)
+            return outURL
+        } else if ext == "svg" {
+            let tmpSvg = tempDir.appendingPathComponent("src_\(UUID().uuidString).svg")
+            try? FileManager.default.removeItem(at: tmpSvg)
+            try FileManager.default.copyItem(at: url, to: tmpSvg)
             _ = try await PythonBridge.shared.run(
                 module: "dxf_ops",
                 op: "import_svg",
-                args: [
-                    "input": tempSvgURL.path,
-                    "output": tempDxfURL.path,
-                    "consolidate": consolidateSvgStrokes
-                ]
+                args: ["input": tmpSvg.path, "output": outURL.path, "consolidate": consolidateSvgStrokes]
             )
-            _ = try await PythonBridge.shared.run(
-                module: "dxf_ops",
-                op: "append_dxf",
-                args: ["primary": activeURL.path, "secondary": tempDxfURL.path, "output": activeURL.path]
-            )
-            try? FileManager.default.removeItem(at: tempSvgURL)
-            try? FileManager.default.removeItem(at: tempDxfURL)
+            try? FileManager.default.removeItem(at: tmpSvg)
+            return outURL
         } else if ext == "pdf" {
-            let tempDxfURL = tempDir.appendingPathComponent("temp_pdfvec_\(UUID().uuidString).dxf")
-            try? FileManager.default.removeItem(at: tempDxfURL)
             _ = try await PythonBridge.shared.run(
                 module: "dxf_ops",
                 op: "import_pdf",
-                args: ["input": url.path, "output": tempDxfURL.path]
+                args: ["input": url.path, "output": outURL.path]
             )
-            _ = try await PythonBridge.shared.run(
-                module: "dxf_ops",
-                op: "append_dxf",
-                args: ["primary": activeURL.path, "secondary": tempDxfURL.path, "output": activeURL.path]
-            )
-            try? FileManager.default.removeItem(at: tempDxfURL)
+            return outURL
         } else if imageExtensions.contains(ext) {
-            let tempImgURL = tempDir.appendingPathComponent("temp_import_raster_\(UUID().uuidString).\(ext)")
-            let tempDxfURL = tempDir.appendingPathComponent("temp_vectorized_\(UUID().uuidString).dxf")
-            try? FileManager.default.removeItem(at: tempImgURL)
-            try? FileManager.default.removeItem(at: tempDxfURL)
-            
-            try FileManager.default.copyItem(at: url, to: tempImgURL)
-            
+            let tmpImg = tempDir.appendingPathComponent("src_\(UUID().uuidString).\(ext)")
+            try? FileManager.default.removeItem(at: tmpImg)
+            try FileManager.default.copyItem(at: url, to: tmpImg)
             _ = try await PythonBridge.shared.run(
                 module: "dxf_ops",
                 op: "trace_raster",
-                args: [
-                    "input": tempImgURL.path,
-                    "output": tempDxfURL.path,
-                    "threshold": 127,
-                    "turdsize": 2
-                ]
+                args: ["input": tmpImg.path, "output": outURL.path, "threshold": 127, "turdsize": 2]
             )
-            
-            _ = try await PythonBridge.shared.run(
-                module: "dxf_ops",
-                op: "append_dxf",
-                args: [
-                    "primary": activeURL.path,
-                    "secondary": tempDxfURL.path,
-                    "output": activeURL.path
-                ]
-            )
-            
-            try? FileManager.default.removeItem(at: tempImgURL)
-            try? FileManager.default.removeItem(at: tempDxfURL)
-        } else if ext == "dxf" {
-            let secondaryTempURL = tempDir.appendingPathComponent("temp_append_\(UUID().uuidString).dxf")
-            try? FileManager.default.removeItem(at: secondaryTempURL)
-            try FileManager.default.copyItem(at: url, to: secondaryTempURL)
-            
-            _ = try await PythonBridge.shared.run(
-                module: "dxf_ops",
-                op: "append_dxf",
-                args: [
-                    "primary": activeURL.path,
-                    "secondary": secondaryTempURL.path,
-                    "output": activeURL.path
-                ]
-            )
-            try? FileManager.default.removeItem(at: secondaryTempURL)
+            try? FileManager.default.removeItem(at: tmpImg)
+            return outURL
         }
+        return nil
     }
     
     func importFilesToBatch(_ urls: [URL]) {
@@ -916,17 +929,13 @@ class AppState {
                 
                 var newItems: [BatchItem] = []
                 for url in urls {
-                    let ext = url.pathExtension.lowercased()
-                    guard ext == "dxf" else { continue }
-                    
-                    let isSecurityScoped = url.startAccessingSecurityScopedResource()
+                    // Convert any supported type (.dxf/.svg/.pdf/image) to a DXF
+                    // so Batch mode accepts every importable format (MAS-13).
+                    guard let convertedURL = try await convertToTempDXF(url) else { continue }
                     let tempFileURL = tempDir.appendingPathComponent("\(UUID().uuidString).dxf")
                     try? FileManager.default.removeItem(at: tempFileURL)
-                    try FileManager.default.copyItem(at: url, to: tempFileURL)
-                    if isSecurityScoped {
-                        url.stopAccessingSecurityScopedResource()
-                    }
-                    
+                    try FileManager.default.moveItem(at: convertedURL, to: tempFileURL)
+
                     // Normalize the file
                     _ = try await PythonBridge.shared.run(
                         module: "dxf_ops",
@@ -1497,9 +1506,10 @@ class AppState {
         
         Task {
             do {
+                await reconcileBufferIfNeeded()
                 let activeDxfURL = sessionTempDirectory.appendingPathComponent("active.dxf")
                 let inputPath = url.path
-                
+
                 _ = try await PythonBridge.shared.run(
                     module: "dxf_ops",
                     op: "offset_lines",
@@ -1534,8 +1544,9 @@ class AppState {
         
         Task {
             do {
+                await reconcileBufferIfNeeded()
                 let activeDxfURL = sessionTempDirectory.appendingPathComponent("active.dxf")
-                
+
                 _ = try await PythonBridge.shared.run(
                     module: "dxf_ops",
                     op: "add_holes",
@@ -1582,8 +1593,9 @@ class AppState {
         
         Task {
             do {
+                await reconcileBufferIfNeeded()
                 let activeDxfURL = sessionTempDirectory.appendingPathComponent("active.dxf")
-                
+
                 _ = try await PythonBridge.shared.run(
                     module: "dxf_ops",
                     op: "cleanup",
@@ -1644,9 +1656,12 @@ class AppState {
     func exportFile(to url: URL, format: String, selectedOnly: Bool = false) {
         guard let currentUrl = currentFilePath else { return }
         isProcessing = true
-        
+
         Task {
             do {
+                // Flush any optimistic in-memory edits so the export reflects
+                // the current model, not a stale buffer (MAS-21).
+                await reconcileBufferIfNeeded()
                 let tempDir = sessionTempDirectory
                 let tempExportURL = tempDir.appendingPathComponent("temp_export_\(UUID().uuidString).\(format)")
                 try? FileManager.default.removeItem(at: tempExportURL)
@@ -1809,8 +1824,11 @@ class AppState {
         await MainActor.run {
             self.isProcessing = true
         }
-        
+
         do {
+            // Flush deferred deletes so the new entity appends to current
+            // geometry, never resurrecting a just-deleted entity (MAS-21).
+            await reconcileBufferIfNeeded()
             let res = try await PythonBridge.shared.run(
                 module: "dxf_ops",
                 op: "add_entity",
@@ -2524,6 +2542,7 @@ class AppState {
         
         Task {
             do {
+                await reconcileBufferIfNeeded()
                 let activeDxfURL = sessionTempDirectory.appendingPathComponent("active.dxf")
                 _ = try await PythonBridge.shared.run(
                     module: "dxf_ops",
@@ -2698,6 +2717,8 @@ class AppState {
         
         Task {
             do {
+                // Flush deferred deletes so text appends to current geometry (MAS-21).
+                await reconcileBufferIfNeeded()
                 _ = try await PythonBridge.shared.run(
                     module: "dxf_ops",
                     op: "add_text",
@@ -2723,36 +2744,114 @@ class AppState {
         }
     }
 
-    func deleteSelectedEntities() {
-        guard let url = currentFilePath, !selectedHandles.isEmpty else { return }
-        saveToHistory()
-        isProcessing = true
-        
-        Task {
+    // MARK: - In-memory source of truth (MAS-21 / MAS-24)
+    //
+    // The authoritative working state is the in-memory model (`entities`,
+    // `measurements`, `layers`), which `DxfCanvasView` renders directly. The
+    // on-disk `active.dxf` is a *derived mirror* used only to hand heavy
+    // geometry to the Python engine and to persist on Save/Export. Interactive
+    // edits update the in-memory model optimistically — instantly, with no
+    // Python round-trip and no loading screen — and queue a lightweight buffer
+    // reconcile. Any code path that feeds the buffer to Python or serializes it
+    // calls `await reconcileBufferIfNeeded()` first, so the mirror is current.
+
+    /// Handles deleted in memory but not yet flushed to the working buffer.
+    @ObservationIgnored private var pendingDeletedHandles: Set<String> = []
+    /// The in-flight buffer reconcile, if any, so readers can coalesce/await it.
+    @ObservationIgnored private var reconcileTask: Task<Void, Never>? = nil
+
+    /// Rebuilds the layer list from the current in-memory entities, preserving
+    /// existing color/visibility. Keeps the Layers panel correct after an
+    /// optimistic in-memory edit without a Python round-trip.
+    func recomputeLayersFromEntities() {
+        let uniqueLayers = Array(Set(entities.map { $0.layer })).sorted()
+        self.layers = uniqueLayers.map { layerName in
+            let existing = self.layers.first(where: { $0.name == layerName })
+            return DXFLayer(
+                name: layerName,
+                color: existing?.color ?? self.colorForLayerName(layerName),
+                visible: existing?.visible ?? true
+            )
+        }
+    }
+
+    /// Flushes any deferred optimistic deletions into the on-disk working
+    /// buffer so the Python engine and Save/Export operate on current geometry.
+    /// Cheap no-op when nothing is pending; safe to call from any op that reads
+    /// the buffer. `op_delete_entities` is idempotent, so an occasional
+    /// double-flush is harmless.
+    func reconcileBufferIfNeeded() async {
+        if let running = await MainActor.run(body: { self.reconcileTask }) {
+            await running.value
+        }
+        let snapshot: (handles: [String], input: URL)? = await MainActor.run {
+            guard !self.pendingDeletedHandles.isEmpty,
+                  let input = self.currentFilePath,
+                  FileManager.default.fileExists(atPath: input.path) else {
+                self.pendingDeletedHandles.removeAll()
+                return nil
+            }
+            return (Array(self.pendingDeletedHandles), input)
+        }
+        guard let snap = snapshot else { return }
+        let activeURL = sessionTempDirectory.appendingPathComponent("active.dxf")
+        let task = Task<Void, Never> {
             do {
-                let activeDxfURL = sessionTempDirectory.appendingPathComponent("active.dxf")
                 _ = try await PythonBridge.shared.run(
                     module: "dxf_ops",
                     op: "delete_entities",
-                    args: [
-                        "input": url.path,
-                        "output": activeDxfURL.path,
-                        "handles": Array(selectedHandles)
-                    ]
+                    args: ["input": snap.input.path, "output": activeURL.path, "handles": snap.handles]
                 )
                 await MainActor.run {
-                    self.currentFilePath = activeDxfURL
-                    self.selectedHandles.removeAll()
-                    self.reloadDXF()
-                    logEntries.append(LogEntry(action: "Delete Entities", details: "Deleted selected entities"))
+                    self.currentFilePath = activeURL
+                    self.pendingDeletedHandles.subtract(snap.handles)
                 }
             } catch {
-                await MainActor.run {
-                    self.errorMessage = error.localizedDescription
-                    self.isProcessing = false
-                }
+                // The in-memory truth already reflects the deletion; a later
+                // reader retries. Don't surface an error for a background sync.
             }
         }
+        await MainActor.run { self.reconcileTask = task }
+        await task.value
+        await MainActor.run { self.reconcileTask = nil }
+    }
+
+    /// Reconciles the working buffer, then saves the project. Use this from
+    /// user-facing Save entry points so a just-performed optimistic edit (e.g.
+    /// a delete) is reflected in the persisted `.stch` even in a fast sequence.
+    func reconcileThenSave(to url: URL) {
+        Task {
+            await reconcileBufferIfNeeded()
+            await MainActor.run { self.saveProject(to: url) }
+        }
+    }
+
+    /// Deletes the selected entities. A delete that empties the canvas is a
+    /// fully valid state — the in-memory model simply becomes empty and the
+    /// canvas renders blank, never an error (MAS-8 / MAS-49). The update is
+    /// optimistic (instant, zero Python round-trips, no loading screen); the
+    /// working buffer is reconciled in the background for later heavy ops/Save.
+    func deleteSelectedEntities() {
+        guard !selectedHandles.isEmpty else { return }
+        saveToHistory()
+        let removed = selectedHandles
+
+        entities.removeAll { removed.contains($0.handle) }
+        previewEntities.removeAll { removed.contains($0.handle) }
+        measurements.removeAll { m in
+            if let h = m.entityHandle { return removed.contains(h) }
+            return false
+        }
+        if let sel = selectedMeasurement, let h = sel.entityHandle, removed.contains(h) {
+            selectedMeasurement = nil
+        }
+        selectedHandles.removeAll()
+        recomputeLayersFromEntities()
+        hasUnsavedChanges = true
+        logAction("Delete Entities", details: "Deleted \(removed.count) selected entit\(removed.count == 1 ? "y" : "ies")")
+
+        pendingDeletedHandles.formUnion(removed)
+        Task { await reconcileBufferIfNeeded() }
     }
 
     private func colorForLayerName(_ name: String) -> Color {
