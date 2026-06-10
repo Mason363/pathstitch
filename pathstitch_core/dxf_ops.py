@@ -1019,15 +1019,240 @@ def translate_doc(doc, dx: float, dy: float):
             ent.dxf.insert = (ent.dxf.insert.x + dx, ent.dxf.insert.y + dy)
 
 
+def _entity_bbox(ent) -> Optional[Tuple[float, float, float, float]]:
+    """Axis-aligned bbox (minx, miny, maxx, maxy) of one entity, or None for an
+    invisible/degenerate one. POINT entities are deliberately ignored — they are
+    invisible markers and must never influence distribution layout (MAS-13)."""
+    t = ent.dxftype()
+    if t == "POINT":
+        return None
+    xs: List[float] = []
+    ys: List[float] = []
+    if t == "LINE":
+        xs = [ent.dxf.start.x, ent.dxf.end.x]
+        ys = [ent.dxf.start.y, ent.dxf.end.y]
+    elif t in ("CIRCLE", "ARC"):
+        c = ent.dxf.center
+        r = ent.dxf.radius
+        xs = [c.x - r, c.x + r]
+        ys = [c.y - r, c.y + r]
+    elif t in ("LWPOLYLINE", "POLYLINE"):
+        try:
+            pts = list(ent.get_points()) if hasattr(ent, "get_points") else list(ent.points)
+        except Exception:
+            pts = []
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+    elif t in ("SPLINE", "ELLIPSE"):
+        try:
+            from ezdxf.path import make_path
+            pts = list(make_path(ent).flattening(distance=0.5))
+            xs = [p.x for p in pts]
+            ys = [p.y for p in pts]
+        except Exception:
+            return None
+    elif t == "TEXT":
+        ins = ent.dxf.insert
+        h = ent.dxf.height
+        xs = [ins.x, ins.x + max(1, len(str(ent.dxf.text))) * h * 0.6]
+        ys = [ins.y, ins.y + h]
+    else:
+        return None
+    if not xs or not ys:
+        return None
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def _entity_bbox_with_points(ent) -> Optional[Tuple[float, float, float, float]]:
+    """Calculates bounding box of any entity including POINT types."""
+    t = ent.dxftype()
+    if t == "POINT":
+        loc = ent.dxf.location
+        return (loc.x, loc.y, loc.x, loc.y)
+    return _entity_bbox(ent)
+
+
+def get_point_coords(ent) -> Optional[Tuple[float, float]]:
+    """Checks if an entity is point-like (isolated or degenerate) and returns its coordinates."""
+    t = ent.dxftype()
+    if t == "POINT":
+        return (ent.dxf.location.x, ent.dxf.location.y)
+    elif t == "LINE":
+        if math.hypot(ent.dxf.start.x - ent.dxf.end.x, ent.dxf.start.y - ent.dxf.end.y) < 1e-3:
+            return (ent.dxf.start.x, ent.dxf.start.y)
+    elif t in ("CIRCLE", "ARC"):
+        if ent.dxf.radius < 1e-3:
+            return (ent.dxf.center.x, ent.dxf.center.y)
+    elif t in ("LWPOLYLINE", "POLYLINE"):
+        try:
+            pts = list(ent.get_points()) if hasattr(ent, "get_points") else list(ent.points)
+            if pts:
+                xs = [p[0] for p in pts]
+                ys = [p[1] for p in pts]
+                if (max(xs) - min(xs)) < 1e-3 and (max(ys) - min(ys)) < 1e-3:
+                    return (xs[0], ys[0])
+        except Exception:
+            pass
+    elif t in ("SPLINE", "ELLIPSE"):
+        try:
+            from ezdxf.path import make_path
+            pts = list(make_path(ent).flattening(distance=0.5))
+            if pts:
+                xs = [p.x for p in pts]
+                ys = [p.y for p in pts]
+                if (max(xs) - min(xs)) < 1e-3 and (max(ys) - min(ys)) < 1e-3:
+                    return (xs[0], ys[0])
+        except Exception:
+            pass
+    return None
+
+
+def entity_to_shapely(ent):
+    """Safely converts a DXF entity to a shapely geometry, approximating curves."""
+    t = ent.dxftype()
+    if t == "LINE":
+        return LineString([(ent.dxf.start.x, ent.dxf.start.y), (ent.dxf.end.x, ent.dxf.end.y)])
+    elif t == "CIRCLE":
+        c = ent.dxf.center
+        r = ent.dxf.radius
+        pts = [(c.x + r * math.cos(a), c.y + r * math.sin(a)) for a in [i * 2 * math.pi / 32 for i in range(32)]]
+        return LinearRing(pts)
+    elif t == "ARC":
+        c = ent.dxf.center
+        r = ent.dxf.radius
+        sa = math.radians(ent.dxf.start_angle)
+        ea = math.radians(ent.dxf.end_angle)
+        if ea < sa:
+            ea += 2 * math.pi
+        steps = 16
+        pts = [(c.x + r * math.cos(sa + (ea - sa) * i / steps), c.y + r * math.sin(sa + (ea - sa) * i / steps)) for i in range(steps + 1)]
+        return LineString(pts)
+    elif t in ("LWPOLYLINE", "POLYLINE"):
+        try:
+            pts = list(ent.get_points()) if hasattr(ent, "get_points") else list(ent.points)
+            cleaned_pts = []
+            for p in pts:
+                if not cleaned_pts or math.hypot(p[0] - cleaned_pts[-1][0], p[1] - cleaned_pts[-1][1]) > 1e-5:
+                    cleaned_pts.append((p[0], p[1]))
+            if len(cleaned_pts) >= 2:
+                is_cl = getattr(ent, "closed", False) or getattr(ent, "is_closed", False)
+                if is_cl:
+                    if math.hypot(cleaned_pts[0][0] - cleaned_pts[-1][0], cleaned_pts[0][1] - cleaned_pts[-1][1]) > 1e-5:
+                        cleaned_pts.append(cleaned_pts[0])
+                    try:
+                        return LinearRing(cleaned_pts)
+                    except Exception:
+                        return LineString(cleaned_pts)
+                else:
+                    return LineString(cleaned_pts)
+        except Exception:
+            pass
+    elif t in ("SPLINE", "ELLIPSE"):
+        try:
+            path = make_path(ent)
+            vertices = [(p.x, p.y) for p in path.flattening(distance=0.1)]
+            cleaned_pts = []
+            for p in vertices:
+                if not cleaned_pts or math.hypot(p[0] - cleaned_pts[-1][0], p[1] - cleaned_pts[-1][1]) > 1e-5:
+                    cleaned_pts.append(p)
+            if len(cleaned_pts) >= 2:
+                is_cl = getattr(ent, "closed", False) or getattr(ent, "is_closed", False)
+                if is_cl:
+                    if math.hypot(cleaned_pts[0][0] - cleaned_pts[-1][0], cleaned_pts[0][1] - cleaned_pts[-1][1]) > 1e-5:
+                        cleaned_pts.append(cleaned_pts[0])
+                    try:
+                        return LinearRing(cleaned_pts)
+                    except Exception:
+                        return LineString(cleaned_pts)
+                else:
+                    return LineString(cleaned_pts)
+        except Exception:
+            pass
+    elif t == "TEXT":
+        ins = ent.dxf.insert
+        h = ent.dxf.height
+        w = max(1, len(str(ent.dxf.text))) * h * 0.6
+        return LinearRing([(ins.x, ins.y), (ins.x + w, ins.y), (ins.x + w, ins.y + h), (ins.x, ins.y + h)])
+    return None
+
+
+def robust_shape_bounds(msp) -> Optional[Tuple[float, float, float, float]]:
+    """Bounding box of a file's *visible shape* for layout. Ignores invisible
+    isolated POINT markers and far-flung stray entities that aren't part of the main shape
+    (MAS-13): a lone mark off on its own must not balloon a file's footprint and
+    shove its neighbours across the canvas. Outliers are entities whose centre is
+    more than 4× the median centre-distance from the cluster."""
+    import math
+    
+    # 1. Identify all normal entities and convert them to shapely geometries
+    normal_ents = []
+    normal_geoms = []
+    point_like_ents = []
+    point_coords = []
+    
+    for ent in msp:
+        coords = get_point_coords(ent)
+        if coords is not None:
+            point_like_ents.append(ent)
+            point_coords.append(coords)
+        else:
+            geom = entity_to_shapely(ent)
+            if geom is not None:
+                normal_ents.append(ent)
+                normal_geoms.append(geom)
+            else:
+                normal_ents.append(ent)
+
+    # 2. For each point-like entity, determine if it touches any normal geometry
+    valid_points = []
+    for ent, pt_coord in zip(point_like_ents, point_coords):
+        pt_geom = ShapelyPoint(pt_coord)
+        touches = False
+        for ng in normal_geoms:
+            try:
+                if ng.distance(pt_geom) <= 0.1: # 0.1 mm tolerance
+                    touches = True
+                    break
+            except Exception:
+                pass
+        if touches:
+            valid_points.append(ent)
+    
+    # 3. Calculate bounding boxes of kept entities
+    kept_ents = normal_ents + valid_points
+    
+    # Fallback if there are only point-like entities (we don't ignore them all)
+    if not kept_ents and point_like_ents:
+        kept_ents = point_like_ents
+        
+    boxes = [bb for bb in (_entity_bbox_with_points(e) for e in kept_ents) if bb is not None]
+    if not boxes:
+        return None
+    if len(boxes) <= 2:
+        return (min(b[0] for b in boxes), min(b[1] for b in boxes),
+                max(b[2] for b in boxes), max(b[3] for b in boxes))
+    centers = [((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0) for b in boxes]
+    mcx = sorted(c[0] for c in centers)[len(centers) // 2]
+    mcy = sorted(c[1] for c in centers)[len(centers) // 2]
+    dists = [math.hypot(c[0] - mcx, c[1] - mcy) for c in centers]
+    med = sorted(dists)[len(dists) // 2]
+    threshold = max(med * 4.0, 1.0)
+    kept = [b for b, d in zip(boxes, dists) if d <= threshold]
+    if not kept:
+        kept = boxes
+    return (min(b[0] for b in kept), min(b[1] for b in kept),
+            max(b[2] for b in kept), max(b[3] for b in kept))
+
+
 def op_import_distribute(args: Dict[str, Any]) -> Dict[str, Any]:
-    """Merges several DXF files into `primary`, laying them out side by side so
-    they never overlap (MAS-13). Each secondary is placed to the right of the
-    previous one (and to the right of `primary`'s existing geometry), aligned to
-    a common baseline, separated by `gap` mm."""
+    """Merges several DXF files into `primary`, arranging them in a compact,
+    centred layout fitting viewport aspect ratio (around 1.5) close to the origin,
+    using robust bounding box and margin (MAS-13)."""
+    import math
     primary_path = args.get("primary")
     output_path = args.get("output")
     secondaries = args.get("secondaries", [])
-    gap = float(args.get("gap", 20.0))
+    margin_override = args.get("gap")
 
     if not primary_path or not os.path.exists(primary_path):
         return {"status": "error", "message": f"Primary file not found: {primary_path}"}
@@ -1038,16 +1263,8 @@ def op_import_distribute(args: Dict[str, Any]) -> Dict[str, Any]:
         primary_doc = ezdxf.readfile(primary_path)
         primary_msp = primary_doc.modelspace()
 
-        # Start placing to the right of whatever already exists on the canvas.
-        pbounds = get_entities_bounds(primary_msp, [])
-        if pbounds:
-            cursor_x = pbounds[2] + gap
-            baseline_y = pbounds[1]
-        else:
-            cursor_x = 10.0
-            baseline_y = 10.0
-
-        merged = 0
+        # Load each secondary and measure its bounds.
+        loaded = []  # list of (sec_doc, bbox)
         for sec_path in secondaries:
             if not sec_path or not os.path.exists(sec_path):
                 continue
@@ -1055,33 +1272,148 @@ def op_import_distribute(args: Dict[str, Any]) -> Dict[str, Any]:
                 sec_doc = ezdxf.readfile(sec_path)
             except Exception:
                 continue
-            sec_msp = sec_doc.modelspace()
+            b = robust_shape_bounds(sec_doc.modelspace())
+            # Fallback to (0,0,0,0) if bounds is None (degenerate or empty secondary)
+            if b is None:
+                b = (0.0, 0.0, 0.0, 0.0)
+            loaded.append((sec_doc, b))
 
-            sbounds = get_entities_bounds(sec_msp, [])
-            if sbounds:
-                s_min_x, s_min_y, s_max_x, s_max_y = sbounds
-                translate_doc(sec_doc, cursor_x - s_min_x, baseline_y - s_min_y)
-                width = s_max_x - s_min_x
+        n = len(loaded)
+        if n == 0:
+            primary_doc.saveas(output_path)
+            return {"status": "ok", "data": {"merged": 0}}
+
+        # Define the margin
+        if margin_override is not None:
+            margin = float(margin_override)
+        else:
+            margin = 20.0  # standard 20mm gap
+
+        # Initialize placed boxes
+        P = []
+        pbounds = robust_shape_bounds(primary_msp)
+        if pbounds is not None:
+            P.append(pbounds)
+
+        def check_overlap(cx, cy, w, h, placed_boxes, gap):
+            c_xmin = cx - w/2.0
+            c_xmax = cx + w/2.0
+            c_ymin = cy - h/2.0
+            c_ymax = cy + h/2.0
+            for px1, py1, px2, py2 in placed_boxes:
+                # We subtract a tiny epsilon (0.1) so that touching exactly is allowed,
+                # but any overlap of more than 0.1 mm is rejected.
+                if (c_xmin < px2 + gap - 0.1 and c_xmax > px1 - gap + 0.1 and
+                    c_ymin < py2 + gap - 0.1 and c_ymax > py1 - gap + 0.1):
+                    return True
+            return False
+
+        merged = 0
+        for sec_doc, b in loaded:
+            w = b[2] - b[0]
+            h = b[3] - b[1]
+            fcx = (b[0] + b[2]) / 2.0
+            fcy = (b[1] + b[3]) / 2.0
+
+            if not P:
+                # Empty canvas: center first shape at (0, 0)
+                cx, cy = 0.0, 0.0
+                translate_doc(sec_doc, cx - fcx, cy - fcy)
+                B = (-w/2.0, -h/2.0, w/2.0, h/2.0)
+                P.append(B)
             else:
-                width = 0.0
+                candidates = []
+                # Generate candidate positions around all placed boxes
+                for p_xmin, p_ymin, p_xmax, p_ymax in P:
+                    mid_p_x = (p_xmin + p_xmax) / 2.0
+                    mid_p_y = (p_ymin + p_ymax) / 2.0
 
-            # Merge layers (Layer attributes live under `.dxf`, cf. Rule 8).
+                    # Right
+                    cx_r = p_xmax + w/2.0 + margin
+                    candidates.append((cx_r, mid_p_y))
+                    candidates.append((cx_r, p_ymax - h/2.0))
+                    candidates.append((cx_r, p_ymin + h/2.0))
+
+                    # Left
+                    cx_l = p_xmin - w/2.0 - margin
+                    candidates.append((cx_l, mid_p_y))
+                    candidates.append((cx_l, p_ymax - h/2.0))
+                    candidates.append((cx_l, p_ymin + h/2.0))
+
+                    # Top
+                    cy_t = p_ymax + h/2.0 + margin
+                    candidates.append((mid_p_x, cy_t))
+                    candidates.append((p_xmax - w/2.0, cy_t))
+                    candidates.append((p_xmin + w/2.0, cy_t))
+
+                    # Bottom
+                    cy_b = p_ymin - h/2.0 - margin
+                    candidates.append((mid_p_x, cy_b))
+                    candidates.append((p_xmax - w/2.0, cy_b))
+                    candidates.append((p_xmin + w/2.0, cy_b))
+
+                # Score candidates
+                best_cx, best_cy = None, None
+                best_score = float('inf')
+
+                for cx_cand, cy_cand in candidates:
+                    if not check_overlap(cx_cand, cy_cand, w, h, P, margin):
+                        # Evaluate score
+                        c_xmin = cx_cand - w/2.0
+                        c_xmax = cx_cand + w/2.0
+                        c_ymin = cy_cand - h/2.0
+                        c_ymax = cy_cand + h/2.0
+
+                        comb_xmin = min(c_xmin, min(bx[0] for bx in P))
+                        comb_xmax = max(c_xmax, max(bx[2] for bx in P))
+                        comb_ymin = min(c_ymin, min(bx[1] for bx in P))
+                        comb_ymax = max(c_ymax, max(bx[3] for bx in P))
+
+                        comb_w = comb_xmax - comb_xmin
+                        comb_h = comb_ymax - comb_ymin
+                        perimeter = 2.0 * (comb_w + comb_h)
+
+                        aspect_ratio = comb_w / max(1e-5, comb_h)
+                        ratio_penalty = abs(aspect_ratio - 1.5)
+
+                        dist_to_origin = math.hypot(cx_cand, cy_cand)
+
+                        # Balance compactness, aspect ratio penalty and distance to origin
+                        score = perimeter * (1.0 + 0.5 * ratio_penalty) + 0.1 * dist_to_origin
+
+                        if score < best_score:
+                            best_score = score
+                            best_cx, best_cy = cx_cand, cy_cand
+
+                # Fallback if no valid candidate found (should be extremely rare)
+                if best_cx is None:
+                    P_xmin = min(bx[0] for bx in P)
+                    P_xmax = max(bx[2] for bx in P)
+                    P_ymin = min(bx[1] for bx in P)
+                    P_ymax = max(bx[3] for bx in P)
+                    best_cx = P_xmax + w/2.0 + margin
+                    best_cy = (P_ymin + P_ymax) / 2.0
+
+                # Translate and record
+                translate_doc(sec_doc, best_cx - fcx, best_cy - fcy)
+                B = (best_cx - w/2.0, best_cy - h/2.0, best_cx + w/2.0, best_cy + h/2.0)
+                P.append(B)
+
+            # Merge secondary document layers and entities
+            sec_msp = sec_doc.modelspace()
             for layer in sec_doc.layers:
                 layer_name = layer.dxf.name
                 if layer_name not in primary_doc.layers:
                     primary_doc.layers.new(layer_name, dxfattribs={"color": layer.dxf.color})
-
             for ent in sec_msp:
                 try:
                     primary_msp.add_foreign_entity(ent)
                 except Exception:
                     pass
-
-            cursor_x += width + gap
             merged += 1
 
         primary_doc.saveas(output_path)
-        return {"status": "ok", "data": {"merged": merged}}
+        return {"status": "ok", "data": {"merged": merged, "boxes": len(P)}}
     except Exception as e:
         return {"status": "error", "message": f"Failed to distribute import: {str(e)}"}
 

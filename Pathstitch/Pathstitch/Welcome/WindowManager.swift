@@ -65,11 +65,30 @@ class WindowManager: NSObject, NSApplicationDelegate {
         }
     }
     
-    /// Opens one or more files, each in its own workspace window.
+    /// Opens one or more files. Projects (`.stch`) and 3D models open in their own
+    /// window; importable vector files are grouped into one distributed/batched
+    /// workspace (MAS-13). Shared by drag-drop, Finder "Open With", and File ▸ Open.
     func openFiles(_ urls: [URL]) {
-        for url in urls {
-            openAnyFile(url: url)
-        }
+        openFilesDistributing(urls)
+    }
+
+    /// `.stch`/`.step`/`.stp` each get their own window; the remaining importable
+    /// files (`.dxf`/`.svg`/`.pdf`/images) all land in ONE new workspace and are
+    /// auto-distributed (fewer than 5) or sent to Batch mode (5+) by
+    /// `AppState.importFiles` (MAS-13).
+    func openFilesDistributing(_ urls: [URL]) {
+        let newWindowExts: Set<String> = ["stch", "step", "stp"]
+        let windowFiles = urls.filter { newWindowExts.contains($0.pathExtension.lowercased()) }
+        let importable = urls.filter { !newWindowExts.contains($0.pathExtension.lowercased()) }
+
+        for url in windowFiles { openAnyFile(url: url) }
+
+        guard !importable.isEmpty else { return }
+        let state = AppState()
+        state.startBlankDocument()
+        openDocumentWindow(with: state)
+        for url in importable { NSDocumentController.shared.noteNewRecentDocumentURL(url) }
+        state.importFiles(importable)
     }
 
     func openDocument(url: URL) {

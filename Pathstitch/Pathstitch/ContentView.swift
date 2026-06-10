@@ -1900,26 +1900,8 @@ extension ContentView {
                 }
                 .contentShape(Rectangle())
                 .onDrop(of: [.fileURL], isTargeted: nil) { providers in
-                    let group = DispatchGroup()
-                    var urls: [URL] = []
-                    let lock = NSLock()
-                    
-                    for provider in providers {
-                        group.enter()
-                        _ = provider.loadObject(ofClass: URL.self) { url, _ in
-                            if let fileUrl = url {
-                                lock.lock()
-                                urls.append(fileUrl)
-                                lock.unlock()
-                            }
-                            group.leave()
-                        }
-                    }
-                    
-                    group.notify(queue: .main) {
-                        if !urls.isEmpty {
-                            state.importFiles(urls)
-                        }
+                    collectDroppedURLs(providers) { urls in
+                        if !urls.isEmpty { state.importFiles(urls) }
                     }
                     return true
                 }
@@ -2076,26 +2058,8 @@ extension ContentView {
             }
             .contentShape(Rectangle())
             .onDrop(of: [.fileURL], isTargeted: nil) { providers in
-                let group = DispatchGroup()
-                var urls: [URL] = []
-                let lock = NSLock()
-                
-                for provider in providers {
-                    group.enter()
-                    _ = provider.loadObject(ofClass: URL.self) { url, _ in
-                        if let fileUrl = url {
-                            lock.lock()
-                            urls.append(fileUrl)
-                            lock.unlock()
-                        }
-                        group.leave()
-                    }
-                }
-                
-                group.notify(queue: .main) {
-                    if !urls.isEmpty {
-                        state.importFiles(urls)
-                    }
+                collectDroppedURLs(providers) { urls in
+                    if !urls.isEmpty { state.importFiles(urls) }
                 }
                 return true
             }
@@ -2184,4 +2148,30 @@ extension ContentView {
             .border(Color.border_subtle, width: 1)
         }
     }
+}
+
+/// Resolves *every* dragged file into a `[URL]`, then delivers them on the main
+/// queue. Uses `public.file-url` item loading — reliable for file drops, unlike
+/// `loadObject(ofClass: URL.self)`, which silently resolved only one provider and
+/// was the real "only one file imports" bug (MAS-13). Waits for all providers.
+func collectDroppedURLs(_ providers: [NSItemProvider], completion: @escaping ([URL]) -> Void) {
+    let group = DispatchGroup()
+    let lock = NSLock()
+    var urls: [URL] = []
+    for provider in providers {
+        group.enter()
+        provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
+            defer { group.leave() }
+            var resolved: URL? = nil
+            if let data = item as? Data {
+                resolved = URL(dataRepresentation: data, relativeTo: nil)
+            } else if let u = item as? URL {
+                resolved = u
+            }
+            if let u = resolved {
+                lock.lock(); urls.append(u); lock.unlock()
+            }
+        }
+    }
+    group.notify(queue: .main) { completion(urls) }
 }

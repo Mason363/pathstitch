@@ -319,14 +319,13 @@ struct WelcomeDropDelegate: DropDelegate {
     
     func performDrop(info: DropInfo) -> Bool {
         state.isDraggingOver = false
-        guard let provider = info.itemProviders(for: [.fileURL]).first else { return false }
-        
-        provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, error in
-            guard let data = item as? Data, let url = URL(dataRepresentation: data, relativeTo: nil) else { return }
-            
-            DispatchQueue.main.sync {
-                WindowManager.shared.openAnyFile(url: url)
-            }
+        let providers = info.itemProviders(for: [.fileURL])
+        guard !providers.isEmpty else { return false }
+        // Collect ALL dropped files (the old code took only `.first`, so dropping
+        // several onto the welcome screen opened only one — MAS-13).
+        collectDroppedURLs(providers) { urls in
+            guard !urls.isEmpty else { return }
+            WindowManager.shared.openFilesDistributing(urls)
         }
         return true
     }

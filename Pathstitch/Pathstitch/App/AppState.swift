@@ -232,6 +232,10 @@ class AppState {
     var canvasScale: CGFloat = 1.0
     var canvasOffset: CGSize = .zero
     var gridVisible: Bool = true
+    /// Incremented to ask the 2D canvas to zoom/pan so all geometry is visible
+    /// (e.g. after a multi-file distribute import). The canvas owns the view
+    /// size, so it computes the actual fit — see `DxfCanvasView.fitToContent`.
+    var fitRequestToken: Int = 0
     
     // Operations Configs
     var offsetDistance: Double = 1.0
@@ -841,8 +845,8 @@ class AppState {
                     args: [
                         "primary": activeURL.path,
                         "secondaries": tempPaths,
-                        "output": activeURL.path,
-                        "gap": 20.0
+                        "output": activeURL.path
+                        // No explicit "gap" → Python sizes it to the content.
                     ]
                 )
 
@@ -852,9 +856,9 @@ class AppState {
                     self.currentFilePath = activeURL
                     self.activeMode = .twoD
                     self.selectedHandles.removeAll()
-                    self.reloadDXF()
+                    // Fit the view so every imported file is visible at once.
+                    self.reloadDXF(fitToContentAfter: true)
                     self.hasUnsavedChanges = true
-                    self.isProcessing = false
                     self.logAction("Import & Distribute", details: "Imported and distributed \(tempPaths.count) file(s) side by side.")
                 }
             } catch {
@@ -1372,7 +1376,7 @@ class AppState {
         }
     }
     
-    func reloadDXF() {
+    func reloadDXF(fitToContentAfter: Bool = false) {
         guard let url = currentFilePath, FileManager.default.fileExists(atPath: url.path) else {
             // No working buffer yet → present an empty canvas, never an error.
             self.svgContent = nil
@@ -1433,6 +1437,7 @@ class AppState {
                             visible: existing?.visible ?? true
                         )
                     }
+                    if fitToContentAfter { self.fitRequestToken += 1 }
                     self.isProcessing = false
                 }
             } catch {

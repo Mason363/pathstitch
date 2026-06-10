@@ -153,6 +153,69 @@ def test_dxf_ops():
     merged_count = len(res["data"]["entities"])
     print(f"Merged document has {merged_count} entities")
     assert merged_count == 3, f"Expected 3 merged entities, got {merged_count}"
+ 
+    # 9. Test point ignoring and import_distribute layout aspect ratio
+    print("Testing point ignoring and import_distribute layout...")
+    import ezdxf
+    
+    # Create a secondary DXF with:
+    # - a line from (10, 10) to (20, 20)
+    # - a touching POINT at (10, 10)
+    # - an isolated POINT at (100, 100) (should be ignored for layout calculation)
+    test_pts_dxf = "TestFiles/test_pts.dxf"
+    doc_pts = ezdxf.new(dxfversion="R2010")
+    msp_pts = doc_pts.modelspace()
+    msp_pts.add_line((10.0, 10.0), (20.0, 20.0))
+    msp_pts.add_point((10.0, 10.0))
+    msp_pts.add_point((100.0, 100.0))
+    doc_pts.saveas(test_pts_dxf)
+    
+    pts_out_dxf = "TestFiles/test_pts_out.dxf"
+    if os.path.exists(pts_out_dxf):
+        os.remove(pts_out_dxf)
+        
+    res = run_cli("import_distribute", {
+        "primary": blank_dxf,
+        "secondaries": [test_pts_dxf],
+        "output": pts_out_dxf
+    })
+    assert res["status"] == "ok", f"import_distribute failed: {res}"
+    
+    # Read output and verify the line is centered around (0,0),
+    # meaning the bounds center used was (15,15) and NOT (55,55).
+    doc_out = ezdxf.readfile(pts_out_dxf)
+    msp_out = doc_out.modelspace()
+    lines = [e for e in msp_out if e.dxftype() == "LINE"]
+    assert len(lines) == 1, "Expected 1 line in output"
+    line = lines[0]
+    l_cx = (line.dxf.start.x + line.dxf.end.x) / 2.0
+    l_cy = (line.dxf.start.y + line.dxf.end.y) / 2.0
+    assert abs(l_cx) < 0.1 and abs(l_cy) < 0.1, f"Expected line center near (0,0), got ({l_cx}, {l_cy})"
+    print("Isolated points successfully ignored in bounds calculation!")
+
+    # Test 2D compact grid distribution of multiple files (e.g. 3 files)
+    print("Testing 2D compact grid layout distribution...")
+    grid_out_dxf = "TestFiles/test_grid_out.dxf"
+    if os.path.exists(grid_out_dxf):
+        os.remove(grid_out_dxf)
+    
+    res = run_cli("import_distribute", {
+        "primary": blank_dxf,
+        "secondaries": [test_pts_dxf, test_pts_dxf, test_pts_dxf],
+        "output": grid_out_dxf
+    })
+    assert res["status"] == "ok", f"import_distribute for grid failed: {res}"
+    
+    doc_grid = ezdxf.readfile(grid_out_dxf)
+    msp_grid = doc_grid.modelspace()
+    lines_grid = [e for e in msp_grid if e.dxftype() == "LINE"]
+    assert len(lines_grid) == 3, f"Expected 3 lines, got {len(lines_grid)}"
+    
+    centers = [((l.dxf.start.x + l.dxf.end.x)/2.0, (l.dxf.start.y + l.dxf.end.y)/2.0) for l in lines_grid]
+    y_coords = [c[1] for c in centers]
+    min_y, max_y = min(y_coords), max(y_coords)
+    assert abs(max_y - min_y) > 10.0, f"Expected items to stack vertically (diff in Y > 10), got Y coords: {y_coords}"
+    print("2D compact layout verified successfully!")
 
     print("ALL TESTS PASSED SUCCESSFULLY!")
 

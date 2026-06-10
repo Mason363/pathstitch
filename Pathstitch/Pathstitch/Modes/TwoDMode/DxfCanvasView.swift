@@ -401,6 +401,9 @@ struct DxfCanvasView: View {
                         state.hoveredHandle = nil
                     }
                 }
+                .onChange(of: state.fitRequestToken) { _, _ in
+                    fitToContent(viewSize: geo.size)
+                }
                 .overlay(
                     ScrollWheelModifier(
                         onZoom: { event, zoomPt, zoomFactor in
@@ -1189,6 +1192,58 @@ struct DxfCanvasView: View {
         let screenX = dx * state.canvasScale + size.width / 2 + state.canvasOffset.width
         let screenY = -dy * state.canvasScale + size.height / 2 + state.canvasOffset.height
         return CGPoint(x: screenX, y: screenY)
+    }
+
+    /// Zooms/pans the canvas so all current geometry fits within `viewSize` with
+    /// a margin (used after a multi-file distribute import so every file is
+    /// visible at once — "all viewable"). Inverts `toScreen`'s transform.
+    private func fitToContent(viewSize: CGSize) {
+        guard !state.entities.isEmpty, viewSize.width > 1, viewSize.height > 1 else { return }
+        let b = robustContentBounds() ?? getBounds(state.entities)
+        let bw = max(b.width, 0.001)
+        let bh = max(b.height, 0.001)
+        let margin: CGFloat = 0.82
+        let scale = max(0.01, min(viewSize.width * margin / bw, viewSize.height * margin / bh))
+        state.canvasScale = scale
+        // Centre the content's midpoint in the viewport (see toScreen()).
+        state.canvasOffset = CGSize(width: -b.midX * scale, height: b.midY * scale)
+    }
+
+    /// Per-entity bounding box (model space), excluding invisible POINT markers.
+    private func entityBBox(_ ent: DXFEntity) -> CGRect? {
+        if ent.type == "POINT" { return nil }
+        if ent.type == "LINE", let s = ent.start, let e = ent.end {
+            return CGRect(x: min(s[0], e[0]), y: min(s[1], e[1]), width: abs(e[0] - s[0]), height: abs(e[1] - s[1]))
+        } else if (ent.type == "CIRCLE" || ent.type == "ARC"), let c = ent.center, let r = ent.radius {
+            return CGRect(x: c[0] - r, y: c[1] - r, width: 2 * r, height: 2 * r)
+        } else if let v = ent.vertices, !v.isEmpty {
+            let xs = v.map { $0[0] }, ys = v.map { $0[1] }
+            let minx = xs.min()!, maxx = xs.max()!, miny = ys.min()!, maxy = ys.max()!
+            return CGRect(x: minx, y: miny, width: maxx - minx, height: maxy - miny)
+        }
+        return nil
+    }
+
+    /// Content bounds for fitting, ignoring far-stray entities (centre > 4× the
+    /// median centre-distance) so a lone mark can't zoom the whole view out —
+    /// mirrors the Python `robust_shape_bounds` used for distribution (MAS-13).
+    private func robustContentBounds() -> CGRect? {
+        let boxes = state.entities.compactMap { entityBBox($0) }
+        guard !boxes.isEmpty else { return nil }
+        if boxes.count <= 2 {
+            return boxes.dropFirst().reduce(boxes[0]) { $0.union($1) }
+        }
+        let centers = boxes.map { CGPoint(x: $0.midX, y: $0.midY) }
+        let mcx = centers.map { $0.x }.sorted()[centers.count / 2]
+        let mcy = centers.map { $0.y }.sorted()[centers.count / 2]
+        let dists = centers.map { hypot($0.x - mcx, $0.y - mcy) }
+        let med = dists.sorted()[dists.count / 2]
+        let threshold = max(med * 4.0, 1.0)
+        var result: CGRect? = nil
+        for (i, b) in boxes.enumerated() where dists[i] <= threshold {
+            result = result.map { $0.union(b) } ?? b
+        }
+        return result
     }
     
     private func toModel(point: CGPoint, size: CGSize, bounds: CGRect) -> CGPoint {
