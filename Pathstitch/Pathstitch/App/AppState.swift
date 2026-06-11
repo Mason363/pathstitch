@@ -235,14 +235,6 @@ struct ProjectSaveContainer: Codable {
     var holeCornerBehavior: String? = nil
     var holeSide: String? = nil
     var holeRowSpacing: Double? = nil
-    var exportMeasurementLines: Bool? = nil
-    
-    // Paper tab generation settings
-    var glueTabHeight: Double? = nil
-    var glueTabType: String? = nil
-    var glueTabSide: String? = nil
-    var glueTabStartOffset: Double? = nil
-    var glueTabEndOffset: Double? = nil
 
     // Persisted batch session (optional / backward-compatible).
     var batchItems: [BatchItemSave]? = nil
@@ -273,7 +265,7 @@ class AppState {
     var editingTextString: String = ""
     var editingTextInsert: CGPoint = .zero
     var editingTextHeight: Double = 5.0
-    var editingTextWidth: Double = 30.0
+    var editingTextWidth: Double = 0.0  // model-space width of the drawn text box
     var escapePressedToken: Int = 0
     
     // Log entries
@@ -282,7 +274,6 @@ class AppState {
     // Custom status states
     var hasUnsavedChanges: Bool = false
     var isLearnModeEnabled: Bool = true
-    var exportMeasurementLines: Bool = false
     var isLogTrayExpanded: Bool = false
     var hoveredHandle: String? = nil
     
@@ -334,14 +325,6 @@ class AppState {
     
     var consolidateSvgStrokes: Bool = true
     var cleanupTolerance: Double = 0.1
-    
-    // Paper/Glue Tab configs
-    var glueTabHeight: Double = 5.0
-    var glueTabType: String = "trapezoid" // "trapezoid" or "triangle"
-    var glueTabSide: String = "left" // "left" or "right"
-    var glueTabStartOffset: Double = 0.0
-    var glueTabEndOffset: Double = 0.0
-    var isPaperFoldingExpanded: Bool = false
     
     // Sketch Tool configs
     var sketchFilletRadius: Double = 0.0
@@ -471,7 +454,6 @@ class AppState {
               let dimType = selected.dimensionType,
               let url = currentFilePath else { return }
         
-        let val = max(0.5, newValue)
         saveToHistory()
         isProcessing = true
         
@@ -482,14 +464,14 @@ class AppState {
                 if dimType == "length" {
                     let currentLength = Double(hypot(selected.start.x - selected.end.x, selected.start.y - selected.end.y))
                     if currentLength > 1e-5 {
-                        let scale = val / currentLength
+                        let scale = newValue / currentLength
                         let newEndX = selected.start.x + (selected.end.x - selected.start.x) * CGFloat(scale)
                         let newEndY = selected.start.y + (selected.end.y - selected.start.y) * CGFloat(scale)
                         params["start"] = [Double(selected.start.x), Double(selected.start.y)]
                         params["end"] = [Double(newEndX), Double(newEndY)]
                     }
                 } else if dimType == "radius" {
-                    params["radius"] = val
+                    params["radius"] = newValue
                     params["center"] = [Double(selected.start.x), Double(selected.start.y)]
                 } else if dimType == "width" || dimType == "height" {
                     guard let p1 = selected.rectP1, let p2 = selected.rectP2 else { return }
@@ -499,13 +481,13 @@ class AppState {
                         let currentW = abs(p2.x - p1.x)
                         if currentW > 1e-5 {
                             let sign: CGFloat = p2.x >= p1.x ? 1.0 : -1.0
-                            newP2.x = p1.x + sign * CGFloat(val)
+                            newP2.x = p1.x + sign * CGFloat(newValue)
                         }
                     } else if dimType == "height" {
                         let currentH = abs(p2.y - p1.y)
                         if currentH > 1e-5 {
                             let sign: CGFloat = p2.y >= p1.y ? 1.0 : -1.0
-                            newP2.y = p1.y + sign * CGFloat(val)
+                            newP2.y = p1.y + sign * CGFloat(newValue)
                         }
                     }
                     
@@ -532,18 +514,18 @@ class AppState {
                     self.currentFilePath = activeDxfURL
                     
                     if let idx = self.measurements.firstIndex(where: { $0.id == selected.id }) {
-                        self.measurements[idx].distanceMm = val
+                        self.measurements[idx].distanceMm = newValue
                         if dimType == "length" {
                             let currentLength = Double(hypot(selected.start.x - selected.end.x, selected.start.y - selected.end.y))
                             if currentLength > 1e-5 {
-                                let scale = val / currentLength
+                                let scale = newValue / currentLength
                                 let newEndX = selected.start.x + (selected.end.x - selected.start.x) * CGFloat(scale)
                                 let newEndY = selected.start.y + (selected.end.y - selected.start.y) * CGFloat(scale)
                                 self.measurements[idx].end = CGPoint(x: newEndX, y: newEndY)
                                 self.selectedMeasurement?.end = CGPoint(x: newEndX, y: newEndY)
                             }
                         } else if dimType == "radius" {
-                            let endRad = CGPoint(x: selected.start.x + CGFloat(val), y: selected.start.y)
+                            let endRad = CGPoint(x: selected.start.x + CGFloat(newValue), y: selected.start.y)
                             self.measurements[idx].end = endRad
                             self.selectedMeasurement?.end = endRad
                         } else if dimType == "width" || dimType == "height" {
@@ -553,13 +535,13 @@ class AppState {
                                 let currentW = abs(p2.x - p1.x)
                                 if currentW > 1e-5 {
                                     let sign: CGFloat = p2.x >= p1.x ? 1.0 : -1.0
-                                    newP2.x = p1.x + sign * CGFloat(val)
+                                    newP2.x = p1.x + sign * CGFloat(newValue)
                                 }
                             } else if dimType == "height" {
                                 let currentH = abs(p2.y - p1.y)
                                 if currentH > 1e-5 {
                                     let sign: CGFloat = p2.y >= p1.y ? 1.0 : -1.0
-                                    newP2.y = p1.y + sign * CGFloat(val)
+                                    newP2.y = p1.y + sign * CGFloat(newValue)
                                 }
                             }
                             
@@ -1757,18 +1739,6 @@ class AppState {
                 
                 let handlesArg: [String]? = selectedOnly ? Array(selectedHandles) : nil
                 
-                let measureLinesArg: [[String: Any]]?
-                if exportMeasurementLines {
-                    measureLinesArg = measurements.map { m in
-                        [
-                            "start": [Double(m.start.x), Double(m.start.y)],
-                            "end": [Double(m.end.x), Double(m.end.y)]
-                        ]
-                    }
-                } else {
-                    measureLinesArg = nil
-                }
-                
                 if format == "dxf" {
                     _ = try await PythonBridge.shared.run(
                         module: "dxf_ops",
@@ -1776,17 +1746,13 @@ class AppState {
                         args: [
                             "input": currentUrl.path,
                             "output": tempExportURL.path,
-                            "handles": handlesArg as Any,
-                            "measurement_lines": measureLinesArg as Any
+                            "handles": handlesArg as Any
                         ]
                     )
                 } else if format == "svg" {
                     var args: [String: Any] = ["input": currentUrl.path, "output": tempExportURL.path]
                     if let handles = handlesArg {
                         args["handles"] = handles
-                    }
-                    if let m = measureLinesArg {
-                        args["measurement_lines"] = m
                     }
                     _ = try await PythonBridge.shared.run(
                         module: "dxf_ops",
@@ -1797,9 +1763,6 @@ class AppState {
                     var args: [String: Any] = ["input": currentUrl.path, "output": tempExportURL.path]
                     if let handles = handlesArg {
                         args["handles"] = handles
-                    }
-                    if let m = measureLinesArg {
-                        args["measurement_lines"] = m
                     }
                     _ = try await PythonBridge.shared.run(
                         module: "dxf_ops",
@@ -1813,9 +1776,6 @@ class AppState {
                     var args: [String: Any] = ["input": currentUrl.path, "output": tempSVG.path]
                     if let handles = handlesArg {
                         args["handles"] = handles
-                    }
-                    if let m = measureLinesArg {
-                        args["measurement_lines"] = m
                     }
                     _ = try await PythonBridge.shared.run(
                         module: "dxf_ops",
@@ -2387,12 +2347,6 @@ class AppState {
                 holeCornerBehavior: holeCornerBehavior,
                 holeSide: holeSide,
                 holeRowSpacing: holeRowSpacing,
-                exportMeasurementLines: exportMeasurementLines,
-                glueTabHeight: glueTabHeight,
-                glueTabType: glueTabType,
-                glueTabSide: glueTabSide,
-                glueTabStartOffset: glueTabStartOffset,
-                glueTabEndOffset: glueTabEndOffset,
                 batchItems: savedBatch
             )
 
@@ -2511,12 +2465,6 @@ class AppState {
             if let hCorn = validContainer.holeCornerBehavior { self.holeCornerBehavior = hCorn }
             if let hSide = validContainer.holeSide { self.holeSide = hSide }
             if let hRow = validContainer.holeRowSpacing { self.holeRowSpacing = hRow }
-            if let expMeasure = validContainer.exportMeasurementLines { self.exportMeasurementLines = expMeasure }
-            if let gHeight = validContainer.glueTabHeight { self.glueTabHeight = gHeight }
-            if let gType = validContainer.glueTabType { self.glueTabType = gType }
-            if let gSide = validContainer.glueTabSide { self.glueTabSide = gSide }
-            if let gStart = validContainer.glueTabStartOffset { self.glueTabStartOffset = gStart }
-            if let gEnd = validContainer.glueTabEndOffset { self.glueTabEndOffset = gEnd }
 
             // Restore a persisted batch session, if any (MAS-24). DXFs are
             // written back to the session batch dir; svg/entities come straight
@@ -2659,7 +2607,7 @@ class AppState {
     }
 
     func translateSelected(dx: CGFloat, dy: CGFloat) {
-        guard let url = currentFilePath, !selectedHandles.isEmpty else { return }
+        guard currentFilePath != nil, !selectedHandles.isEmpty else { return }
         saveToHistory()
         
         let dxDouble = Double(dx)
@@ -2699,20 +2647,18 @@ class AppState {
         self.hasUnsavedChanges = true
         logEntries.append(LogEntry(action: "Translate Entities", details: "Translated selected entities by dx: \(dx), dy: \(dy)"))
         
-        // 3. Asynchronous background reconciliation to disk
+        // 3. Asynchronous background buffer write (serialized; never re-enters
+        //    reconcileBufferIfNeeded → no self-deadlock).
         let selectedHandlesSnapshot = self.selectedHandles
         let activeDxfURL = sessionTempDirectory.appendingPathComponent("active.dxf")
-        
-        let task = Task<Void, Never> {
-            // Wait for any running reconcileTask to finish first
-            await reconcileBufferIfNeeded()
-            
+        enqueueBufferWrite {
+            let inputPath = (await MainActor.run { self.currentFilePath?.path }) ?? activeDxfURL.path
             do {
                 _ = try await PythonBridge.shared.run(
                     module: "dxf_ops",
                     op: "translate_entities",
                     args: [
-                        "input": url.path,
+                        "input": inputPath,
                         "output": activeDxfURL.path,
                         "handles": Array(selectedHandlesSnapshot),
                         "dx": dxDouble,
@@ -2723,16 +2669,13 @@ class AppState {
                     self.currentFilePath = activeDxfURL
                 }
             } catch {
-                // Background translation failed; the in-memory state is still correct.
                 print("Background translation failed: \(error)")
             }
         }
-        
-        self.reconcileTask = task
     }
 
     func rotateSelected(angleDegrees: Double, center: [Double]) {
-        guard let url = currentFilePath, !selectedHandles.isEmpty else { return }
+        guard currentFilePath != nil, !selectedHandles.isEmpty else { return }
         saveToHistory()
         
         let angleRad = angleDegrees * .pi / 180.0
@@ -2777,20 +2720,18 @@ class AppState {
         self.hasUnsavedChanges = true
         logEntries.append(LogEntry(action: "Rotate Entities", details: "Rotated selected entities by angle: \(angleDegrees) around center: \(center)"))
         
-        // 3. Asynchronous background reconciliation to disk
+        // 3. Asynchronous background buffer write (serialized; never re-enters
+        //    reconcileBufferIfNeeded → no self-deadlock).
         let selectedHandlesSnapshot = self.selectedHandles
         let activeDxfURL = sessionTempDirectory.appendingPathComponent("active.dxf")
-        
-        let task = Task<Void, Never> {
-            // Wait for any running reconcileTask to finish first
-            await reconcileBufferIfNeeded()
-            
+        enqueueBufferWrite {
+            let inputPath = (await MainActor.run { self.currentFilePath?.path }) ?? activeDxfURL.path
             do {
                 _ = try await PythonBridge.shared.run(
                     module: "dxf_ops",
                     op: "rotate_entities",
                     args: [
-                        "input": url.path,
+                        "input": inputPath,
                         "output": activeDxfURL.path,
                         "handles": Array(selectedHandlesSnapshot),
                         "angle": angleDegrees,
@@ -2801,12 +2742,9 @@ class AppState {
                     self.currentFilePath = activeDxfURL
                 }
             } catch {
-                // Background rotation failed; the in-memory state is still correct.
                 print("Background rotation failed: \(error)")
             }
         }
-        
-        self.reconcileTask = task
     }
 
     func deleteSelectedMeasurement() {
@@ -2852,7 +2790,7 @@ class AppState {
         }
     }
     
-    func applyGlueTabs(height: Double, type: String, side: String, startOffset: Double, endOffset: Double) {
+    func applyGlueTabs(height: Double, type: String, side: String) {
         guard let url = currentFilePath, !selectedHandles.isEmpty else { return }
         saveToHistory()
         isProcessing = true
@@ -2870,8 +2808,6 @@ class AppState {
                         "height": height,
                         "type": type,
                         "side": side,
-                        "start_offset": startOffset,
-                        "end_offset": endOffset,
                         "layer": "GLUE_TABS"
                     ]
                 )
@@ -3033,6 +2969,11 @@ class AppState {
     /// the buffer. `op_delete_entities` is idempotent, so an occasional
     /// double-flush is harmless.
     func reconcileBufferIfNeeded() async {
+        // Wait for any in-flight optimistic op write (rotate/translate/text) and
+        // the delete-reconcile so readers see a fully up-to-date buffer.
+        if let write = await MainActor.run(body: { self.bufferWriteTask }) {
+            await write.value
+        }
         if let running = await MainActor.run(body: { self.reconcileTask }) {
             await running.value
         }
@@ -3066,6 +3007,29 @@ class AppState {
         await MainActor.run { self.reconcileTask = task }
         await task.value
         await MainActor.run { self.reconcileTask = nil }
+    }
+
+    /// In-flight serialized background buffer write for optimistic ops
+    /// (rotate/translate/text). Separate from `reconcileTask` so these writes
+    /// never await themselves — the old self-assignment deadlocked text export.
+    @ObservationIgnored private var bufferWriteTask: Task<Void, Never>? = nil
+
+    /// Serializes an optimistic op's background buffer write after any in-flight
+    /// delete-reconcile and prior writes. The in-memory model is already updated;
+    /// this only brings the on-disk mirror in line. It must NOT call
+    /// `reconcileBufferIfNeeded()` (which awaits this task → deadlock). The work
+    /// closure should read `currentFilePath` fresh as its Python input.
+    @discardableResult
+    private func enqueueBufferWrite(_ work: @escaping () async -> Void) -> Task<Void, Never> {
+        let prevReconcile = reconcileTask
+        let prevWrite = bufferWriteTask
+        let task = Task<Void, Never> {
+            await prevReconcile?.value
+            await prevWrite?.value
+            await work()
+        }
+        bufferWriteTask = task
+        return task
     }
 
     /// Reconciles the working buffer, then saves the project. Use this from
@@ -3142,13 +3106,13 @@ class AppState {
         return String(nextVal, radix: 16).uppercased()
     }
 
-    func startEditingNewText(insert: CGPoint, width: Double, height: Double) {
+    func startEditingNewText(insert: CGPoint, height: Double, width: Double = 0.0) {
         self.isEditingText = true
         self.editingTextHandle = nil
         self.editingTextString = ""
         self.editingTextInsert = insert
-        self.editingTextWidth = width
         self.editingTextHeight = height
+        self.editingTextWidth = width
     }
     
     func startEditingText(entity: DXFEntity) {
@@ -3159,6 +3123,8 @@ class AppState {
             self.editingTextInsert = CGPoint(x: start[0], y: start[1])
         }
         self.editingTextHeight = entity.height ?? 5.0
+        // Estimate the box width from the string (cf. AGENTS Rule 3).
+        self.editingTextWidth = Double((entity.text ?? "").count) * (entity.height ?? 5.0) * 0.6
     }
     
     func cancelTextEditing() {
@@ -3205,17 +3171,16 @@ class AppState {
             }
             self.hasUnsavedChanges = true
             
-            // Reconcile background DXF
-            guard let url = currentFilePath else { return }
+            // Background buffer write (serialized; no self-deadlock).
             let activeDxfURL = sessionTempDirectory.appendingPathComponent("active.dxf")
-            let task = Task<Void, Never> {
-                await reconcileBufferIfNeeded()
+            enqueueBufferWrite {
+                let inputPath = (await MainActor.run { self.currentFilePath?.path }) ?? activeDxfURL.path
                 do {
                     _ = try await PythonBridge.shared.run(
                         module: "dxf_ops",
                         op: "update_text",
                         args: [
-                            "input": url.path,
+                            "input": inputPath,
                             "output": activeDxfURL.path,
                             "handle": h,
                             "text": text,
@@ -3229,7 +3194,6 @@ class AppState {
                     print("Background text update failed: \(error)")
                 }
             }
-            self.reconcileTask = task
         } else {
             // Create new text in-memory
             saveToHistory()
@@ -3254,10 +3218,9 @@ class AppState {
             self.recomputeLayersFromEntities()
             self.hasUnsavedChanges = true
             
-            // Reconcile background DXF
+            // Background buffer write (serialized; no self-deadlock).
             let activeDxfURL = ensureActiveDXFFileExists()
-            let task = Task<Void, Never> {
-                await reconcileBufferIfNeeded()
+            enqueueBufferWrite {
                 do {
                     let res = try await PythonBridge.shared.run(
                         module: "dxf_ops",
@@ -3312,7 +3275,6 @@ class AppState {
                     print("Background text add failed: \(error)")
                 }
             }
-            self.reconcileTask = task
         }
     }
 }

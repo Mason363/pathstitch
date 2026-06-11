@@ -145,6 +145,7 @@ struct ContentView: View {
     
     @State private var isSelectionExpanded = true
     @State private var isHolesSewingExpanded = false
+    @State private var isPaperFoldingExpanded = false
     @State private var isPatterningExpanded = false
     @State private var isTextPlacingExpanded = false
     @State private var isReferenceImageExpanded = false
@@ -152,6 +153,10 @@ struct ContentView: View {
     @State private var isImportSettingsExpanded = false
     @State private var isExportSettingsExpanded = false
     @State private var isShapesExpanded = false
+    
+    @State private var glueTabHeight: Double = 5.0
+    @State private var glueTabType: String = "trapezoid" // "trapezoid" or "triangle"
+    @State private var glueTabSide: String = "left" // "left" or "right"
     
     @State private var gridCols: Int = 3
     @State private var gridRows: Int = 3
@@ -882,10 +887,9 @@ extension ContentView {
                         Picker("", selection: $state.holeSide) {
                             Text("Left").tag("left")
                             Text("Right").tag("right")
-                            Text("Both").tag("both")
                         }
                         .pickerStyle(SegmentedPickerStyle())
-                        .frame(width: 160)
+                        .frame(width: 120)
                     }
                     
                     HStack {
@@ -1014,7 +1018,7 @@ extension ContentView {
     @ViewBuilder
     private var paperFoldingSection: some View {
         if state.currentTool == .select {
-            DisclosureGroup(isExpanded: $state.isPaperFoldingExpanded) {
+            DisclosureGroup(isExpanded: $isPaperFoldingExpanded) {
                 VStack(alignment: .leading, spacing: 10) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("CREASE PATTERN")
@@ -1044,7 +1048,7 @@ extension ContentView {
                                 .font(PlasticityFont.label)
                                 .foregroundColor(Color.text_secondary)
                             Spacer()
-                            TextField("Height", value: $state.glueTabHeight, format: .number)
+                            TextField("Height", value: $glueTabHeight, format: .number)
                                 .textFieldStyle(PlainTextFieldStyle())
                                 .padding(4)
                                 .frame(width: 80)
@@ -1059,7 +1063,7 @@ extension ContentView {
                                 .font(PlasticityFont.label)
                                 .foregroundColor(Color.text_secondary)
                             Spacer()
-                            Picker("", selection: $state.glueTabType) {
+                            Picker("", selection: $glueTabType) {
                                 Text("Trapezoid").tag("trapezoid")
                                 Text("Triangle").tag("triangle")
                             }
@@ -1072,7 +1076,7 @@ extension ContentView {
                                 .font(PlasticityFont.label)
                                 .foregroundColor(Color.text_secondary)
                             Spacer()
-                            Picker("", selection: $state.glueTabSide) {
+                            Picker("", selection: $glueTabSide) {
                                 Text("Left").tag("left")
                                 Text("Right").tag("right")
                             }
@@ -1080,44 +1084,8 @@ extension ContentView {
                             .frame(width: 140)
                         }
                         
-                        HStack {
-                            Text("Start Offset (mm)")
-                                .font(PlasticityFont.label)
-                                .foregroundColor(Color.text_secondary)
-                            Spacer()
-                            TextField("Start", value: $state.glueTabStartOffset, format: .number)
-                                .textFieldStyle(PlainTextFieldStyle())
-                                .padding(4)
-                                .frame(width: 80)
-                                .background(Color.bg_input)
-                                .cornerRadius(4)
-                                .foregroundColor(Color.text_primary)
-                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                        }
-                        
-                        HStack {
-                            Text("End Offset (mm)")
-                                .font(PlasticityFont.label)
-                                .foregroundColor(Color.text_secondary)
-                            Spacer()
-                            TextField("End", value: $state.glueTabEndOffset, format: .number)
-                                .textFieldStyle(PlainTextFieldStyle())
-                                .padding(4)
-                                .frame(width: 80)
-                                .background(Color.bg_input)
-                                .cornerRadius(4)
-                                .foregroundColor(Color.text_primary)
-                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                        }
-                        
                         Button("Apply Glue Tabs") {
-                            state.applyGlueTabs(
-                                height: state.glueTabHeight,
-                                type: state.glueTabType,
-                                side: state.glueTabSide,
-                                startOffset: state.glueTabStartOffset,
-                                endOffset: state.glueTabEndOffset
-                            )
+                            state.applyGlueTabs(height: glueTabHeight, type: glueTabType, side: glueTabSide)
                         }
                         .buttonStyle(PlasticityButtonStyle(isEnabled: !state.selectedHandles.isEmpty))
                         .disabled(state.selectedHandles.isEmpty)
@@ -1136,7 +1104,7 @@ extension ContentView {
                 }
                 .contentShape(Rectangle())
                 .onTapGesture {
-                    state.isPaperFoldingExpanded.toggle()
+                    isPaperFoldingExpanded.toggle()
                 }
             }
             .accentColor(Color.accent)
@@ -1955,11 +1923,6 @@ extension ContentView {
                             .labelsHidden()
                             
                             Toggle("Export Selected Only", isOn: $exportSelectedOnly)
-                                .font(PlasticityFont.label)
-                                .foregroundColor(Color.text_primary)
-                                .toggleStyle(.checkbox)
-                            
-                            Toggle("Export Measurement Lines", isOn: $state.exportMeasurementLines)
                                 .font(PlasticityFont.label)
                                 .foregroundColor(Color.text_primary)
                                 .toggleStyle(.checkbox)
