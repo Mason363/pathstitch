@@ -10,6 +10,7 @@ import sys
 import json
 import argparse
 import os
+os.environ["EZDXF_AUTO_LOAD_FONTS"] = "False"
 import math
 from typing import Dict, List, Any, Tuple, Optional
 
@@ -1479,6 +1480,7 @@ def op_export_dxf(args: Dict[str, Any]) -> Dict[str, Any]:
     input_path = args.get("input")
     output_path = args.get("output")
     handles = args.get("handles")
+    measurement_lines = args.get("measurement_lines")
     
     if not input_path or not os.path.exists(input_path):
         return {"status": "error", "message": f"Input file not found: {input_path}"}
@@ -1492,6 +1494,22 @@ def op_export_dxf(args: Dict[str, Any]) -> Dict[str, Any]:
             for ent in list(msp):
                 if ent.dxf.handle not in handles:
                     msp.delete_entity(ent)
+        
+        if measurement_lines:
+            if "MEASUREMENTS" not in doc.layers:
+                doc.layers.new("MEASUREMENTS", dxfattribs={"color": 5})
+            if "DASHED" not in doc.linetypes:
+                try:
+                    doc.linetypes.new("DASHED", dxfattribs={"description": "Dashed", "pattern": [1.0, 0.5, -0.5]})
+                except Exception:
+                    pass
+            msp = doc.modelspace()
+            for line in measurement_lines:
+                start = line.get("start")
+                end = line.get("end")
+                if start and end:
+                    msp.add_line(start=start, end=end, dxfattribs={"layer": "MEASUREMENTS", "linetype": "DASHED"})
+                    
         doc.saveas(output_path)
         return {"status": "ok"}
     except Exception as e:
@@ -1953,6 +1971,7 @@ def op_export_svg(args: Dict[str, Any]) -> Dict[str, Any]:
     input_path = args.get("input")
     output_path = args.get("output")
     handles = args.get("handles")
+    measurement_lines = args.get("measurement_lines")
 
     if not input_path or not os.path.exists(input_path):
         return {"status": "error", "message": f"Input file not found: {input_path}"}
@@ -1961,6 +1980,20 @@ def op_export_svg(args: Dict[str, Any]) -> Dict[str, Any]:
 
     doc = ezdxf.readfile(input_path)
     msp = doc.modelspace()
+
+    if measurement_lines:
+        if "MEASUREMENTS" not in doc.layers:
+            doc.layers.new("MEASUREMENTS", dxfattribs={"color": 5})
+        if "DASHED" not in doc.linetypes:
+            try:
+                doc.linetypes.new("DASHED", dxfattribs={"description": "Dashed", "pattern": [1.0, 0.5, -0.5]})
+            except Exception:
+                pass
+        for line in measurement_lines:
+            start = line.get("start")
+            end = line.get("end")
+            if start and end:
+                msp.add_line(start=start, end=end, dxfattribs={"layer": "MEASUREMENTS", "linetype": "DASHED"})
 
     all_points = []
     layers_data: Dict[str, List[Dict[str, Any]]] = {}
@@ -1981,12 +2014,15 @@ def op_export_svg(args: Dict[str, Any]) -> Dict[str, Any]:
             if layer_name not in layers_data:
                 layers_data[layer_name] = []
 
+            linetype = ent.dxf.linetype if ent.has_dxf_attrib("linetype") else ""
+            is_dashed = (linetype.upper() == "DASHED" or layer_name.upper() == "MEASUREMENTS")
             is_closed = ent.dxftype() == "CIRCLE" or getattr(ent, "closed", False) or getattr(ent, "is_closed", False)
             layers_data[layer_name].append({
                 "type": ent.dxftype(),
                 "color": ent.dxf.color,
                 "vertices": pts,
                 "is_closed": is_closed,
+                "dashed": is_dashed,
                 "center": (ent.dxf.center.x, ent.dxf.center.y) if ent.dxftype() == "CIRCLE" else None,
                 "radius": ent.dxf.radius if ent.dxftype() == "CIRCLE" else None
             })
@@ -2039,17 +2075,21 @@ def op_export_svg(args: Dict[str, Any]) -> Dict[str, Any]:
         g = dwg.g(id=f"layer_{layer_name}", stroke=color_hex, fill="none", stroke_width=0.5)
 
         for ent in entities:
+            extra_attribs = {}
+            if ent.get("dashed"):
+                extra_attribs["stroke_dasharray"] = "2,2"
+                
             if ent["type"] == "CIRCLE":
                 cx, cy = ent["center"]
                 r = ent["radius"]
-                g.add(dwg.circle(center=(cx, -cy), r=r))
+                g.add(dwg.circle(center=(cx, -cy), r=r, **extra_attribs))
             else:
                 pts = ent["vertices"]
                 svg_pts = [(p[0], -p[1]) for p in pts]
                 if ent["is_closed"]:
-                    g.add(dwg.polygon(points=svg_pts))
+                    g.add(dwg.polygon(points=svg_pts, **extra_attribs))
                 else:
-                    g.add(dwg.polyline(points=svg_pts))
+                    g.add(dwg.polyline(points=svg_pts, **extra_attribs))
         dwg.add(g)
 
     dwg.save()
@@ -2113,6 +2153,7 @@ def op_export_pdf(args: Dict[str, Any]) -> Dict[str, Any]:
     input_path = args.get("input")
     output_path = args.get("output")
     handles = args.get("handles")
+    measurement_lines = args.get("measurement_lines")
     if not input_path or not os.path.exists(input_path):
         return {"status": "error", "message": f"Input file not found: {input_path}"}
     if not output_path:
@@ -2130,6 +2171,20 @@ def op_export_pdf(args: Dict[str, Any]) -> Dict[str, Any]:
             for ent in list(msp):
                 if ent.dxf.handle not in handles:
                     msp.delete_entity(ent)
+                    
+        if measurement_lines:
+            if "MEASUREMENTS" not in doc.layers:
+                doc.layers.new("MEASUREMENTS", dxfattribs={"color": 5})
+            if "DASHED" not in doc.linetypes:
+                try:
+                    doc.linetypes.new("DASHED", dxfattribs={"description": "Dashed", "pattern": [1.0, 0.5, -0.5]})
+                except Exception:
+                    pass
+            for line in measurement_lines:
+                start = line.get("start")
+                end = line.get("end")
+                if start and end:
+                    msp.add_line(start=start, end=end, dxfattribs={"layer": "MEASUREMENTS", "linetype": "DASHED"})
         
         fig = plt.figure()
         ax = fig.add_axes([0, 0, 1, 1])

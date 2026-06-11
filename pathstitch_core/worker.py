@@ -17,6 +17,8 @@ The JSON payload is intentionally the same shape the CLI used, so swapping the
 codec for MessagePack later (Stage 2) is a localized change to framing only.
 """
 import sys
+import os
+os.environ["EZDXF_AUTO_LOAD_FONTS"] = "False"
 import json
 import struct
 

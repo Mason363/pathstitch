@@ -235,6 +235,7 @@ struct ProjectSaveContainer: Codable {
     var holeCornerBehavior: String? = nil
     var holeSide: String? = nil
     var holeRowSpacing: Double? = nil
+    var exportMeasurementLines: Bool? = nil
 
     // Persisted batch session (optional / backward-compatible).
     var batchItems: [BatchItemSave]? = nil
@@ -265,6 +266,7 @@ class AppState {
     var editingTextString: String = ""
     var editingTextInsert: CGPoint = .zero
     var editingTextHeight: Double = 5.0
+    var editingTextWidth: Double = 30.0
     var escapePressedToken: Int = 0
     
     // Log entries
@@ -273,6 +275,7 @@ class AppState {
     // Custom status states
     var hasUnsavedChanges: Bool = false
     var isLearnModeEnabled: Bool = true
+    var exportMeasurementLines: Bool = false
     var isLogTrayExpanded: Bool = false
     var hoveredHandle: String? = nil
     
@@ -453,6 +456,7 @@ class AppState {
               let dimType = selected.dimensionType,
               let url = currentFilePath else { return }
         
+        let val = max(0.5, newValue)
         saveToHistory()
         isProcessing = true
         
@@ -463,14 +467,14 @@ class AppState {
                 if dimType == "length" {
                     let currentLength = Double(hypot(selected.start.x - selected.end.x, selected.start.y - selected.end.y))
                     if currentLength > 1e-5 {
-                        let scale = newValue / currentLength
+                        let scale = val / currentLength
                         let newEndX = selected.start.x + (selected.end.x - selected.start.x) * CGFloat(scale)
                         let newEndY = selected.start.y + (selected.end.y - selected.start.y) * CGFloat(scale)
                         params["start"] = [Double(selected.start.x), Double(selected.start.y)]
                         params["end"] = [Double(newEndX), Double(newEndY)]
                     }
                 } else if dimType == "radius" {
-                    params["radius"] = newValue
+                    params["radius"] = val
                     params["center"] = [Double(selected.start.x), Double(selected.start.y)]
                 } else if dimType == "width" || dimType == "height" {
                     guard let p1 = selected.rectP1, let p2 = selected.rectP2 else { return }
@@ -480,13 +484,13 @@ class AppState {
                         let currentW = abs(p2.x - p1.x)
                         if currentW > 1e-5 {
                             let sign: CGFloat = p2.x >= p1.x ? 1.0 : -1.0
-                            newP2.x = p1.x + sign * CGFloat(newValue)
+                            newP2.x = p1.x + sign * CGFloat(val)
                         }
                     } else if dimType == "height" {
                         let currentH = abs(p2.y - p1.y)
                         if currentH > 1e-5 {
                             let sign: CGFloat = p2.y >= p1.y ? 1.0 : -1.0
-                            newP2.y = p1.y + sign * CGFloat(newValue)
+                            newP2.y = p1.y + sign * CGFloat(val)
                         }
                     }
                     
@@ -513,18 +517,18 @@ class AppState {
                     self.currentFilePath = activeDxfURL
                     
                     if let idx = self.measurements.firstIndex(where: { $0.id == selected.id }) {
-                        self.measurements[idx].distanceMm = newValue
+                        self.measurements[idx].distanceMm = val
                         if dimType == "length" {
                             let currentLength = Double(hypot(selected.start.x - selected.end.x, selected.start.y - selected.end.y))
                             if currentLength > 1e-5 {
-                                let scale = newValue / currentLength
+                                let scale = val / currentLength
                                 let newEndX = selected.start.x + (selected.end.x - selected.start.x) * CGFloat(scale)
                                 let newEndY = selected.start.y + (selected.end.y - selected.start.y) * CGFloat(scale)
                                 self.measurements[idx].end = CGPoint(x: newEndX, y: newEndY)
                                 self.selectedMeasurement?.end = CGPoint(x: newEndX, y: newEndY)
                             }
                         } else if dimType == "radius" {
-                            let endRad = CGPoint(x: selected.start.x + CGFloat(newValue), y: selected.start.y)
+                            let endRad = CGPoint(x: selected.start.x + CGFloat(val), y: selected.start.y)
                             self.measurements[idx].end = endRad
                             self.selectedMeasurement?.end = endRad
                         } else if dimType == "width" || dimType == "height" {
@@ -534,13 +538,13 @@ class AppState {
                                 let currentW = abs(p2.x - p1.x)
                                 if currentW > 1e-5 {
                                     let sign: CGFloat = p2.x >= p1.x ? 1.0 : -1.0
-                                    newP2.x = p1.x + sign * CGFloat(newValue)
+                                    newP2.x = p1.x + sign * CGFloat(val)
                                 }
                             } else if dimType == "height" {
                                 let currentH = abs(p2.y - p1.y)
                                 if currentH > 1e-5 {
                                     let sign: CGFloat = p2.y >= p1.y ? 1.0 : -1.0
-                                    newP2.y = p1.y + sign * CGFloat(newValue)
+                                    newP2.y = p1.y + sign * CGFloat(val)
                                 }
                             }
                             
@@ -1738,6 +1742,18 @@ class AppState {
                 
                 let handlesArg: [String]? = selectedOnly ? Array(selectedHandles) : nil
                 
+                let measureLinesArg: [[String: Any]]?
+                if exportMeasurementLines {
+                    measureLinesArg = measurements.map { m in
+                        [
+                            "start": [Double(m.start.x), Double(m.start.y)],
+                            "end": [Double(m.end.x), Double(m.end.y)]
+                        ]
+                    }
+                } else {
+                    measureLinesArg = nil
+                }
+                
                 if format == "dxf" {
                     _ = try await PythonBridge.shared.run(
                         module: "dxf_ops",
@@ -1745,13 +1761,17 @@ class AppState {
                         args: [
                             "input": currentUrl.path,
                             "output": tempExportURL.path,
-                            "handles": handlesArg as Any
+                            "handles": handlesArg as Any,
+                            "measurement_lines": measureLinesArg as Any
                         ]
                     )
                 } else if format == "svg" {
                     var args: [String: Any] = ["input": currentUrl.path, "output": tempExportURL.path]
                     if let handles = handlesArg {
                         args["handles"] = handles
+                    }
+                    if let m = measureLinesArg {
+                        args["measurement_lines"] = m
                     }
                     _ = try await PythonBridge.shared.run(
                         module: "dxf_ops",
@@ -1762,6 +1782,9 @@ class AppState {
                     var args: [String: Any] = ["input": currentUrl.path, "output": tempExportURL.path]
                     if let handles = handlesArg {
                         args["handles"] = handles
+                    }
+                    if let m = measureLinesArg {
+                        args["measurement_lines"] = m
                     }
                     _ = try await PythonBridge.shared.run(
                         module: "dxf_ops",
@@ -1775,6 +1798,9 @@ class AppState {
                     var args: [String: Any] = ["input": currentUrl.path, "output": tempSVG.path]
                     if let handles = handlesArg {
                         args["handles"] = handles
+                    }
+                    if let m = measureLinesArg {
+                        args["measurement_lines"] = m
                     }
                     _ = try await PythonBridge.shared.run(
                         module: "dxf_ops",
@@ -2346,6 +2372,7 @@ class AppState {
                 holeCornerBehavior: holeCornerBehavior,
                 holeSide: holeSide,
                 holeRowSpacing: holeRowSpacing,
+                exportMeasurementLines: exportMeasurementLines,
                 batchItems: savedBatch
             )
 
@@ -2464,6 +2491,7 @@ class AppState {
             if let hCorn = validContainer.holeCornerBehavior { self.holeCornerBehavior = hCorn }
             if let hSide = validContainer.holeSide { self.holeSide = hSide }
             if let hRow = validContainer.holeRowSpacing { self.holeRowSpacing = hRow }
+            if let expMeasure = validContainer.exportMeasurementLines { self.exportMeasurementLines = expMeasure }
 
             // Restore a persisted batch session, if any (MAS-24). DXFs are
             // written back to the session batch dir; svg/entities come straight
@@ -3087,11 +3115,12 @@ class AppState {
         return String(nextVal, radix: 16).uppercased()
     }
 
-    func startEditingNewText(insert: CGPoint, height: Double) {
+    func startEditingNewText(insert: CGPoint, width: Double, height: Double) {
         self.isEditingText = true
         self.editingTextHandle = nil
         self.editingTextString = ""
         self.editingTextInsert = insert
+        self.editingTextWidth = width
         self.editingTextHeight = height
     }
     

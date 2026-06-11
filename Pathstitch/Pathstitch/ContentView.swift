@@ -1926,6 +1926,11 @@ extension ContentView {
                                 .font(PlasticityFont.label)
                                 .foregroundColor(Color.text_primary)
                                 .toggleStyle(.checkbox)
+                            
+                            Toggle("Export Measurement Lines", isOn: $state.exportMeasurementLines)
+                                .font(PlasticityFont.label)
+                                .foregroundColor(Color.text_primary)
+                                .toggleStyle(.checkbox)
                         }
                         .padding(.top, 4)
                     } label: {
