@@ -121,6 +121,7 @@ struct DXFEntity: Identifiable, Codable, Equatable, Hashable {
     let closed: Bool?
     let text: String?
     let height: Double?
+    var rotation: Double? = nil   // TEXT rotation, degrees CCW (DXF convention)
 
     func translated(dx: Double, dy: Double) -> DXFEntity {
         DXFEntity(
@@ -137,7 +138,8 @@ struct DXFEntity: Identifiable, Codable, Equatable, Hashable {
             vertices: vertices.map { pts in pts.map { [$0[0] + dx, $0[1] + dy] } },
             closed: closed,
             text: text,
-            height: height
+            height: height,
+            rotation: rotation
         )
     }
 
@@ -175,7 +177,8 @@ struct DXFEntity: Identifiable, Codable, Equatable, Hashable {
             vertices: vertices.map { pts in pts.map { rotPt($0) } },
             closed: closed,
             text: text,
-            height: height
+            height: height,
+            rotation: (type == "TEXT") ? ((rotation ?? 0.0) + angleDegrees) : rotation
         )
     }
 }

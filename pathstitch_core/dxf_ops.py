@@ -230,6 +230,7 @@ def op_list_entities(args: Dict[str, Any]) -> Dict[str, Any]:
                 data["text"] = ent.dxf.text
                 data["start"] = [ent.dxf.insert.x, ent.dxf.insert.y]
                 data["height"] = ent.dxf.height
+                data["rotation"] = float(getattr(ent.dxf, "rotation", 0.0) or 0.0)
             entities.append(data)
         except Exception as e:
             # Skip invalid entities

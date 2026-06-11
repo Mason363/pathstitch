@@ -482,6 +482,17 @@ struct DxfCanvasView: View {
                     cycleDimension(size: viewSize, modelBounds: modelBounds)
                     return .handled
                 }
+                .onKeyPress(.escape) {
+                    editingDimension = nil
+                    isDimensionEditorFocused = false
+                    return .handled
+                }
+                .onKeyPress(characters: CharacterSet.letters) { _ in
+                    // Any letter key exits the line dimensioning box.
+                    editingDimension = nil
+                    isDimensionEditorFocused = false
+                    return .handled
+                }
                 .textFieldStyle(PlainTextFieldStyle())
                 .font(.system(size: 11, weight: .bold))
                 .padding(.horizontal, 8)
@@ -1032,11 +1043,9 @@ struct DxfCanvasView: View {
                     }
                 }
                 
-                if state.currentTool == .sketchLine {
-                    sketchStartPoint = end   // chain: next click continues the polyline
-                } else {
-                    sketchStartPoint = nil
-                }
+                // Single line: the second click finishes the line. The user stays
+                // on the Line tool, and the next click starts a fresh line (no chain).
+                sketchStartPoint = nil
                 sketchAwaitingSecondClick = false
             }
             return
@@ -1998,9 +2007,29 @@ struct DxfCanvasView: View {
                 let scale: CGFloat = state.canvasScale
                 let h: CGFloat = CGFloat(baseHeight) * scale
                 let textFont: Font = .system(size: h)
-                let uiText: Text = Text(textStr).font(textFont).foregroundColor(strokeColor)
+                // Selected → accent; hovered → darker, signalling the whole text is
+                // grabbable as one unit (one click selects, double click edits).
+                let baseColor = state.layers.first(where: { $0.name == ent.layer })?.color ?? Color.text_primary
+                let textColor: Color
+                if state.selectedHandles.contains(ent.handle) {
+                    textColor = Color.accent
+                } else if state.hoveredHandle == ent.handle {
+                    textColor = Color(nsColor: NSColor(baseColor).blended(withFraction: 0.5, of: .black) ?? NSColor(baseColor))
+                } else {
+                    textColor = baseColor
+                }
+                let uiText: Text = Text(textStr).font(textFont).foregroundColor(textColor)
                 let resolvedText = context.resolve(uiText)
-                context.draw(resolvedText, at: sc, anchor: .bottomLeading)
+                let rotDeg = ent.rotation ?? 0.0
+                if abs(rotDeg) > 0.001 {
+                    context.drawLayer { ctx in
+                        ctx.translateBy(x: sc.x, y: sc.y)
+                        ctx.rotate(by: Angle(degrees: -rotDeg))  // CCW (DXF) → screen (Y-down)
+                        ctx.draw(resolvedText, at: .zero, anchor: .bottomLeading)
+                    }
+                } else {
+                    context.draw(resolvedText, at: sc, anchor: .bottomLeading)
+                }
             }
         }
     }
