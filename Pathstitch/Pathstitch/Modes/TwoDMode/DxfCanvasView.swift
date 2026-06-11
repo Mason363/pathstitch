@@ -14,6 +14,7 @@ struct DxfCanvasView: View {
     @State private var sketchStartPoint: CGPoint? = nil // in model coordinates
     @State private var sketchAwaitingSecondClick = false // true after the 1st click, before the 2nd commits
     @State private var editingMeasureId: UUID? = nil
+    @State private var hoveredMeasurementId: UUID? = nil
     @State private var editingIsStart: Bool = false
     
     @State private var gizmoDragOffset = CGSize.zero
@@ -26,6 +27,10 @@ struct DxfCanvasView: View {
     @State private var gizmoRotationStartAngle: Double? = nil
     @State private var isHoveringFilletHandle = false
     @State private var isHoveringOffsetHandle = false
+    @State private var isHoveringStartOffset = false
+    @State private var isDraggingStartOffset = false
+    @State private var isHoveringEndOffset = false
+    @State private var isDraggingEndOffset = false
     
     @State private var editingDimension: MeasurementLine? = nil
     @State private var editingDimensionText: String = ""
@@ -104,8 +109,15 @@ struct DxfCanvasView: View {
                         } else {
                             state.hoveredHandle = nil
                         }
+                        
+                        if let nearestMeasure = findNearestMeasurement(screenPt: mouseLocation, size: geo.size, bounds: modelBounds) {
+                            hoveredMeasurementId = nearestMeasure.id
+                        } else {
+                            hoveredMeasurementId = nil
+                        }
                     } else {
                         state.hoveredHandle = nil
+                        hoveredMeasurementId = nil
                     }
                 }
                 .onChange(of: state.fitRequestToken) { _, _ in
@@ -133,6 +145,11 @@ struct DxfCanvasView: View {
                 .onChange(of: editingDimension) { _, newDim in
                     if newDim != nil {
                         isDimensionEditorFocused = true
+                        // Select the field contents so typing immediately overrides
+                        // the current value — on creation and on each Tab switch (§5).
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                            (NSApp.keyWindow?.firstResponder as? NSText)?.selectAll(nil)
+                        }
                     } else {
                         isDimensionEditorFocused = false
                     }
@@ -219,62 +236,59 @@ struct DxfCanvasView: View {
             if let centerModel = selectionCenterModel {
                 let centerScreen = toScreen(dx: Double(centerModel.x), dy: Double(centerModel.y), size: viewSize, bounds: modelBounds)
                 
-                ZStack {
-                    // X-axis constraint handle (Red Line & Arrow)
-                    Path { p in
-                        p.move(to: CGPoint(x: 0, y: 0))
-                        p.addLine(to: CGPoint(x: 70, y: 0))
-                    }
-                    .stroke(Color.red, lineWidth: 2)
-                    
-                    Image(systemName: "play.fill")
-                        .resizable()
-                        .foregroundColor(.red)
-                        .frame(width: 14, height: 16)
-                        .offset(x: 68)
-                        .gesture(
-                            DragGesture(coordinateSpace: .global)
-                                .onChanged { val in
-                                    gizmoDragOffset = CGSize(width: val.translation.width, height: 0)
-                                }
-                                .onEnded { val in
-                                    let dx = val.translation.width / state.canvasScale
-                                    state.translateSelected(dx: dx, dy: 0)
-                                    gizmoDragOffset = .zero
-                                }
-                        )
-                    
-                    // Y-axis constraint handle (Green Line & Arrow)
-                    Path { p in
-                        p.move(to: CGPoint(x: 0, y: 0))
-                        p.addLine(to: CGPoint(x: 0, y: -70))
-                    }
-                    .stroke(Color.green, lineWidth: 2)
-                    
-                    Image(systemName: "play.fill")
-                        .resizable()
-                        .foregroundColor(.green)
-                        .frame(width: 14, height: 16)
-                        .rotationEffect(.degrees(-90))
-                        .offset(y: -68)
-                        .gesture(
-                            DragGesture(coordinateSpace: .global)
-                                .onChanged { val in
-                                    gizmoDragOffset = CGSize(width: 0, height: val.translation.height)
-                                }
-                                .onEnded { val in
-                                    let dy = -val.translation.height / state.canvasScale
-                                    state.translateSelected(dx: 0, dy: dy)
-                                    gizmoDragOffset = .zero
-                                }
-                        )
-                    
-                    // Blue Rotation handle (stem + circle). Drawn in a fixed-size
-                    // GeometryReader so the stem pivots EXACTLY at the gizmo centre
-                    // and the circle tracks the cursor — no `.rotationEffect` pivot
-                    // error (which over-turned and left a detached "ghost" stem).
                     GeometryReader { g in
                         let c = CGPoint(x: g.size.width / 2, y: g.size.height / 2)
+                        
+                        // X-axis constraint handle (Red Line & Arrow)
+                        Path { p in
+                            p.move(to: c)
+                            p.addLine(to: CGPoint(x: c.x + 70, y: c.y))
+                        }
+                        .stroke(Color.red, lineWidth: 2)
+                        
+                        Image(systemName: "play.fill")
+                            .resizable()
+                            .foregroundColor(.red)
+                            .frame(width: 14, height: 16)
+                            .position(x: c.x + 68, y: c.y)
+                            .gesture(
+                                DragGesture(coordinateSpace: .global)
+                                    .onChanged { val in
+                                        gizmoDragOffset = CGSize(width: val.translation.width, height: 0)
+                                    }
+                                    .onEnded { val in
+                                        let dx = val.translation.width / state.canvasScale
+                                        state.translateSelected(dx: dx, dy: 0)
+                                        gizmoDragOffset = .zero
+                                    }
+                            )
+                        
+                        // Y-axis constraint handle (Green Line & Arrow)
+                        Path { p in
+                            p.move(to: c)
+                            p.addLine(to: CGPoint(x: c.x, y: c.y - 70))
+                        }
+                        .stroke(Color.green, lineWidth: 2)
+                        
+                        Image(systemName: "play.fill")
+                            .resizable()
+                            .foregroundColor(.green)
+                            .frame(width: 14, height: 16)
+                            .rotationEffect(.degrees(-90))
+                            .position(x: c.x, y: c.y - 68)
+                            .gesture(
+                                DragGesture(coordinateSpace: .global)
+                                    .onChanged { val in
+                                        gizmoDragOffset = CGSize(width: 0, height: val.translation.height)
+                                    }
+                                    .onEnded { val in
+                                        let dy = -val.translation.height / state.canvasScale
+                                        state.translateSelected(dx: 0, dy: dy)
+                                        gizmoDragOffset = .zero
+                                    }
+                            )
+                        
+                        // Blue Rotation handle (stem + circle).
                         let ang = gizmoDragRotation * .pi / 180.0
                         let hp = CGPoint(x: c.x + sin(ang) * 100, y: c.y - cos(ang) * 100)
                         Path { p in
@@ -315,29 +329,29 @@ struct DxfCanvasView: View {
                                         }
                                     }
                             )
+                        
+                        // Center free movement box (Yellow square)
+                        Rectangle()
+                            .fill(Color.yellow)
+                            .frame(width: 16, height: 16)
+                            .border(Color.black, width: 1)
+                            .position(c)
+                            .gesture(
+                                DragGesture(coordinateSpace: .global)
+                                    .onChanged { val in
+                                        gizmoDragOffset = val.translation
+                                    }
+                                    .onEnded { val in
+                                        let dx = val.translation.width / state.canvasScale
+                                        let dy = -val.translation.height / state.canvasScale
+                                        state.translateSelected(dx: dx, dy: dy)
+                                        gizmoDragOffset = .zero
+                                    }
+                            )
                     }
                     .frame(width: 240, height: 240)
-                    
-                    // Center free movement box (Yellow square)
-                    Rectangle()
-                        .fill(Color.yellow)
-                        .frame(width: 16, height: 16)
-                        .border(Color.black, width: 1)
-                        .gesture(
-                            DragGesture(coordinateSpace: .global)
-                                .onChanged { val in
-                                    gizmoDragOffset = val.translation
-                                }
-                                .onEnded { val in
-                                    let dx = val.translation.width / state.canvasScale
-                                    let dy = -val.translation.height / state.canvasScale
-                                    state.translateSelected(dx: dx, dy: dy)
-                                    gizmoDragOffset = .zero
-                                }
-                        )
-                }
-                .offset(gizmoDragOffset)
-                .position(centerScreen)
+                    .offset(gizmoDragOffset)
+                    .position(centerScreen)
             }
             
             // Fillet Drag Handle Overlay
@@ -427,6 +441,93 @@ struct DxfCanvasView: View {
                                 state.applyOffset()
                             }
                     )
+            }
+            
+            // Glue Tab Start/End Offset Drag Handles
+            if let ent = getSelectedLineEntity(),
+               let s = ent.start,
+               let e = ent.end {
+                let p1 = CGPoint(x: s[0], y: s[1])
+                let p2 = CGPoint(x: e[0], y: e[1])
+                let dx = p2.x - p1.x
+                let dy = p2.y - p1.y
+                let L = hypot(dx, dy)
+                
+                if L >= 0.1 {
+                    let ux = dx / L
+                    let uy = dy / L
+                    
+                    let startOffset = CGFloat(state.glueTabStartOffset)
+                    let endOffset = CGFloat(state.glueTabEndOffset)
+                    
+                    // Coordinates in model space
+                    let h1Model = CGPoint(x: p1.x + startOffset * ux, y: p1.y + startOffset * uy)
+                    let h2Model = CGPoint(x: p2.x - endOffset * ux, y: p2.y - endOffset * uy)
+                    
+                    // Coordinates in screen space
+                    let h1Screen = toScreen(dx: Double(h1Model.x), dy: Double(h1Model.y), size: viewSize, bounds: modelBounds)
+                    let h2Screen = toScreen(dx: Double(h2Model.x), dy: Double(h2Model.y), size: viewSize, bounds: modelBounds)
+                    
+                    // Start Offset Handle (Purple circular handle)
+                    Circle()
+                        .fill(isHoveringStartOffset || isDraggingStartOffset ? Color.purple.opacity(0.8) : Color.purple)
+                        .frame(width: 16, height: 16)
+                        .overlay(
+                            Circle()
+                                .stroke(Color.white, lineWidth: 2)
+                        )
+                        .shadow(radius: 2)
+                        .scaleEffect(isHoveringStartOffset || isDraggingStartOffset ? 1.25 : 1.0)
+                        .animation(.spring(response: 0.2, dampingFraction: 0.6), value: isHoveringStartOffset || isDraggingStartOffset)
+                        .position(h1Screen)
+                        .onHover { hovering in
+                            isHoveringStartOffset = hovering
+                        }
+                        .gesture(
+                            DragGesture(coordinateSpace: .global)
+                                .onChanged { val in
+                                    isDraggingStartOffset = true
+                                    let modelPt = toModel(point: val.location, size: viewSize, bounds: modelBounds)
+                                    let vecX = modelPt.x - p1.x
+                                    let vecY = modelPt.y - p1.y
+                                    let proj = vecX * ux + vecY * uy
+                                    state.glueTabStartOffset = max(0.0, min(Double(L) - state.glueTabEndOffset - 1.0, Double(proj)))
+                                }
+                                .onEnded { _ in
+                                    isDraggingStartOffset = false
+                                }
+                        )
+                        
+                    // End Offset Handle (Purple circular handle)
+                    Circle()
+                        .fill(isHoveringEndOffset || isDraggingEndOffset ? Color.purple.opacity(0.8) : Color.purple)
+                        .frame(width: 16, height: 16)
+                        .overlay(
+                            Circle()
+                                .stroke(Color.white, lineWidth: 2)
+                        )
+                        .shadow(radius: 2)
+                        .scaleEffect(isHoveringEndOffset || isDraggingEndOffset ? 1.25 : 1.0)
+                        .animation(.spring(response: 0.2, dampingFraction: 0.6), value: isHoveringEndOffset || isDraggingEndOffset)
+                        .position(h2Screen)
+                        .onHover { hovering in
+                            isHoveringEndOffset = hovering
+                        }
+                        .gesture(
+                            DragGesture(coordinateSpace: .global)
+                                .onChanged { val in
+                                    isDraggingEndOffset = true
+                                    let modelPt = toModel(point: val.location, size: viewSize, bounds: modelBounds)
+                                    let vecX = p2.x - modelPt.x
+                                    let vecY = p2.y - modelPt.y
+                                    let proj = vecX * ux + vecY * uy
+                                    state.glueTabEndOffset = max(0.0, min(Double(L) - state.glueTabStartOffset - 1.0, Double(proj)))
+                                }
+                                .onEnded { _ in
+                                    isDraggingEndOffset = false
+                                }
+                        )
+                }
             }
             
             // Calibration Points visual markers
@@ -572,7 +673,7 @@ struct DxfCanvasView: View {
             if isSelected {
                 strokeColor = isOriginal ? Color.accent : baseColor
             } else if isHovered {
-                strokeColor = isOriginal ? Color.accent.opacity(0.5) : baseColor.opacity(0.6)
+                strokeColor = Color.accent_hover
             } else {
                 strokeColor = baseColor
             }
@@ -603,6 +704,11 @@ struct DxfCanvasView: View {
             drawPreviewEntity(ent, strokeColor: strokeColor, strokeStyle: strokeStyle, size: size, modelBounds: modelBounds, context: &context)
         }
         
+        // Draw Glue Tab Preview
+        if let ent = getSelectedLineEntity() {
+            drawGlueTabPreview(ent, size: size, modelBounds: modelBounds, context: &context)
+        }
+        
         // Draw Locked Measurement Lines
         for measure in state.measurements {
             if measure.isAutoDimension {
@@ -615,6 +721,7 @@ struct DxfCanvasView: View {
             }
             
             let isSelected = state.selectedMeasurement?.id == measure.id
+            let isHovered = hoveredMeasurementId == measure.id
             let isMeasuringSelectedEntity = (measure.entityHandle != nil && state.selectedHandles.contains(measure.entityHandle!))
             
             context.drawLayer { context in
@@ -631,7 +738,7 @@ struct DxfCanvasView: View {
                     }
                 }
                 
-                drawMeasurement(measure, isSelected: isSelected, size: size, modelBounds: modelBounds, context: &context)
+                drawMeasurement(measure, isSelected: isSelected, isHovered: isHovered, size: size, modelBounds: modelBounds, context: &context)
             }
         }
         
@@ -1660,8 +1767,14 @@ struct DxfCanvasView: View {
                 }
             } else if ent.type == "TEXT", let start = ent.start, let textHeight = ent.height {
                 let textLen = Double(ent.text?.count ?? 6)
-                let textWidth = textLen * textHeight * 0.6
-                distModel = distanceToSegment(pt: modelPt, start: CGPoint(x: start[0], y: start[1]), end: CGPoint(x: start[0] + textWidth, y: start[1]))
+                let textWidth = max(textLen * textHeight * 0.6, textHeight)
+                // Whole bounding-box hit (distance 0 inside) so clicking anywhere
+                // on the text selects the entire entity, not just its baseline.
+                let minX = start[0], maxX = start[0] + textWidth
+                let minY = start[1], maxY = start[1] + textHeight
+                let cx = min(max(Double(modelPt.x), minX), maxX)
+                let cy = min(max(Double(modelPt.y), minY), maxY)
+                distModel = hypot(Double(modelPt.x) - cx, Double(modelPt.y) - cy)
             } else if let vertices = ent.vertices {
                 for i in 0..<vertices.count {
                     let nextIdx = (i + 1) % vertices.count
@@ -1959,6 +2072,80 @@ struct DxfCanvasView: View {
         }
     }
 
+    private func getSelectedLineEntity() -> DXFEntity? {
+        if state.selectedHandles.count == 1,
+           let handle = state.selectedHandles.first,
+           let ent = state.entities.first(where: { $0.handle == handle }),
+           ent.type == "LINE",
+           ent.start != nil,
+           ent.end != nil {
+            return ent
+        }
+        return nil
+    }
+
+    private func drawGlueTabPreview(_ ent: DXFEntity, size: CGSize, modelBounds: CGRect, context: inout GraphicsContext) {
+        guard let s = ent.start, let e = ent.end else { return }
+        let p1 = CGPoint(x: s[0], y: s[1])
+        let p2 = CGPoint(x: e[0], y: e[1])
+        
+        let dx = p2.x - p1.x
+        let dy = p2.y - p1.y
+        let L = hypot(dx, dy)
+        if L < 0.1 { return }
+        
+        let ux = dx / L
+        let uy = dy / L
+        
+        let height = CGFloat(state.glueTabHeight)
+        let tabType = state.glueTabType
+        let side = state.glueTabSide
+        let startOffset = CGFloat(state.glueTabStartOffset)
+        let endOffset = CGFloat(state.glueTabEndOffset)
+        
+        if startOffset + endOffset >= L { return }
+        
+        let nx: CGFloat
+        let ny: CGFloat
+        if side == "left" {
+            nx = uy
+            ny = -ux
+        } else {
+            nx = -uy
+            ny = ux
+        }
+        
+        let p1_tab = CGPoint(x: p1.x + startOffset * ux, y: p1.y + startOffset * uy)
+        let p2_tab = CGPoint(x: p2.x - endOffset * ux, y: p2.y - endOffset * uy)
+        let L_tab = L - startOffset - endOffset
+        
+        var tabPts: [CGPoint] = [p1_tab]
+        
+        if tabType == "triangle" {
+            let midX = (p1_tab.x + p2_tab.x) / 2.0
+            let midY = (p1_tab.y + p2_tab.y) / 2.0
+            let peak = CGPoint(x: midX + height * nx, y: midY + height * ny)
+            tabPts.append(peak)
+        } else {
+            let hOffset = min(height, L_tab / 2.1)
+            let t1 = CGPoint(x: p1_tab.x + hOffset * ux + height * nx, y: p1_tab.y + hOffset * uy + height * ny)
+            let t2 = CGPoint(x: p2_tab.x - hOffset * ux + height * nx, y: p2_tab.y - hOffset * uy + height * ny)
+            tabPts.append(t1)
+            tabPts.append(t2)
+        }
+        tabPts.append(p2_tab)
+        
+        var path = SwiftUI.Path()
+        let screenStart = toScreen(dx: Double(tabPts[0].x), dy: Double(tabPts[0].y), size: size, bounds: modelBounds)
+        path.move(to: screenStart)
+        for i in 1..<tabPts.count {
+            let screenPt = toScreen(dx: Double(tabPts[i].x), dy: Double(tabPts[i].y), size: size, bounds: modelBounds)
+            path.addLine(to: screenPt)
+        }
+        
+        context.stroke(path, with: .color(Color.purple.opacity(0.8)), style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round, dash: [4, 3]))
+    }
+
     private func drawEntity(_ ent: DXFEntity, strokeColor: Color, strokeWidth: Double, size: CGSize, modelBounds: CGRect, context: inout GraphicsContext) {
         var path = SwiftUI.Path()
         if ent.type == "LINE", let s = ent.start, let e = ent.end {
@@ -2014,7 +2201,7 @@ struct DxfCanvasView: View {
                 if state.selectedHandles.contains(ent.handle) {
                     textColor = Color.accent
                 } else if state.hoveredHandle == ent.handle {
-                    textColor = Color(nsColor: NSColor(baseColor).blended(withFraction: 0.5, of: .black) ?? NSColor(baseColor))
+                    textColor = Color.accent_hover
                 } else {
                     textColor = baseColor
                 }
@@ -2076,7 +2263,7 @@ struct DxfCanvasView: View {
         }
     }
 
-    private func drawMeasurement(_ measure: MeasurementLine, isSelected: Bool, size: CGSize, modelBounds: CGRect, context: inout GraphicsContext) {
+    private func drawMeasurement(_ measure: MeasurementLine, isSelected: Bool, isHovered: Bool, size: CGSize, modelBounds: CGRect, context: inout GraphicsContext) {
         let startScreen = toScreen(dx: measure.start.x, dy: measure.start.y, size: size, bounds: modelBounds)
         let endScreen = toScreen(dx: measure.end.x, dy: measure.end.y, size: size, bounds: modelBounds)
         
@@ -2090,6 +2277,9 @@ struct DxfCanvasView: View {
         if isSelected {
             color = Color.white // Selected highlight
             strokeStyle = StrokeStyle(lineWidth: 2.5, lineCap: .round)
+        } else if isHovered {
+            color = Color.accent_hover // Hover highlight
+            strokeStyle = StrokeStyle(lineWidth: 2.0, lineCap: .round)
         } else if measure.isAutoDimension {
             color = Color.cyan // Auto dimension (Solid)
             strokeStyle = StrokeStyle(lineWidth: 1.5, lineCap: .round)

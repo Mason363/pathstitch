@@ -31,18 +31,19 @@ def aci_to_hex(aci: int) -> str:
 def snap_endpoints(geoms: List[LineString], tolerance: float = 0.05) -> List[LineString]:
     """
     Clusters and snaps endpoints of LineStrings that are within a given tolerance.
+    Also snaps endpoints to nearby segments of other LineStrings.
     Helps prepare curves for successful line merging.
     """
     if not geoms:
         return []
 
-    # Extract all endpoints
+    # 1. Cluster and snap endpoints to endpoints first
     endpoints = []
     for g in geoms:
-        endpoints.append(g.coords[0])
-        endpoints.append(g.coords[-1])
+        if len(g.coords) >= 2:
+            endpoints.append(g.coords[0])
+            endpoints.append(g.coords[-1])
 
-    # Cluster endpoints
     clusters: List[Tuple[float, float]] = []
     for pt in endpoints:
         matched = False
@@ -54,7 +55,6 @@ def snap_endpoints(geoms: List[LineString], tolerance: float = 0.05) -> List[Lin
         if not matched:
             clusters.append(pt)
 
-    # Snap geometry endpoints to their cluster centers
     snapped_geoms = []
     for g in geoms:
         coords = list(g.coords)
@@ -76,7 +76,54 @@ def snap_endpoints(geoms: List[LineString], tolerance: float = 0.05) -> List[Lin
                 break
 
         snapped_geoms.append(LineString(coords))
-    return snapped_geoms
+
+    # 2. Project remaining endpoints onto nearby segments of other geometries
+    final_geoms = []
+    for i, g in enumerate(snapped_geoms):
+        coords = list(g.coords)
+        if len(coords) < 2:
+            final_geoms.append(g)
+            continue
+            
+        # Check start point
+        start_pt = ShapelyPoint(coords[0])
+        best_dist = float('inf')
+        best_pt = None
+        for j, other in enumerate(snapped_geoms):
+            if i == j:
+                continue
+            dist = other.distance(start_pt)
+            if 1e-5 < dist < tolerance and dist < best_dist:
+                proj_dist = other.project(start_pt)
+                closest_pt = other.interpolate(proj_dist)
+                actual_dist = math.hypot(coords[0][0] - closest_pt.x, coords[0][1] - closest_pt.y)
+                if actual_dist < tolerance:
+                    best_dist = dist
+                    best_pt = (closest_pt.x, closest_pt.y)
+        if best_pt is not None:
+            coords[0] = best_pt
+            
+        # Check end point
+        end_pt = ShapelyPoint(coords[-1])
+        best_dist = float('inf')
+        best_pt = None
+        for j, other in enumerate(snapped_geoms):
+            if i == j:
+                continue
+            dist = other.distance(end_pt)
+            if 1e-5 < dist < tolerance and dist < best_dist:
+                proj_dist = other.project(end_pt)
+                closest_pt = other.interpolate(proj_dist)
+                actual_dist = math.hypot(coords[-1][0] - closest_pt.x, coords[-1][1] - closest_pt.y)
+                if actual_dist < tolerance:
+                    best_dist = dist
+                    best_pt = (closest_pt.x, closest_pt.y)
+        if best_pt is not None:
+            coords[-1] = best_pt
+            
+        final_geoms.append(LineString(coords))
+
+    return final_geoms
 
 def find_corners(coords: List[Tuple[float, float]], angle_threshold_deg: float = 15.0) -> List[Tuple[float, float]]:
     """
@@ -1772,11 +1819,20 @@ def op_add_holes(args: Dict[str, Any]) -> Dict[str, Any]:
                                     parent_dist = path.distance(p_pt)
                                     
                                     # Line proximity filter check for self-overlap
+                                    is_overlap = False
                                     if enable_line_proximity_filter:
                                         if parent_dist < line_proximity_threshold:
-                                            continue
+                                            is_overlap = True
                                     else:
                                         if parent_dist < dist - 0.5:
+                                            is_overlap = True
+                                            
+                                    if is_overlap:
+                                        proj_d = path.project(p_pt)
+                                        d_diff = abs(d - proj_d)
+                                        if is_closed:
+                                            d_diff = min(d_diff, L - d_diff)
+                                        if d_diff > 3.0 * offset_distance:
                                             continue
                                             
                                     if check_collision_with_others(p_pt, other_geoms, hole_radius, path):
@@ -1795,11 +1851,20 @@ def op_add_holes(args: Dict[str, Any]) -> Dict[str, Any]:
                     parent_dist = path.distance(p_pt)
                     
                     # Line proximity filter check for self-overlap
+                    is_overlap = False
                     if enable_line_proximity_filter:
                         if parent_dist < line_proximity_threshold:
-                            continue
+                            is_overlap = True
                     else:
                         if parent_dist < dist - 0.5:
+                            is_overlap = True
+                            
+                    if is_overlap:
+                        proj_d = path.project(p_pt)
+                        d_diff = abs(d - proj_d)
+                        if is_closed:
+                            d_diff = min(d_diff, L - d_diff)
+                        if d_diff > 3.0 * offset_distance:
                             continue
                             
                     if check_collision_with_others(p_pt, other_geoms, hole_radius, path):
@@ -2362,6 +2427,8 @@ def op_add_glue_tabs(args: Dict[str, Any]) -> Dict[str, Any]:
     height = float(args.get("height", 8.0))
     tab_type = args.get("type", "trapezoid")
     side = args.get("side", "left")
+    start_offset = float(args.get("start_offset", 0.0))
+    end_offset = float(args.get("end_offset", 0.0))
     layer = args.get("layer", "GLUE_TABS")
     
     if not input_path or not os.path.exists(input_path):
@@ -2397,28 +2464,36 @@ def op_add_glue_tabs(args: Dict[str, Any]) -> Dict[str, Any]:
                 ux = dx / L
                 uy = dy / L
                 
+                # Swap side to correct left/right flipping
                 if side == "left":
-                    nx = -uy
-                    ny = ux
-                else:
                     nx = uy
                     ny = -ux
+                else:
+                    nx = -uy
+                    ny = ux
                     
-                tab_pts = [p1]
+                if start_offset + end_offset >= L:
+                    continue
+                    
+                p1_tab = (p1[0] + start_offset * ux, p1[1] + start_offset * uy)
+                p2_tab = (p2[0] - end_offset * ux, p2[1] - end_offset * uy)
+                L_tab = L - start_offset - end_offset
+                
+                tab_pts = [p1_tab]
                 
                 if tab_type == "triangle":
-                    mid_x = (p1[0] + p2[0]) / 2.0
-                    mid_y = (p1[1] + p2[1]) / 2.0
+                    mid_x = (p1_tab[0] + p2_tab[0]) / 2.0
+                    mid_y = (p1_tab[1] + p2_tab[1]) / 2.0
                     peak = (mid_x + height * nx, mid_y + height * ny)
                     tab_pts.append(peak)
                 else:
-                    h_offset = min(height, L / 2.1)
-                    t1 = (p1[0] + h_offset * ux + height * nx, p1[1] + h_offset * uy + height * ny)
-                    t2 = (p2[0] - h_offset * ux + height * nx, p2[1] - h_offset * uy + height * ny)
+                    h_offset = min(height, L_tab / 2.1)
+                    t1 = (p1_tab[0] + h_offset * ux + height * nx, p1_tab[1] + h_offset * uy + height * ny)
+                    t2 = (p2_tab[0] - h_offset * ux + height * nx, p2_tab[1] - h_offset * uy + height * ny)
                     tab_pts.append(t1)
                     tab_pts.append(t2)
                     
-                tab_pts.append(p2)
+                tab_pts.append(p2_tab)
                 
                 new_ent = msp.add_lwpolyline(tab_pts, dxfattribs={"layer": layer})
                 new_handles.append(new_ent.dxf.handle)
@@ -2757,6 +2832,41 @@ def op_rotate_entities(args: Dict[str, Any]) -> Dict[str, Any]:
 
 # Module-level dispatch table so both the CLI (`main`) and the persistent
 # worker (`pathstitch_core.worker`) share one source of truth for op routing.
+def op_add_construction_lines(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Adds the app's measurement/ruler segments as dashed lines on a dedicated
+    CONSTRUCTION layer, with no dimension text — for opt-in export (§6)."""
+    input_path = args.get("input")
+    output_path = args.get("output")
+    segments = args.get("segments", [])
+    if not input_path or not os.path.exists(input_path):
+        return {"status": "error", "message": f"Input file not found: {input_path}"}
+    if not output_path:
+        return {"status": "error", "message": "Output path must be specified."}
+    try:
+        doc = ezdxf.readfile(input_path)
+        msp = doc.modelspace()
+        if "CONSTRUCTION" not in doc.layers:
+            doc.layers.new("CONSTRUCTION", dxfattribs={"color": 8})
+        if "DASHED" not in doc.linetypes:
+            try:
+                doc.linetypes.add("DASHED", pattern=[0.6, 0.4, -0.2], description="Dashed _ _ _")
+            except Exception:
+                pass
+        added = 0
+        for seg in segments:
+            if len(seg) >= 4:
+                msp.add_line(
+                    (float(seg[0]), float(seg[1])),
+                    (float(seg[2]), float(seg[3])),
+                    dxfattribs={"layer": "CONSTRUCTION", "linetype": "DASHED"},
+                )
+                added += 1
+        doc.saveas(output_path)
+        return {"status": "ok", "data": {"added": added}}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to add construction lines: {str(e)}"}
+
+
 OPERATIONS = {
     "list_entities": op_list_entities,
     "offset_lines": op_offset_lines,
@@ -2786,6 +2896,7 @@ OPERATIONS = {
     "update_text": op_update_text,
     "delete_entities": op_delete_entities,
     "new_dxf": op_new_dxf,
+    "add_construction_lines": op_add_construction_lines,
 }
 
 

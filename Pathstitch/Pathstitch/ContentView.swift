@@ -22,12 +22,12 @@ struct ModeButton: View {
         .background(
             state.activeMode == mode ? 
             Color.bg_selected : 
-            (isHovered ? Color.status_warn.opacity(0.15) : Color.clear)
+            (isHovered ? Color.accent.opacity(0.08) : Color.clear)
         )
         .foregroundColor(
             state.activeMode == mode ? 
             Color.accent : 
-            (isHovered ? Color.status_warn : Color.text_secondary)
+            (isHovered ? Color.accent_hover : Color.text_secondary)
         )
         .help(help)
         .onHover { hover in
@@ -56,12 +56,12 @@ struct ToolButton: View {
         .background(
             state.currentTool == tool ? 
             Color.bg_selected : 
-            (isHovered ? Color.status_warn.opacity(0.15) : Color.clear)
+            (isHovered ? Color.accent.opacity(0.08) : Color.clear)
         )
         .foregroundColor(
             state.currentTool == tool ? 
             Color.accent : 
-            (isHovered ? Color.status_warn : Color.text_secondary)
+            (isHovered ? Color.accent_hover : Color.text_secondary)
         )
         .help(tool.rawValue)
         .onHover { hover in
@@ -90,12 +90,12 @@ struct ShapeToolButton: View {
         .background(
             state.currentTool == tool ? 
             Color.bg_selected : 
-            (isHovered ? Color.status_warn.opacity(0.15) : Color.clear)
+            (isHovered ? Color.accent.opacity(0.08) : Color.clear)
         )
         .foregroundColor(
             state.currentTool == tool ? 
             Color.accent : 
-            (isHovered ? Color.status_warn : Color.text_muted)
+            (isHovered ? Color.accent_hover : Color.text_muted)
         )
         .help(tool.rawValue)
         .onHover { hover in
@@ -124,7 +124,7 @@ struct ToolbarHoverButton: View {
         .foregroundColor(
             disabled ? 
             Color.text_muted : 
-            (isHovered ? Color.status_warn : Color.text_secondary)
+            (isHovered ? Color.accent_hover : Color.text_secondary)
         )
         .disabled(disabled)
         .help(help)
@@ -146,6 +146,7 @@ struct ContentView: View {
     @State private var selectedExistingLayer: String = ""
     @State private var exportFormat: String = "dxf" // "dxf", "svg", "pdf", "png"
     
+    @State private var leftSidebarTopHeight: CGFloat = 350
     @State private var isSelectionExpanded = true
     @State private var isHolesSewingExpanded = false
     @State private var isPaperFoldingExpanded = false
@@ -156,10 +157,6 @@ struct ContentView: View {
     @State private var isImportSettingsExpanded = false
     @State private var isExportSettingsExpanded = false
     @State private var isShapesExpanded = false
-    
-    @State private var glueTabHeight: Double = 5.0
-    @State private var glueTabType: String = "trapezoid" // "trapezoid" or "triangle"
-    @State private var glueTabSide: String = "left" // "left" or "right"
     
     @State private var gridCols: Int = 3
     @State private var gridRows: Int = 3
@@ -386,7 +383,7 @@ struct HoverableButtonLabel<Label: View>: View {
             .foregroundColor(isEnabled ? Color.text_primary : Color.text_muted)
             .padding(.vertical, 6)
             .frame(maxWidth: .infinity)
-            .background(isEnabled ? (isPressed ? Color.accent_hover : (isHovered ? Color.status_warn.opacity(0.8) : Color.accent)) : Color.bg_input)
+            .background(isEnabled ? (isPressed ? Color.accent_hover : (isHovered ? Color.accent_hover : Color.accent)) : Color.bg_input)
             .cornerRadius(4)
             .overlay(
                 RoundedRectangle(cornerRadius: 4)
@@ -413,7 +410,7 @@ struct LinkButtonStyle: ButtonStyle {
     
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .foregroundColor(isHovered ? Color.status_warn : Color.accent)
+            .foregroundColor(isHovered ? Color.accent_hover : Color.accent)
             .font(PlasticityFont.body)
             .scaleEffect(configuration.isPressed ? 0.98 : 1.0)
             .onHover { hover in
@@ -428,7 +425,18 @@ extension ContentView {
     @ViewBuilder
     private var selectionSection: some View {
         if state.currentTool == .select {
-            DisclosureGroup(isExpanded: $isSelectionExpanded) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Image(systemName: "cursorarrow.and.square.on.square.dashed")
+                        .foregroundColor(Color.accent)
+                    Text("SELECTION DETAILS")
+                        .font(PlasticityFont.header)
+                        .foregroundColor(Color.text_primary)
+                        .tracking(0.5)
+                    Spacer()
+                }
+                .padding(.bottom, 4)
+                
                 VStack(alignment: .leading, spacing: 8) {
                     if state.selectedHandles.isEmpty {
                         Text("No selection")
@@ -445,6 +453,7 @@ extension ContentView {
                                 state.selectedHandles.removeAll()
                             }
                             .buttonStyle(LinkButtonStyle())
+                            .help("Deselect all selected entities on the canvas")
                         }
                         .padding(.vertical, 4)
                         
@@ -461,6 +470,7 @@ extension ContentView {
                             }
                             .pickerStyle(DefaultPickerStyle())
                             .labelsHidden()
+                            .help("Select an existing layer to assign selected entities to")
                             .onChange(of: selectedExistingLayer) { val in
                                 if !val.isEmpty {
                                     customLayerName = val
@@ -476,6 +486,7 @@ extension ContentView {
                                     .foregroundColor(Color.text_primary)
                                     .font(PlasticityFont.body)
                                     .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+                                    .help("Enter a name to assign selected entities to a new layer")
                                 
                                 Button("Assign") {
                                     state.assignSelectedToLayer(customLayerName)
@@ -484,47 +495,12 @@ extension ContentView {
                                 }
                                 .buttonStyle(BorderedButtonStyle())
                                 .disabled(customLayerName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                                .help("Assign selected entities to the specified layer name")
                             }
                         }
                     }
                 }
-                .padding(.vertical, 4)
-            } label: {
-                HStack {
-                    Image(systemName: "cursorarrow.and.square.on.square.dashed")
-                        .foregroundColor(Color.accent)
-                    Text("SELECTION")
-                        .font(PlasticityFont.header)
-                        .foregroundColor(Color.text_primary)
-                        .tracking(0.5)
-                    
-                    Spacer()
-                    
-                    Button(action: {
-                        state.chainSelectionEnabled.toggle()
-                    }) {
-                        HStack(spacing: 4) {
-                            Image(systemName: "link")
-                                .font(.system(size: 10))
-                            Text("Chain")
-                                .font(PlasticityFont.label)
-                        }
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 3)
-                        .background(state.chainSelectionEnabled ? Color.accent.opacity(0.2) : Color.bg_input)
-                        .foregroundColor(state.chainSelectionEnabled ? Color.accent : Color.text_secondary)
-                        .cornerRadius(3)
-                        .overlay(RoundedRectangle(cornerRadius: 3).stroke(state.chainSelectionEnabled ? Color.accent : Color.border_strong, lineWidth: 1))
-                    }
-                    .buttonStyle(PlainButtonStyle())
-                    .help("Toggle Chain Selection")
-                }
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    isSelectionExpanded.toggle()
-                }
             }
-            .accentColor(Color.accent)
             .padding(8)
             .background(Color.bg_input.opacity(0.4))
             .cornerRadius(4)
@@ -546,6 +522,7 @@ extension ContentView {
                         state.selectedMeasurement = nil
                     }
                     .buttonStyle(LinkButtonStyle())
+                    .help("Deselect the current active measurement/dimension line")
                 }
                 
                 VStack(alignment: .leading, spacing: 8) {
@@ -589,6 +566,7 @@ extension ContentView {
                         .font(PlasticityFont.body)
                         .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
                         .disabled(!selected.isAutoDimension && selected.entityHandle == nil)
+                        .help("Edit the dimension measurement value in millimeters")
                 }
             }
             .padding(8)
@@ -607,11 +585,6 @@ extension ContentView {
                         .font(PlasticityFont.header)
                         .foregroundColor(Color.text_secondary)
                         .tracking(0.5)
-                    Spacer()
-                    Toggle("Learn", isOn: $state.isLearnModeEnabled)
-                        .toggleStyle(.checkbox)
-                        .font(PlasticityFont.label)
-                        .foregroundColor(Color.text_secondary)
                 }
                 
                 if state.currentTool == .offset {
@@ -625,6 +598,7 @@ extension ContentView {
                             Text("BBox").tag("bbox")
                         }
                         .pickerStyle(SegmentedPickerStyle())
+                        .help("Choose between parallel curve offset and bounding box (BBox) offset")
                         
                         if offsetMode == "curve" {
                             Text("Offset Distance (mm)")
@@ -639,6 +613,7 @@ extension ContentView {
                                 .foregroundColor(Color.text_primary)
                                 .font(PlasticityFont.body)
                                 .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+                                .help("Offset distance in millimeters")
                             
                             Text("Side")
                                 .font(PlasticityFont.label)
@@ -649,12 +624,14 @@ extension ContentView {
                                 Text("Right").tag("right")
                             }
                             .pickerStyle(SegmentedPickerStyle())
+                            .help("Select side to offset: left or right")
                             
                             Button("Apply Offset") {
                                 state.applyOffset()
                             }
                             .buttonStyle(PlasticityButtonStyle(isEnabled: !state.selectedHandles.isEmpty))
                             .disabled(state.selectedHandles.isEmpty)
+                            .help("Apply parallel curve offset to the selected path entities")
                         } else {
                             Text("Offset Distance (mm)")
                                 .font(PlasticityFont.label)
@@ -668,6 +645,7 @@ extension ContentView {
                                 .foregroundColor(Color.text_primary)
                                 .font(PlasticityFont.body)
                                 .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+                                .help("Bounding box offset distance in millimeters")
                             
                             Text("Corner Fillet Radius (mm)")
                                 .font(PlasticityFont.label)
@@ -681,11 +659,13 @@ extension ContentView {
                                 .foregroundColor(Color.text_primary)
                                 .font(PlasticityFont.body)
                                 .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+                                .help("Radius for rounding bounding box corners in millimeters")
                             
                             Button("Apply BBox Offset") {
                                 state.applyBBoxOffset()
                             }
                             .buttonStyle(PlasticityButtonStyle(isEnabled: true))
+                            .help("Apply bounding box offset with rounded corners around selected path entities")
                         }
                     }
                 } else if state.currentTool == .cleanup {
@@ -702,12 +682,14 @@ extension ContentView {
                             .foregroundColor(Color.text_primary)
                             .font(PlasticityFont.body)
                             .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+                            .help("Endpoint distance tolerance gap in millimeters to join segments")
                         
                         Button("Apply Join/Cleanup") {
                             state.applyCleanup()
                         }
                         .buttonStyle(PlasticityButtonStyle(isEnabled: state.currentFilePath != nil))
                         .disabled(state.currentFilePath == nil)
+                        .help("Join segment endpoints and clean up overlapping geometries")
                     }
                 } else if state.currentTool == .measure {
                     VStack(alignment: .leading, spacing: 8) {
@@ -737,6 +719,7 @@ extension ContentView {
                                             .foregroundColor(Color.text_secondary)
                                     }
                                     .buttonStyle(PlainButtonStyle())
+                                    .help("Delete this measurement line")
                                 }
                                 .font(PlasticityFont.body)
                                 .padding(.vertical, 2)
@@ -748,6 +731,7 @@ extension ContentView {
                                 state.activeMeasureStart = nil
                             }
                             .buttonStyle(PlasticityButtonStyle(isEnabled: true))
+                            .help("Clear all manual measurements from the canvas")
                         }
                     }
                 } else if state.currentTool == .sketchLine {
@@ -789,6 +773,7 @@ extension ContentView {
                             .foregroundColor(Color.text_primary)
                             .font(PlasticityFont.body)
                             .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+                            .help("Fillet radius in millimeters for rounding sketched rectangle corners")
                         
                         if state.isLearnModeEnabled {
                             Text("Click and drag corner-to-corner. Corners are filleted using the radius specified above.")
@@ -819,193 +804,7 @@ extension ContentView {
     @ViewBuilder
     private var holesSewingSection: some View {
         if state.currentTool == .select || state.currentTool == .addHoles {
-            DisclosureGroup(isExpanded: $isHolesSewingExpanded) {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text("Offset Distance (mm)")
-                            .font(PlasticityFont.label)
-                            .foregroundColor(Color.text_primary)
-                        Spacer()
-                        TextField("Offset", value: $state.holeOffsetDistance, format: .number)
-                            .textFieldStyle(PlainTextFieldStyle())
-                            .padding(4)
-                            .frame(width: 80)
-                            .background(Color.bg_input)
-                            .cornerRadius(4)
-                            .foregroundColor(Color.text_primary)
-                            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                    }
-                    
-                    HStack {
-                        Text("Hole Diameter (mm)")
-                            .font(PlasticityFont.label)
-                            .foregroundColor(Color.text_primary)
-                        Spacer()
-                        TextField("Diameter", value: $state.holeDiameter, format: .number)
-                            .textFieldStyle(PlainTextFieldStyle())
-                            .padding(4)
-                            .frame(width: 80)
-                            .background(Color.bg_input)
-                            .cornerRadius(4)
-                            .foregroundColor(Color.text_primary)
-                            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                    }
-                    
-                    HStack {
-                        Text("Hole Spacing (mm)")
-                            .font(PlasticityFont.label)
-                            .foregroundColor(Color.text_primary)
-                        Spacer()
-                        TextField("Spacing", value: $state.holeSpacing, format: .number)
-                            .textFieldStyle(PlainTextFieldStyle())
-                            .padding(4)
-                            .frame(width: 80)
-                            .background(Color.bg_input)
-                            .cornerRadius(4)
-                            .foregroundColor(Color.text_primary)
-                            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                    }
-                    
-                    HStack {
-                        Text("Pattern Style")
-                            .font(PlasticityFont.label)
-                            .foregroundColor(Color.text_primary)
-                        Spacer()
-                        Picker("", selection: $state.holePattern) {
-                            Text("Single").tag("single")
-                            Text("Saddle").tag("saddle")
-                        }
-                        .pickerStyle(SegmentedPickerStyle())
-                        .frame(width: 120)
-                    }
-                    
-                    HStack {
-                        Text("Corner Behavior")
-                            .font(PlasticityFont.label)
-                            .foregroundColor(Color.text_primary)
-                        Spacer()
-                        Picker("", selection: $state.holeCornerBehavior) {
-                            Text("Keep").tag("keep")
-                            Text("Step").tag("step")
-                        }
-                        .pickerStyle(SegmentedPickerStyle())
-                        .frame(width: 120)
-                    }
-                    
-                    HStack {
-                        Text("Side")
-                            .font(PlasticityFont.label)
-                            .foregroundColor(Color.text_primary)
-                        Spacer()
-                        Picker("", selection: $state.holeSide) {
-                            Text("Left").tag("left")
-                            Text("Right").tag("right")
-                        }
-                        .pickerStyle(SegmentedPickerStyle())
-                        .frame(width: 120)
-                    }
-                    
-                    HStack {
-                        Text("Row Spacing (mm)")
-                            .font(PlasticityFont.label)
-                            .foregroundColor(Color.text_primary)
-                        Spacer()
-                        TextField("Row Spacing", value: $state.holeRowSpacing, format: .number)
-                            .textFieldStyle(PlainTextFieldStyle())
-                            .padding(4)
-                            .frame(width: 80)
-                            .background(Color.bg_input)
-                            .cornerRadius(4)
-                            .foregroundColor(Color.text_primary)
-                            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                    }
-                    
-                    Toggle("Variable Spacing", isOn: $state.holeEnableVariableSpacing)
-                        .toggleStyle(.checkbox)
-                        .font(PlasticityFont.label)
-                        .foregroundColor(Color.text_primary)
-                    
-                    if state.holeEnableVariableSpacing {
-                        HStack {
-                            Text("  Min / Max (mm)")
-                                .font(PlasticityFont.label)
-                                .foregroundColor(Color.text_primary)
-                            Spacer()
-                            TextField("Min", value: $state.holeVariableSpacingMin, format: .number)
-                                .textFieldStyle(PlainTextFieldStyle())
-                                .padding(4)
-                                .frame(width: 45)
-                                .background(Color.bg_input)
-                                .cornerRadius(4)
-                                .foregroundColor(Color.text_primary)
-                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                            Text("/")
-                            TextField("Max", value: $state.holeVariableSpacingMax, format: .number)
-                                .textFieldStyle(PlainTextFieldStyle())
-                                .padding(4)
-                                .frame(width: 45)
-                                .background(Color.bg_input)
-                                .cornerRadius(4)
-                                .foregroundColor(Color.text_primary)
-                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                        }
-                        .padding(.leading, 8)
-                    }
-                    
-                    Toggle("Proximity Filter", isOn: $state.holeEnableProximityFilter)
-                        .toggleStyle(.checkbox)
-                        .font(PlasticityFont.label)
-                        .foregroundColor(Color.text_primary)
-                    
-                    if state.holeEnableProximityFilter {
-                        HStack {
-                            Text("  Distance (mm)")
-                                .font(PlasticityFont.label)
-                                .foregroundColor(Color.text_primary)
-                            Spacer()
-                            TextField("Distance", value: $state.holeProximityDistance, format: .number)
-                                .textFieldStyle(PlainTextFieldStyle())
-                                .padding(4)
-                                .frame(width: 60)
-                                .background(Color.bg_input)
-                                .cornerRadius(4)
-                                .foregroundColor(Color.text_primary)
-                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                        }
-                        .padding(.leading, 8)
-                    }
-                    
-                    Toggle("Line Proximity Filter", isOn: $state.holeEnableLineProximityFilter)
-                        .toggleStyle(.checkbox)
-                        .font(PlasticityFont.label)
-                        .foregroundColor(Color.text_primary)
-                    
-                    if state.holeEnableLineProximityFilter {
-                        HStack {
-                            Text("  Threshold (mm)")
-                                .font(PlasticityFont.label)
-                                .foregroundColor(Color.text_primary)
-                            Spacer()
-                            TextField("Threshold", value: $state.holeLineProximityThreshold, format: .number)
-                                .textFieldStyle(PlainTextFieldStyle())
-                                .padding(4)
-                                .frame(width: 60)
-                                .background(Color.bg_input)
-                                .cornerRadius(4)
-                                .foregroundColor(Color.text_primary)
-                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                        }
-                        .padding(.leading, 8)
-                    }
-                }
-                .padding(.vertical, 4)
-                
-                Button("Apply Sewing Holes") {
-                    state.applySewingHoles()
-                }
-                .buttonStyle(PlasticityButtonStyle(isEnabled: !state.selectedHandles.isEmpty))
-                .disabled(state.selectedHandles.isEmpty)
-            } label: {
+            VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Image(systemName: "circle.dashed")
                         .foregroundColor(Color.accent)
@@ -1014,13 +813,223 @@ extension ContentView {
                         .foregroundColor(Color.text_primary)
                         .tracking(0.5)
                     Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(Color.text_secondary)
+                        .rotationEffect(isHolesSewingExpanded ? .degrees(90) : .zero)
                 }
                 .contentShape(Rectangle())
                 .onTapGesture {
-                    isHolesSewingExpanded.toggle()
+                    withAnimation(.easeOut(duration: 0.15)) {
+                        isHolesSewingExpanded.toggle()
+                    }
+                }
+                .help("Toggle Holes Sewing settings panel")
+                
+                if isHolesSewingExpanded {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("Offset Distance (mm)")
+                                .font(PlasticityFont.label)
+                                .foregroundColor(Color.text_primary)
+                            Spacer()
+                            TextField("Offset", value: $state.holeOffsetDistance, format: .number)
+                                .textFieldStyle(PlainTextFieldStyle())
+                                .padding(4)
+                                .frame(width: 80)
+                                .background(Color.bg_input)
+                                .cornerRadius(4)
+                                .foregroundColor(Color.text_primary)
+                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+                                .help("Distance from boundary path to place sewing holes in millimeters")
+                        }
+                        
+                        HStack {
+                            Text("Hole Diameter (mm)")
+                                .font(PlasticityFont.label)
+                                .foregroundColor(Color.text_primary)
+                            Spacer()
+                            TextField("Diameter", value: $state.holeDiameter, format: .number)
+                                .textFieldStyle(PlainTextFieldStyle())
+                                .padding(4)
+                                .frame(width: 80)
+                                .background(Color.bg_input)
+                                .cornerRadius(4)
+                                .foregroundColor(Color.text_primary)
+                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+                                .help("Diameter of each sewing hole in millimeters")
+                        }
+                        
+                        HStack {
+                            Text("Hole Spacing (mm)")
+                                .font(PlasticityFont.label)
+                                .foregroundColor(Color.text_primary)
+                            Spacer()
+                            TextField("Spacing", value: $state.holeSpacing, format: .number)
+                                .textFieldStyle(PlainTextFieldStyle())
+                                .padding(4)
+                                .frame(width: 80)
+                                .background(Color.bg_input)
+                                .cornerRadius(4)
+                                .foregroundColor(Color.text_primary)
+                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+                                .help("Distance between consecutive sewing holes in millimeters")
+                        }
+                        
+                        HStack {
+                            Text("Pattern Style")
+                                .font(PlasticityFont.label)
+                                .foregroundColor(Color.text_primary)
+                            Spacer()
+                            Picker("", selection: $state.holePattern) {
+                                Text("Single").tag("single")
+                                Text("Saddle").tag("saddle")
+                            }
+                            .pickerStyle(SegmentedPickerStyle())
+                            .frame(width: 120)
+                            .help("Choose between a single row or double-row saddle stitch hole pattern")
+                        }
+                        
+                        HStack {
+                            Text("Corner Behavior")
+                                .font(PlasticityFont.label)
+                                .foregroundColor(Color.text_primary)
+                            Spacer()
+                            Picker("", selection: $state.holeCornerBehavior) {
+                                Text("Keep").tag("keep")
+                                Text("Step").tag("step")
+                            }
+                            .pickerStyle(SegmentedPickerStyle())
+                            .frame(width: 120)
+                            .help("Select corner spacing behavior: keep original spacing or step layout to corner")
+                        }
+                        
+                        HStack {
+                            Text("Side")
+                                .font(PlasticityFont.label)
+                                .foregroundColor(Color.text_primary)
+                            Spacer()
+                            Picker("", selection: $state.holeSide) {
+                                Text("Left").tag("left")
+                                Text("Right").tag("right")
+                                Text("Both").tag("both")
+                            }
+                            .pickerStyle(SegmentedPickerStyle())
+                            .frame(width: 180)
+                            .help("Choose the side(s) of the path to distribute holes (left, right, or both)")
+                        }
+                        
+                        HStack {
+                            Text("Row Spacing (mm)")
+                                .font(PlasticityFont.label)
+                                .foregroundColor(Color.text_primary)
+                            Spacer()
+                            TextField("Row Spacing", value: $state.holeRowSpacing, format: .number)
+                                .textFieldStyle(PlainTextFieldStyle())
+                                .padding(4)
+                                .frame(width: 80)
+                                .background(Color.bg_input)
+                                .cornerRadius(4)
+                                .foregroundColor(Color.text_primary)
+                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+                                .help("Row offset spacing in millimeters for double-row saddle stitch holes")
+                        }
+                        
+                        Toggle("Variable Spacing", isOn: $state.holeEnableVariableSpacing)
+                            .toggleStyle(.checkbox)
+                            .font(PlasticityFont.label)
+                            .foregroundColor(Color.text_primary)
+                            .help("Enable variable spacing to fit holes perfectly along segment lengths")
+                        
+                        if state.holeEnableVariableSpacing {
+                            HStack {
+                                Text("  Min / Max (mm)")
+                                    .font(PlasticityFont.label)
+                                    .foregroundColor(Color.text_primary)
+                                Spacer()
+                                TextField("Min", value: $state.holeVariableSpacingMin, format: .number)
+                                    .textFieldStyle(PlainTextFieldStyle())
+                                    .padding(4)
+                                    .frame(width: 45)
+                                    .background(Color.bg_input)
+                                    .cornerRadius(4)
+                                    .foregroundColor(Color.text_primary)
+                                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+                                    .help("Minimum spacing allowed between holes in millimeters")
+                                Text("/")
+                                TextField("Max", value: $state.holeVariableSpacingMax, format: .number)
+                                    .textFieldStyle(PlainTextFieldStyle())
+                                    .padding(4)
+                                    .frame(width: 45)
+                                    .background(Color.bg_input)
+                                    .cornerRadius(4)
+                                    .foregroundColor(Color.text_primary)
+                                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+                                    .help("Maximum spacing allowed between holes in millimeters")
+                            }
+                            .padding(.leading, 8)
+                        }
+                        
+                        Toggle("Proximity Filter", isOn: $state.holeEnableProximityFilter)
+                            .toggleStyle(.checkbox)
+                            .font(PlasticityFont.label)
+                            .foregroundColor(Color.text_primary)
+                            .help("Filter out generated holes that are too close to other canvas paths")
+                        
+                        if state.holeEnableProximityFilter {
+                            HStack {
+                                Text("  Distance (mm)")
+                                    .font(PlasticityFont.label)
+                                    .foregroundColor(Color.text_primary)
+                                Spacer()
+                                TextField("Distance", value: $state.holeProximityDistance, format: .number)
+                                    .textFieldStyle(PlainTextFieldStyle())
+                                    .padding(4)
+                                    .frame(width: 60)
+                                    .background(Color.bg_input)
+                                    .cornerRadius(4)
+                                    .foregroundColor(Color.text_primary)
+                                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+                                    .help("Proximity detection threshold radius in millimeters")
+                            }
+                            .padding(.leading, 8)
+                        }
+                        
+                        Toggle("Line Proximity Filter", isOn: $state.holeEnableLineProximityFilter)
+                            .toggleStyle(.checkbox)
+                            .font(PlasticityFont.label)
+                            .foregroundColor(Color.text_primary)
+                            .help("Filter out holes close to the ends of lines")
+                        
+                        if state.holeEnableLineProximityFilter {
+                            HStack {
+                                Text("  Threshold (mm)")
+                                    .font(PlasticityFont.label)
+                                    .foregroundColor(Color.text_primary)
+                                Spacer()
+                                TextField("Threshold", value: $state.holeLineProximityThreshold, format: .number)
+                                    .textFieldStyle(PlainTextFieldStyle())
+                                    .padding(4)
+                                    .frame(width: 60)
+                                    .background(Color.bg_input)
+                                    .cornerRadius(4)
+                                    .foregroundColor(Color.text_primary)
+                                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+                                    .help("Line end proximity threshold distance in millimeters")
+                            }
+                            .padding(.leading, 8)
+                        }
+                        
+                        Button("Apply Sewing Holes") {
+                            state.applySewingHoles()
+                        }
+                        .buttonStyle(PlasticityButtonStyle(isEnabled: !state.selectedHandles.isEmpty))
+                        .disabled(state.selectedHandles.isEmpty)
+                        .help("Generate sewing holes along selected paths using these parameters")
+                    }
+                    .padding(.vertical, 4)
                 }
             }
-            .accentColor(Color.accent)
             .padding(8)
             .background(Color.bg_input.opacity(0.4))
             .cornerRadius(4)
@@ -1031,81 +1040,7 @@ extension ContentView {
     @ViewBuilder
     private var paperFoldingSection: some View {
         if state.currentTool == .select {
-            DisclosureGroup(isExpanded: $isPaperFoldingExpanded) {
-                VStack(alignment: .leading, spacing: 10) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("CREASE PATTERN")
-                            .font(PlasticityFont.label)
-                            .fontWeight(.bold)
-                            .foregroundColor(Color.accent)
-                        Text("Turns selected segments into dashed crease folds.")
-                            .font(PlasticityFont.label)
-                            .foregroundColor(Color.text_secondary)
-                        Button("Apply Dashed Creases") {
-                            state.applyDashedCreases()
-                        }
-                        .buttonStyle(PlasticityButtonStyle(isEnabled: !state.selectedHandles.isEmpty))
-                        .disabled(state.selectedHandles.isEmpty)
-                    }
-                    
-                    Divider().background(Color.border_subtle)
-                    
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("GLUE TABS")
-                            .font(PlasticityFont.label)
-                            .fontWeight(.bold)
-                            .foregroundColor(Color.accent)
-                        
-                        HStack {
-                            Text("Tab Height (mm)")
-                                .font(PlasticityFont.label)
-                                .foregroundColor(Color.text_secondary)
-                            Spacer()
-                            TextField("Height", value: $glueTabHeight, format: .number)
-                                .textFieldStyle(PlainTextFieldStyle())
-                                .padding(4)
-                                .frame(width: 80)
-                                .background(Color.bg_input)
-                                .cornerRadius(4)
-                                .foregroundColor(Color.text_primary)
-                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                        }
-                        
-                        HStack {
-                            Text("Tab Type")
-                                .font(PlasticityFont.label)
-                                .foregroundColor(Color.text_secondary)
-                            Spacer()
-                            Picker("", selection: $glueTabType) {
-                                Text("Trapezoid").tag("trapezoid")
-                                Text("Triangle").tag("triangle")
-                            }
-                            .pickerStyle(SegmentedPickerStyle())
-                            .frame(width: 140)
-                        }
-                        
-                        HStack {
-                            Text("Side")
-                                .font(PlasticityFont.label)
-                                .foregroundColor(Color.text_secondary)
-                            Spacer()
-                            Picker("", selection: $glueTabSide) {
-                                Text("Left").tag("left")
-                                Text("Right").tag("right")
-                            }
-                            .pickerStyle(SegmentedPickerStyle())
-                            .frame(width: 140)
-                        }
-                        
-                        Button("Apply Glue Tabs") {
-                            state.applyGlueTabs(height: glueTabHeight, type: glueTabType, side: glueTabSide)
-                        }
-                        .buttonStyle(PlasticityButtonStyle(isEnabled: !state.selectedHandles.isEmpty))
-                        .disabled(state.selectedHandles.isEmpty)
-                    }
-                }
-                .padding(.vertical, 4)
-            } label: {
+            VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Image(systemName: "scissors")
                         .foregroundColor(Color.accent)
@@ -1114,13 +1049,132 @@ extension ContentView {
                         .foregroundColor(Color.text_primary)
                         .tracking(0.5)
                     Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(Color.text_secondary)
+                        .rotationEffect(isPaperFoldingExpanded ? .degrees(90) : .zero)
                 }
                 .contentShape(Rectangle())
                 .onTapGesture {
-                    isPaperFoldingExpanded.toggle()
+                    withAnimation(.easeOut(duration: 0.15)) {
+                        isPaperFoldingExpanded.toggle()
+                    }
+                }
+                .help("Toggle Paper Folding (crease pattern / glue tabs) settings panel")
+                
+                if isPaperFoldingExpanded {
+                    VStack(alignment: .leading, spacing: 10) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("CREASE PATTERN")
+                                .font(PlasticityFont.label)
+                                .fontWeight(.bold)
+                                .foregroundColor(Color.accent)
+                            Text("Turns selected segments into dashed crease folds.")
+                                .font(PlasticityFont.label)
+                                .foregroundColor(Color.text_secondary)
+                            Button("Apply Dashed Creases") {
+                                state.applyDashedCreases()
+                            }
+                            .buttonStyle(PlasticityButtonStyle(isEnabled: !state.selectedHandles.isEmpty))
+                            .disabled(state.selectedHandles.isEmpty)
+                            .help("Convert selected segments into dashed crease folds for paper/leather modeling")
+                        }
+                        
+                        Divider().background(Color.border_subtle)
+                        
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("GLUE TABS")
+                                .font(PlasticityFont.label)
+                                .fontWeight(.bold)
+                                .foregroundColor(Color.accent)
+                            
+                            HStack {
+                                Text("Tab Height (mm)")
+                                    .font(PlasticityFont.label)
+                                    .foregroundColor(Color.text_secondary)
+                                Spacer()
+                                TextField("Height", value: $state.glueTabHeight, format: .number)
+                                    .textFieldStyle(PlainTextFieldStyle())
+                                    .padding(4)
+                                    .frame(width: 80)
+                                    .background(Color.bg_input)
+                                    .cornerRadius(4)
+                                    .foregroundColor(Color.text_primary)
+                                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+                                    .help("Height of the generated glue tabs in millimeters")
+                            }
+                            
+                            HStack {
+                                Text("Tab Type")
+                                    .font(PlasticityFont.label)
+                                    .foregroundColor(Color.text_secondary)
+                                Spacer()
+                                Picker("", selection: $state.glueTabType) {
+                                    Text("Trapezoid").tag("trapezoid")
+                                    Text("Triangle").tag("triangle")
+                                }
+                                .pickerStyle(SegmentedPickerStyle())
+                                .frame(width: 140)
+                                .help("Choose the shape of the generated glue tabs: trapezoidal or triangular")
+                            }
+                            
+                            HStack {
+                                Text("Side")
+                                    .font(PlasticityFont.label)
+                                    .foregroundColor(Color.text_secondary)
+                                Spacer()
+                                Picker("", selection: $state.glueTabSide) {
+                                    Text("Left").tag("left")
+                                    Text("Right").tag("right")
+                                }
+                                .pickerStyle(SegmentedPickerStyle())
+                                .frame(width: 140)
+                                .help("Select the side of the path to place the glue tabs (left or right)")
+                            }
+
+                            HStack {
+                                Text("Start Offset (mm)")
+                                    .font(PlasticityFont.label)
+                                    .foregroundColor(Color.text_secondary)
+                                Spacer()
+                                TextField("Start Offset", value: $state.glueTabStartOffset, format: .number)
+                                    .textFieldStyle(PlainTextFieldStyle())
+                                    .padding(4)
+                                    .frame(width: 80)
+                                    .background(Color.bg_input)
+                                    .cornerRadius(4)
+                                    .foregroundColor(Color.text_primary)
+                                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+                                    .help("Offset distance from the starting point of the segment in millimeters")
+                            }
+
+                            HStack {
+                                Text("End Offset (mm)")
+                                    .font(PlasticityFont.label)
+                                    .foregroundColor(Color.text_secondary)
+                                Spacer()
+                                TextField("End Offset", value: $state.glueTabEndOffset, format: .number)
+                                    .textFieldStyle(PlainTextFieldStyle())
+                                    .padding(4)
+                                    .frame(width: 80)
+                                    .background(Color.bg_input)
+                                    .cornerRadius(4)
+                                    .foregroundColor(Color.text_primary)
+                                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+                                    .help("Offset distance from the ending point of the segment in millimeters")
+                            }
+                            
+                            Button("Apply Glue Tabs") {
+                                state.applyGlueTabs()
+                            }
+                            .buttonStyle(PlasticityButtonStyle(isEnabled: !state.selectedHandles.isEmpty))
+                            .disabled(state.selectedHandles.isEmpty)
+                            .help("Generate glue tabs along selected paths using these parameters")
+                        }
+                    }
+                    .padding(.vertical, 4)
                 }
             }
-            .accentColor(Color.accent)
             .padding(8)
             .background(Color.bg_input.opacity(0.4))
             .cornerRadius(4)
@@ -1131,112 +1185,7 @@ extension ContentView {
     @ViewBuilder
     private var patterningSection: some View {
         if state.currentTool == .select {
-            DisclosureGroup(isExpanded: $isPatterningExpanded) {
-                VStack(alignment: .leading, spacing: 10) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("GRID PATTERN")
-                            .font(PlasticityFont.label)
-                            .fontWeight(.bold)
-                            .foregroundColor(Color.accent)
-                        
-                        HStack {
-                            Text("Columns / Rows")
-                                .font(PlasticityFont.label)
-                                .foregroundColor(Color.text_secondary)
-                            Spacer()
-                            TextField("Cols", value: $gridCols, format: .number)
-                                .textFieldStyle(PlainTextFieldStyle())
-                                .padding(4)
-                                .frame(width: 45)
-                                .background(Color.bg_input)
-                                .cornerRadius(4)
-                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                            Text("x")
-                            TextField("Rows", value: $gridRows, format: .number)
-                                .textFieldStyle(PlainTextFieldStyle())
-                                .padding(4)
-                                .frame(width: 45)
-                                .background(Color.bg_input)
-                                .cornerRadius(4)
-                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                        }
-                        
-                        HStack {
-                            Text("Spacing Col / Row")
-                                .font(PlasticityFont.label)
-                                .foregroundColor(Color.text_secondary)
-                            Spacer()
-                            TextField("Col Sp", value: $gridColSpacing, format: .number)
-                                .textFieldStyle(PlainTextFieldStyle())
-                                .padding(4)
-                                .frame(width: 50)
-                                .background(Color.bg_input)
-                                .cornerRadius(4)
-                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                            Text("/")
-                            TextField("Row Sp", value: $gridRowSpacing, format: .number)
-                                .textFieldStyle(PlainTextFieldStyle())
-                                .padding(4)
-                                .frame(width: 50)
-                                .background(Color.bg_input)
-                                .cornerRadius(4)
-                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                        }
-                        
-                        Button("Apply Grid Pattern") {
-                            state.applyPatternGrid(columns: gridCols, rows: gridRows, colSpacing: gridColSpacing, rowSpacing: gridRowSpacing)
-                        }
-                        .buttonStyle(PlasticityButtonStyle(isEnabled: !state.selectedHandles.isEmpty))
-                        .disabled(state.selectedHandles.isEmpty)
-                    }
-                    
-                    Divider().background(Color.border_subtle)
-                    
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("PATH PATTERN")
-                            .font(PlasticityFont.label)
-                            .fontWeight(.bold)
-                            .foregroundColor(Color.accent)
-                        
-                        HStack {
-                            Text("Path Handle")
-                                .font(PlasticityFont.label)
-                                .foregroundColor(Color.text_secondary)
-                            Spacer()
-                            TextField("Handle", text: $pathHandle)
-                                .textFieldStyle(PlainTextFieldStyle())
-                                .padding(4)
-                                .frame(width: 80)
-                                .background(Color.bg_input)
-                                .cornerRadius(4)
-                                .foregroundColor(Color.text_primary)
-                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                        }
-                        
-                        HStack {
-                            Text("Spacing (mm)")
-                                .font(PlasticityFont.label)
-                                .foregroundColor(Color.text_secondary)
-                            Spacer()
-                            TextField("Spacing", value: $pathPatternSpacing, format: .number)
-                                .textFieldStyle(PlainTextFieldStyle())
-                                .padding(4)
-                                .frame(width: 80)
-                                .background(Color.bg_input)
-                                .cornerRadius(4)
-                                .foregroundColor(Color.text_primary)
-                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                        }
-                        
-                        Button("Apply Path Pattern") {
-                            state.applyPatternPath(pathHandle: pathHandle, spacing: pathPatternSpacing)
-                        }
-                        .buttonStyle(PlasticityButtonStyle(isEnabled: !state.selectedHandles.isEmpty && !pathHandle.isEmpty))
-                        .disabled(state.selectedHandles.isEmpty || pathHandle.isEmpty)
-                    }
-                }
-                .padding(.vertical, 4)
-            } label: {
+            VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Image(systemName: "square.grid.3x3")
                         .foregroundColor(Color.accent)
@@ -1245,13 +1194,134 @@ extension ContentView {
                         .foregroundColor(Color.text_primary)
                         .tracking(0.5)
                     Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(Color.text_secondary)
+                        .rotationEffect(isPatterningExpanded ? .degrees(90) : .zero)
                 }
                 .contentShape(Rectangle())
                 .onTapGesture {
-                    isPatterningExpanded.toggle()
+                    withAnimation(.easeOut(duration: 0.15)) {
+                        isPatterningExpanded.toggle()
+                    }
+                }
+                .help("Toggle Patterning (grid / path duplicate) settings panel")
+                
+                if isPatterningExpanded {
+                    VStack(alignment: .leading, spacing: 10) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("GRID PATTERN")
+                                .font(PlasticityFont.label)
+                                .fontWeight(.bold)
+                                .foregroundColor(Color.accent)
+                            
+                            HStack {
+                                Text("Columns / Rows")
+                                    .font(PlasticityFont.label)
+                                    .foregroundColor(Color.text_secondary)
+                                Spacer()
+                                TextField("Cols", value: $gridCols, format: .number)
+                                    .textFieldStyle(PlainTextFieldStyle())
+                                    .padding(4)
+                                    .frame(width: 45)
+                                    .background(Color.bg_input)
+                                    .cornerRadius(4)
+                                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+                                    .help("Number of columns in the grid pattern")
+                                Text("x")
+                                TextField("Rows", value: $gridRows, format: .number)
+                                    .textFieldStyle(PlainTextFieldStyle())
+                                    .padding(4)
+                                    .frame(width: 45)
+                                    .background(Color.bg_input)
+                                    .cornerRadius(4)
+                                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+                                    .help("Number of rows in the grid pattern")
+                            }
+                            
+                            HStack {
+                                Text("Spacing Col / Row")
+                                    .font(PlasticityFont.label)
+                                    .foregroundColor(Color.text_secondary)
+                                Spacer()
+                                TextField("Col Sp", value: $gridColSpacing, format: .number)
+                                    .textFieldStyle(PlainTextFieldStyle())
+                                    .padding(4)
+                                    .frame(width: 50)
+                                    .background(Color.bg_input)
+                                    .cornerRadius(4)
+                                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+                                    .help("Spacing between columns in millimeters")
+                                Text("/")
+                                TextField("Row Sp", value: $gridRowSpacing, format: .number)
+                                    .textFieldStyle(PlainTextFieldStyle())
+                                    .padding(4)
+                                    .frame(width: 50)
+                                    .background(Color.bg_input)
+                                    .cornerRadius(4)
+                                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+                                    .help("Spacing between rows in millimeters")
+                            }
+                            
+                            Button("Apply Grid Pattern") {
+                                state.applyPatternGrid(columns: gridCols, rows: gridRows, colSpacing: gridColSpacing, rowSpacing: gridRowSpacing)
+                            }
+                            .buttonStyle(PlasticityButtonStyle(isEnabled: !state.selectedHandles.isEmpty))
+                            .disabled(state.selectedHandles.isEmpty)
+                            .help("Duplicate selected shapes into a 2D grid pattern")
+                        }
+                        
+                        Divider().background(Color.border_subtle)
+                        
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("PATH PATTERN")
+                                .font(PlasticityFont.label)
+                                .fontWeight(.bold)
+                                .foregroundColor(Color.accent)
+                            
+                            HStack {
+                                Text("Path Handle")
+                                    .font(PlasticityFont.label)
+                                    .foregroundColor(Color.text_secondary)
+                                Spacer()
+                                TextField("Handle", text: $pathHandle)
+                                    .textFieldStyle(PlainTextFieldStyle())
+                                    .padding(4)
+                                    .frame(width: 80)
+                                    .background(Color.bg_input)
+                                    .cornerRadius(4)
+                                    .foregroundColor(Color.text_primary)
+                                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+                                    .help("Handle identifier of the path to duplicate shapes along")
+                            }
+                            
+                            HStack {
+                                Text("Spacing (mm)")
+                                    .font(PlasticityFont.label)
+                                    .foregroundColor(Color.text_secondary)
+                                Spacer()
+                                TextField("Spacing", value: $pathPatternSpacing, format: .number)
+                                    .textFieldStyle(PlainTextFieldStyle())
+                                    .padding(4)
+                                    .frame(width: 80)
+                                    .background(Color.bg_input)
+                                    .cornerRadius(4)
+                                    .foregroundColor(Color.text_primary)
+                                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+                                    .help("Spacing interval in millimeters between duplicated shapes along the path")
+                            }
+                            
+                            Button("Apply Path Pattern") {
+                                state.applyPatternPath(pathHandle: pathHandle, spacing: pathPatternSpacing)
+                            }
+                            .buttonStyle(PlasticityButtonStyle(isEnabled: !state.selectedHandles.isEmpty && !pathHandle.isEmpty))
+                            .disabled(state.selectedHandles.isEmpty || pathHandle.isEmpty)
+                            .help("Duplicate selected shapes along the specified path entity")
+                        }
+                    }
+                    .padding(.vertical, 4)
                 }
             }
-            .accentColor(Color.accent)
             .padding(8)
             .background(Color.bg_input.opacity(0.4))
             .cornerRadius(4)
@@ -1262,76 +1332,7 @@ extension ContentView {
     @ViewBuilder
     private var textPlacingSection: some View {
         if state.currentTool == .select || state.currentTool == .sketchText {
-            DisclosureGroup(isExpanded: $isTextPlacingExpanded) {
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text("Text String")
-                            .font(PlasticityFont.label)
-                            .foregroundColor(Color.text_secondary)
-                        Spacer()
-                        TextField("Text", text: $textString)
-                            .textFieldStyle(PlainTextFieldStyle())
-                            .padding(4)
-                            .frame(width: 120)
-                            .background(Color.bg_input)
-                            .cornerRadius(4)
-                            .foregroundColor(Color.text_primary)
-                            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                    }
-                    
-                    HStack {
-                        Text("Height (mm)")
-                            .font(PlasticityFont.label)
-                            .foregroundColor(Color.text_secondary)
-                        Spacer()
-                        TextField("Height", value: $textHeight, format: .number)
-                            .textFieldStyle(PlainTextFieldStyle())
-                            .padding(4)
-                            .frame(width: 80)
-                            .background(Color.bg_input)
-                            .cornerRadius(4)
-                            .foregroundColor(Color.text_primary)
-                            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                    }
-                    
-                    HStack {
-                        Text("Insert X (mm)")
-                            .font(PlasticityFont.label)
-                            .foregroundColor(Color.text_secondary)
-                        Spacer()
-                        TextField("X", value: $textInsertX, format: .number)
-                            .textFieldStyle(PlainTextFieldStyle())
-                            .padding(4)
-                            .frame(width: 80)
-                            .background(Color.bg_input)
-                            .cornerRadius(4)
-                            .foregroundColor(Color.text_primary)
-                            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                    }
-                    
-                    HStack {
-                        Text("Insert Y (mm)")
-                            .font(PlasticityFont.label)
-                            .foregroundColor(Color.text_secondary)
-                        Spacer()
-                        TextField("Y", value: $textInsertY, format: .number)
-                            .textFieldStyle(PlainTextFieldStyle())
-                            .padding(4)
-                            .frame(width: 80)
-                            .background(Color.bg_input)
-                            .cornerRadius(4)
-                            .foregroundColor(Color.text_primary)
-                            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                    }
-                    
-                    Button("Place Text") {
-                        state.applyAddText(text: textString, insert: CGPoint(x: textInsertX, y: textInsertY), height: textHeight)
-                    }
-                    .buttonStyle(PlasticityButtonStyle(isEnabled: !textString.isEmpty))
-                    .disabled(textString.isEmpty)
-                }
-                .padding(.vertical, 4)
-            } label: {
+            VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Image(systemName: "textformat")
                         .foregroundColor(Color.accent)
@@ -1340,13 +1341,95 @@ extension ContentView {
                         .foregroundColor(Color.text_primary)
                         .tracking(0.5)
                     Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundColor(Color.text_secondary)
+                        .rotationEffect(isTextPlacingExpanded ? .degrees(90) : .zero)
                 }
                 .contentShape(Rectangle())
                 .onTapGesture {
-                    isTextPlacingExpanded.toggle()
+                    withAnimation(.easeOut(duration: 0.15)) {
+                        isTextPlacingExpanded.toggle()
+                    }
+                }
+                .help("Toggle Text Placing settings panel")
+                
+                if isTextPlacingExpanded {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("Text String")
+                                .font(PlasticityFont.label)
+                                .foregroundColor(Color.text_secondary)
+                            Spacer()
+                            TextField("Text", text: $textString)
+                                .textFieldStyle(PlainTextFieldStyle())
+                                .padding(4)
+                                .frame(width: 120)
+                                .background(Color.bg_input)
+                                .cornerRadius(4)
+                                .foregroundColor(Color.text_primary)
+                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+                                .help("The text characters to place as a CAD text entity")
+                        }
+                        
+                        HStack {
+                            Text("Height (mm)")
+                                .font(PlasticityFont.label)
+                                .foregroundColor(Color.text_secondary)
+                            Spacer()
+                            TextField("Height", value: $textHeight, format: .number)
+                                .textFieldStyle(PlainTextFieldStyle())
+                                .padding(4)
+                                .frame(width: 80)
+                                .background(Color.bg_input)
+                                .cornerRadius(4)
+                                .foregroundColor(Color.text_primary)
+                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+                                .help("Height of the text characters in millimeters")
+                        }
+                        
+                        HStack {
+                            Text("Insert X (mm)")
+                                .font(PlasticityFont.label)
+                                .foregroundColor(Color.text_secondary)
+                            Spacer()
+                            TextField("X", value: $textInsertX, format: .number)
+                                .textFieldStyle(PlainTextFieldStyle())
+                                .padding(4)
+                                .frame(width: 80)
+                                .background(Color.bg_input)
+                                .cornerRadius(4)
+                                .foregroundColor(Color.text_primary)
+                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+                                .help("X insertion origin coordinate in millimeters")
+                        }
+                        
+                        HStack {
+                            Text("Insert Y (mm)")
+                                .font(PlasticityFont.label)
+                                .foregroundColor(Color.text_secondary)
+                            Spacer()
+                            TextField("Y", value: $textInsertY, format: .number)
+                                .textFieldStyle(PlainTextFieldStyle())
+                                .padding(4)
+                                .frame(width: 80)
+                                .background(Color.bg_input)
+                                .cornerRadius(4)
+                                .foregroundColor(Color.text_primary)
+                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+                                .help("Y insertion origin coordinate in millimeters")
+                        }
+                        
+                        Button("Place Text") {
+                            state.applyAddText(text: textString, insert: CGPoint(x: textInsertX, y: textInsertY), height: textHeight)
+                        }
+                        .buttonStyle(PlasticityButtonStyle(isEnabled: !textString.isEmpty))
+                        .disabled(textString.isEmpty)
+                        .help("Create and place a text entity at the specified coordinates")
+                    }
+                    .padding(.vertical, 4)
                 }
             }
-            .accentColor(Color.accent)
             .padding(8)
             .background(Color.bg_input.opacity(0.4))
             .cornerRadius(4)
@@ -1357,7 +1440,18 @@ extension ContentView {
     @ViewBuilder
     private var referenceImageSection: some View {
         if state.currentTool == .select {
-            DisclosureGroup(isExpanded: $isReferenceImageExpanded) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Image(systemName: "photo")
+                        .foregroundColor(Color.accent)
+                    Text("REFERENCE IMAGE")
+                        .font(PlasticityFont.header)
+                        .foregroundColor(Color.text_primary)
+                        .tracking(0.5)
+                    Spacer()
+                }
+                .padding(.bottom, 4)
+                
                 VStack(alignment: .leading, spacing: 8) {
                     if state.refImage == nil {
                         Button("Load Reference Image...") {
@@ -1505,23 +1599,7 @@ extension ContentView {
                         }
                     }
                 }
-                .padding(.vertical, 4)
-            } label: {
-                HStack {
-                    Image(systemName: "photo")
-                        .foregroundColor(Color.accent)
-                    Text("REFERENCE IMAGE")
-                        .font(PlasticityFont.header)
-                        .foregroundColor(Color.text_primary)
-                        .tracking(0.5)
-                    Spacer()
-                }
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    isReferenceImageExpanded.toggle()
-                }
             }
-            .accentColor(Color.accent)
             .padding(8)
             .background(Color.bg_input.opacity(0.4))
             .cornerRadius(4)
@@ -1531,76 +1609,61 @@ extension ContentView {
 
     @ViewBuilder
     private var layersSection: some View {
-        if state.currentTool == .select {
-            DisclosureGroup(isExpanded: $isLayersExpanded) {
-                VStack(alignment: .leading, spacing: 6) {
-                    if state.layers.isEmpty {
-                        Text("No layers")
-                            .font(PlasticityFont.body)
-                            .foregroundColor(Color.text_muted)
-                            .padding(.vertical, 4)
-                    } else {
-                        ForEach($state.layers) { $layer in
-                            HStack(spacing: 8) {
-                                Button(action: {
-                                    layer.visible.toggle()
-                                }) {
-                                    Image(systemName: layer.visible ? "eye" : "eye.slash")
-                                        .font(.system(size: 11))
-                                        .foregroundColor(layer.visible ? Color.text_primary : Color.text_muted)
-                                }
-                                .buttonStyle(PlainButtonStyle())
-                                
-                                Circle()
-                                    .fill(layer.color)
-                                    .frame(width: 8, height: 8)
-                                
-                                Text(layer.name)
-                                    .font(PlasticityFont.body)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Image(systemName: "square.3.layers.3d")
+                    .foregroundColor(Color.accent)
+                Text("LAYERS")
+                    .font(PlasticityFont.header)
+                    .foregroundColor(Color.text_primary)
+                    .tracking(0.5)
+                Spacer()
+            }
+            .padding(.bottom, 4)
+            
+            VStack(alignment: .leading, spacing: 6) {
+                if state.layers.isEmpty {
+                    Text("No layers")
+                        .font(PlasticityFont.body)
+                        .foregroundColor(Color.text_muted)
+                        .padding(.vertical, 4)
+                } else {
+                    ForEach($state.layers) { $layer in
+                        HStack(spacing: 8) {
+                            Button(action: {
+                                layer.visible.toggle()
+                            }) {
+                                Image(systemName: layer.visible ? "eye" : "eye.slash")
+                                    .font(.system(size: 11))
                                     .foregroundColor(layer.visible ? Color.text_primary : Color.text_muted)
-                                
-                                Spacer()
                             }
-                            .padding(.vertical, 3)
+                            .buttonStyle(PlainButtonStyle())
+                            
+                            Circle()
+                                .fill(layer.color)
+                                .frame(width: 8, height: 8)
+                            
+                            Text(layer.name)
+                                .font(PlasticityFont.body)
+                                .foregroundColor(layer.visible ? Color.text_primary : Color.text_muted)
+                            
+                            Spacer()
                         }
+                        .padding(.vertical, 3)
                     }
                 }
-                .padding(.vertical, 4)
-            } label: {
-                HStack {
-                    Image(systemName: "square.3.layers.3d")
-                        .foregroundColor(Color.accent)
-                    Text("LAYERS")
-                        .font(PlasticityFont.header)
-                        .foregroundColor(Color.text_primary)
-                        .tracking(0.5)
-                    Spacer()
-                }
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    isLayersExpanded.toggle()
-                }
             }
-            .accentColor(Color.accent)
-            .padding(8)
-            .background(Color.bg_input.opacity(0.4))
-            .cornerRadius(4)
-            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_subtle, lineWidth: 1))
         }
+        .padding(8)
+        .background(Color.bg_input.opacity(0.4))
+        .cornerRadius(4)
+        .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_subtle, lineWidth: 1))
     }
 
     @ViewBuilder
     private var importSettingsSection: some View {
         if state.currentTool == .select {
-            DisclosureGroup(isExpanded: $isImportSettingsExpanded) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Toggle("Consolidate SVG Strokes", isOn: $state.consolidateSvgStrokes)
-                        .font(PlasticityFont.label)
-                        .foregroundColor(Color.text_primary)
-                        .toggleStyle(.checkbox)
-                }
-                .padding(.vertical, 4)
-            } label: {
+            VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Image(systemName: "square.and.arrow.down")
                         .foregroundColor(Color.accent)
@@ -1610,12 +1673,15 @@ extension ContentView {
                         .tracking(0.5)
                     Spacer()
                 }
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    isImportSettingsExpanded.toggle()
+                .padding(.bottom, 4)
+                
+                VStack(alignment: .leading, spacing: 8) {
+                    Toggle("Consolidate SVG Strokes", isOn: $state.consolidateSvgStrokes)
+                        .font(PlasticityFont.label)
+                        .foregroundColor(Color.text_primary)
+                        .toggleStyle(.checkbox)
                 }
             }
-            .accentColor(Color.accent)
             .padding(8)
             .background(Color.bg_input.opacity(0.4))
             .cornerRadius(4)
@@ -1626,16 +1692,35 @@ extension ContentView {
 
 extension ContentView {
     @ViewBuilder
+    private var activeToolOptions: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if state.currentTool == .offset {
+                activeToolDetailsSection
+            } else if state.currentTool == .cleanup {
+                activeToolDetailsSection
+            } else if state.currentTool == .addHoles {
+                holesSewingSection
+            } else if state.currentTool == .sketchRectangle {
+                activeToolDetailsSection
+            } else if state.currentTool == .sketchText {
+                textPlacingSection
+            } else if state.currentTool == .sketchLine || state.currentTool == .sketchCircle {
+                activeToolDetailsSection
+            } else if state.currentTool == .select {
+                paperFoldingSection
+                patterningSection
+            }
+        }
+    }
+}
+
+extension ContentView {
+    @ViewBuilder
     private var leftToolbar: some View {
         VStack(spacing: 4) {
-            Image("Logo")
-                .resizable()
-                .aspectRatio(contentMode: .fit)
-                .frame(width: 32, height: 32)
-                .padding(.vertical, 12)
-            
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 4) {
+                    Spacer().frame(height: 12)
                     // Mode Toggle Buttons
                     ModeButton(mode: .twoD, systemName: "square.on.square", help: "2D Editor", state: state)
                     ModeButton(mode: .threeD, systemName: "cube", help: "3D STEP Importer", state: state)
@@ -1674,8 +1759,8 @@ extension ContentView {
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(PlainButtonStyle())
-                        .background(isShapeActive ? Color.bg_selected.opacity(0.6) : (isShapesHovered ? Color.status_warn.opacity(0.15) : Color.clear))
-                        .foregroundColor(isShapeActive ? Color.accent : (isShapesHovered ? Color.status_warn : Color.text_secondary))
+                        .background(isShapeActive ? Color.bg_selected.opacity(0.6) : (isShapesHovered ? Color.accent.opacity(0.08) : Color.clear))
+                        .foregroundColor(isShapeActive ? Color.accent : (isShapesHovered ? Color.accent_hover : Color.text_secondary))
                         .help("Shapes Sketching")
                         .onHover { hover in
                             isShapesHovered = hover
@@ -1695,25 +1780,6 @@ extension ContentView {
                     }
                     
                     Spacer()
-                    
-                    // Project Save/Load Buttons
-                    ToolbarHoverButton(systemName: "folder", help: "Open Project (.stch)") {
-                        loadProject()
-                    }
-                    
-                    ToolbarHoverButton(systemName: "square.and.arrow.down.on.square", help: "Save Project (.stch)") {
-                        saveProject()
-                    }
-                    
-                    // Add Import File Button at bottom of left toolbar
-                    ToolbarHoverButton(systemName: "square.and.arrow.down", help: "Import DXF / STEP / SVG File") {
-                        importFile()
-                    }
-                    
-                    // Add Export File Button below Import Button
-                    ToolbarHoverButton(systemName: "square.and.arrow.up", help: "Quick Export DXF", disabled: state.currentFilePath == nil) {
-                        showExportDialog = true
-                    }
                 }
             }
         }
@@ -1725,6 +1791,25 @@ extension ContentView {
     @ViewBuilder
     private var twoDEditorView: some View {
         HStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 0) {
+                VSplitView(
+                    top: ScrollView {
+                        activeToolOptions
+                            .padding(14)
+                    },
+                    bottom: ScrollView {
+                        layersSection
+                            .padding(14)
+                    },
+                    topHeight: $leftSidebarTopHeight,
+                    minTopHeight: 100,
+                    minBottomHeight: 100
+                )
+            }
+            .frame(width: 240)
+            .background(Color.bg_panel)
+            .border(width: 1, edges: [.trailing], color: Color.border_subtle)
+            
             VStack(spacing: 0) {
                 if let editingItem = state.activeEditingBatchItem {
                     HStack {
@@ -1808,11 +1893,35 @@ extension ContentView {
 
                     Button(action: { state.snapEnabled.toggle() }) {
                         Image(systemName: state.snapEnabled ? "dot.scope" : "scope")
-                            .foregroundColor(state.snapEnabled ? Color.accent : Color.text_muted)
+                            .foregroundColor(state.snapEnabled ? Color.accent : Color.text_secondary)
                             .padding(4)
                     }
                     .buttonStyle(PlainButtonStyle())
                     .help(state.snapEnabled ? "Snapping: On (placement snaps to points & 90°)" : "Snapping: Off")
+
+                    Button(action: { state.chainSelectionEnabled.toggle() }) {
+                        Image(systemName: state.chainSelectionEnabled ? "link.circle.fill" : "link.circle")
+                            .foregroundColor(state.chainSelectionEnabled ? Color.accent : Color.text_secondary)
+                            .padding(4)
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                    .help(state.chainSelectionEnabled ? "Chain Selection: On" : "Chain Selection: Off")
+
+                    Button(action: { state.gridVisible.toggle() }) {
+                        Image(systemName: state.gridVisible ? "grid" : "grid.circle")
+                            .foregroundColor(state.gridVisible ? Color.accent : Color.text_secondary)
+                            .padding(4)
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                    .help(state.gridVisible ? "Grid: Visible" : "Grid: Hidden")
+
+                    Button(action: { state.isLogTrayExpanded.toggle() }) {
+                        Image(systemName: state.isLogTrayExpanded ? "terminal.fill" : "terminal")
+                            .foregroundColor(state.isLogTrayExpanded ? Color.accent : Color.text_secondary)
+                            .padding(4)
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                    .help(state.isLogTrayExpanded ? "Log Tray: Expanded" : "Log Tray: Collapsed")
 
                     Spacer()
                 }
@@ -1916,13 +2025,7 @@ extension ContentView {
                     VStack(alignment: .leading, spacing: 12) {
                         selectionSection
                         dimensionEditorSection
-                        activeToolDetailsSection
-                        holesSewingSection
-                        paperFoldingSection
-                        patterningSection
-                        textPlacingSection
                         referenceImageSection
-                        layersSection
                         importSettingsSection
                     }
                     .padding(14)
@@ -1932,24 +2035,7 @@ extension ContentView {
                 Divider().background(Color.border_subtle)
                 
                 VStack(alignment: .leading, spacing: 8) {
-                    DisclosureGroup(isExpanded: $isExportSettingsExpanded) {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Picker("", selection: $exportFormat) {
-                                Text("AutoCAD DXF (.dxf)").tag("dxf")
-                                Text("Scalable Vector Graphics (.svg)").tag("svg")
-                                Text("Document PDF (.pdf)").tag("pdf")
-                                Text("Raster Image (.png)").tag("png")
-                            }
-                            .pickerStyle(DefaultPickerStyle())
-                            .labelsHidden()
-                            
-                            Toggle("Export Selected Only", isOn: $exportSelectedOnly)
-                                .font(PlasticityFont.label)
-                                .foregroundColor(Color.text_primary)
-                                .toggleStyle(.checkbox)
-                        }
-                        .padding(.top, 4)
-                    } label: {
+                    VStack(alignment: .leading, spacing: 6) {
                         HStack {
                             Image(systemName: "square.and.arrow.up")
                                 .foregroundColor(Color.accent)
@@ -1958,19 +2044,53 @@ extension ContentView {
                                 .foregroundColor(Color.text_primary)
                                 .tracking(0.5)
                             Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundColor(Color.text_secondary)
+                                .rotationEffect(isExportSettingsExpanded ? .degrees(90) : .zero)
                         }
                         .contentShape(Rectangle())
                         .onTapGesture {
-                            isExportSettingsExpanded.toggle()
+                            withAnimation(.easeOut(duration: 0.15)) {
+                                isExportSettingsExpanded.toggle()
+                            }
+                        }
+                        .help("Toggle Export Settings panel")
+                        
+                        if isExportSettingsExpanded {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Picker("", selection: $exportFormat) {
+                                    Text("AutoCAD DXF (.dxf)").tag("dxf")
+                                    Text("Scalable Vector Graphics (.svg)").tag("svg")
+                                    Text("Document PDF (.pdf)").tag("pdf")
+                                    Text("Raster Image (.png)").tag("png")
+                                }
+                                .pickerStyle(DefaultPickerStyle())
+                                .labelsHidden()
+                                .help("Select format: AutoCAD DXF, SVG, PDF document, or PNG raster image")
+                                
+                                Toggle("Export Selected Only", isOn: $exportSelectedOnly)
+                                    .font(PlasticityFont.label)
+                                    .foregroundColor(Color.text_primary)
+                                    .toggleStyle(.checkbox)
+                                    .help("Export only currently selected canvas entities instead of the whole drawing")
+
+                                Toggle("Export Measurement Lines", isOn: $state.exportMeasurementLines)
+                                    .font(PlasticityFont.label)
+                                    .foregroundColor(Color.text_primary)
+                                    .toggleStyle(.checkbox)
+                                    .help("Include measurement/ruler lines as dashed construction lines (no dimension text). Saved with the project.")
+                            }
+                            .padding(.top, 4)
                         }
                     }
-                    .accentColor(Color.accent)
                     
                     Button("Export...") {
                         runExportPanel(format: exportFormat)
                     }
                     .buttonStyle(PlasticityButtonStyle(isEnabled: state.currentFilePath != nil))
                     .disabled(state.currentFilePath == nil)
+                    .help("Export the drawing file to disk with the selected format and options")
                 }
                 .padding(12)
                 .background(Color.bg_panel)
@@ -2139,10 +2259,23 @@ extension ContentView {
 
                 Spacer()
 
-                // Bottom-right slot reserved for the "Line details" overlay
-                // (MAS-43): selected-geometry info goes here. The old active.dxf
-                // working-buffer filename was removed — it exposed an internal
-                // temp file that meant nothing to the user.
+                if let selectedMeasure = state.selectedMeasurement {
+                    Text("MEASUREMENT | Length: \(String(format: "%.2f mm", selectedMeasure.distanceMm))")
+                        .font(PlasticityFont.label)
+                        .foregroundColor(Color.text_secondary)
+                } else if state.selectedHandles.count == 1,
+                          let handle = state.selectedHandles.first,
+                          let entity = state.entities.first(where: { $0.handle == handle }) {
+                    Text(entity.geometryDetails)
+                        .font(PlasticityFont.label)
+                        .foregroundColor(Color.text_secondary)
+                } else if state.selectedHandles.count > 1 {
+                    Text("SELECTED: \(state.selectedHandles.count) ENTITIES")
+                        .font(PlasticityFont.label)
+                        .foregroundColor(Color.text_secondary)
+                } else {
+                    Spacer().frame(width: 0)
+                }
             }
             .frame(height: 24)
             .padding(.horizontal, 12)
@@ -2176,4 +2309,46 @@ func collectDroppedURLs(_ providers: [NSItemProvider], completion: @escaping ([U
         }
     }
     group.notify(queue: .main) { completion(urls) }
+}
+
+struct VSplitView<Top: View, Bottom: View>: View {
+    let top: Top
+    let bottom: Bottom
+    @Binding var topHeight: CGFloat
+    let minTopHeight: CGFloat
+    let minBottomHeight: CGFloat
+    
+    @State private var isHoveringDivider = false
+    
+    var body: some View {
+        GeometryReader { geo in
+            VStack(spacing: 0) {
+                top
+                    .frame(height: max(minTopHeight, min(topHeight, geo.size.height - minBottomHeight)))
+                
+                Rectangle()
+                    .fill(isHoveringDivider ? Color.accent : Color.border_subtle)
+                    .frame(height: 5)
+                    .contentShape(Rectangle())
+                    .onHover { hovering in
+                        isHoveringDivider = hovering
+                        if hovering {
+                            NSCursor.resizeUpDown.set()
+                        } else {
+                            NSCursor.arrow.set()
+                        }
+                    }
+                    .gesture(
+                        DragGesture()
+                            .onChanged { val in
+                                let newHeight = topHeight + val.translation.height
+                                topHeight = max(minTopHeight, min(newHeight, geo.size.height - minBottomHeight))
+                            }
+                    )
+                
+                bottom
+                    .frame(maxHeight: .infinity)
+            }
+        }
+    }
 }

@@ -38,6 +38,12 @@ struct PathstitchApp: App {
             EmptyView()
         }
         .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Start Screen") {
+                    WindowManager.shared.showWelcomeWindow()
+                }
+            }
+            
             // File persistence menu items (Open, Save, Save As)
             CommandGroup(replacing: .saveItem) {
                 Button("New File") {
@@ -118,10 +124,14 @@ struct PathstitchApp: App {
                     .keyboardShortcut("t", modifiers: [])
             }
             
-            // Custom item to toggle logs
+            // Custom item to toggle logs & learn mode
             CommandGroup(after: .sidebar) {
                 Button(NSApp.activeAppState?.isLogTrayExpanded == true ? "Hide Logs" : "Show Logs") {
                     NSApp.activeAppState?.isLogTrayExpanded.toggle()
+                }
+                
+                Button(NSApp.activeAppState?.isLearnModeEnabled == true ? "Disable Learn Mode" : "Enable Learn Mode") {
+                    NSApp.activeAppState?.isLearnModeEnabled.toggle()
                 }
             }
             

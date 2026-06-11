@@ -128,6 +128,7 @@ struct WelcomeView: View {
             .background(Color.bg_base)
         }
         .frame(width: 880, height: 560)
+        .onDrop(of: [.fileURL], delegate: WelcomeDropDelegate(state: state))
         .onAppear {
             state.refreshRecents()
         }
@@ -310,7 +311,6 @@ struct WelcomeDropZone: View {
         .frame(height: 140)
         .padding(.horizontal, 24)
         .padding(.bottom, 24)
-        .onDrop(of: [.fileURL], delegate: WelcomeDropDelegate(state: state))
     }
 }
 

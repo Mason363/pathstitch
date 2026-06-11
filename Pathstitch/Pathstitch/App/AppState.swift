@@ -123,6 +123,51 @@ struct DXFEntity: Identifiable, Codable, Equatable, Hashable {
     let height: Double?
     var rotation: Double? = nil   // TEXT rotation, degrees CCW (DXF convention)
 
+    var geometryDetails: String {
+        switch type.uppercased() {
+        case "LINE":
+            if let s = start, let e = end, s.count >= 2, e.count >= 2 {
+                let len = hypot(e[0] - s[0], e[1] - s[1])
+                return String(format: "LINE | Length: %.2f mm | Start: (%.1f, %.1f), End: (%.1f, %.1f)", len, s[0], s[1], e[0], e[1])
+            }
+            return "LINE"
+        case "CIRCLE":
+            if let r = radius, let c = center, c.count >= 2 {
+                return String(format: "CIRCLE | Radius: %.2f mm | Center: (%.1f, %.1f) | Circumference: %.2f mm", r, c[0], c[1], 2 * .pi * r)
+            }
+            return "CIRCLE"
+        case "ARC":
+            if let r = radius, let c = center, c.count >= 2, let sa = start_angle, let ea = end_angle {
+                let sweep = ea >= sa ? (ea - sa) : (360.0 - sa + ea)
+                let arcLen = 2 * .pi * r * (sweep / 360.0)
+                return String(format: "ARC | Radius: %.2f mm | Center: (%.1f, %.1f) | Angles: %.1f° - %.1f° | Length: %.2f mm", r, c[0], c[1], sa, ea, arcLen)
+            }
+            return "ARC"
+        case "LWPOLYLINE", "POLYLINE":
+            if let verts = vertices, !verts.isEmpty {
+                var totalLen = 0.0
+                for i in 0..<verts.count - 1 {
+                    totalLen += hypot(verts[i+1][0] - verts[i][0], verts[i+1][1] - verts[i][1])
+                }
+                let isClosed = closed ?? false
+                if isClosed && verts.count > 2 {
+                    totalLen += hypot(verts.last![0] - verts.first![0], verts.last![1] - verts.first![1])
+                }
+                return String(format: "POLYLINE | Vertices: %d | Closed: %@ | Length: %.2f mm", verts.count, isClosed ? "Yes" : "No", totalLen)
+            }
+            return "POLYLINE"
+        case "TEXT":
+            let txt = text ?? ""
+            let h = height ?? 0.0
+            if let s = start, s.count >= 2 {
+                return String(format: "TEXT | Text: \"%@\" | Height: %.2f mm | Pos: (%.1f, %.1f)", txt, h, s[0], s[1])
+            }
+            return String(format: "TEXT | Text: \"%@\" | Height: %.2f mm", txt, h)
+        default:
+            return type.uppercased()
+        }
+    }
+
     func translated(dx: Double, dy: Double) -> DXFEntity {
         DXFEntity(
             handle: handle,
@@ -238,9 +283,19 @@ struct ProjectSaveContainer: Codable {
     var holeCornerBehavior: String? = nil
     var holeSide: String? = nil
     var holeRowSpacing: Double? = nil
+    
+    // Glue tab settings
+    var glueTabHeight: Double? = nil
+    var glueTabType: String? = nil
+    var glueTabSide: String? = nil
+    var glueTabStartOffset: Double? = nil
+    var glueTabEndOffset: Double? = nil
 
     // Persisted batch session (optional / backward-compatible).
     var batchItems: [BatchItemSave]? = nil
+
+    // §6: persist the "export measurement lines as construction lines" setting.
+    var exportMeasurementLines: Bool? = nil
 }
 
 @Observable
@@ -329,6 +384,13 @@ class AppState {
     var consolidateSvgStrokes: Bool = true
     var cleanupTolerance: Double = 0.1
     
+    // Glue Tab Configs
+    var glueTabHeight: Double = 5.0
+    var glueTabType: String = "trapezoid" // "trapezoid" or "triangle"
+    var glueTabSide: String = "left"      // "left" or "right"
+    var glueTabStartOffset: Double = 0.0
+    var glueTabEndOffset: Double = 0.0
+    
     // Sketch Tool configs
     var sketchFilletRadius: Double = 0.0
     var bboxOffsetDistance: Double = 5.0
@@ -341,6 +403,11 @@ class AppState {
     /// When on, placement uses the snap point under the cursor and lines/rulers
     /// faintly snap to 90° increments. Indicators only show when this is on.
     var snapEnabled: Bool = true
+
+    /// §6: when on, measurement/ruler lines are baked into exports as dashed
+    /// construction lines (CONSTRUCTION layer, no dimension text). Persisted
+    /// per-project in `.stch`; off by default for new projects.
+    var exportMeasurementLines: Bool = false
     
     // 3D Canvas State
     var stepJsonContent: String?
@@ -1741,9 +1808,31 @@ class AppState {
                 // the current model, not a stale buffer (MAS-21).
                 await reconcileBufferIfNeeded()
                 let tempDir = sessionTempDirectory
+
+                // §6: optionally bake measurement/ruler lines into the export as
+                // dashed construction lines (CONSTRUCTION layer, no dimension text).
+                var exportInputPath = currentUrl.path
+                let wantConstruction = await MainActor.run { self.exportMeasurementLines }
+                if wantConstruction {
+                    let segments: [[Double]] = await MainActor.run {
+                        self.measurements.map { [Double($0.start.x), Double($0.start.y), Double($0.end.x), Double($0.end.y)] }
+                    }
+                    if !segments.isEmpty {
+                        let augmented = tempDir.appendingPathComponent("temp_export_construct_\(UUID().uuidString).dxf")
+                        try? FileManager.default.removeItem(at: augmented)
+                        try? FileManager.default.copyItem(at: currentUrl, to: augmented)
+                        _ = try await PythonBridge.shared.run(
+                            module: "dxf_ops",
+                            op: "add_construction_lines",
+                            args: ["input": augmented.path, "output": augmented.path, "segments": segments]
+                        )
+                        exportInputPath = augmented.path
+                    }
+                }
+
                 let tempExportURL = tempDir.appendingPathComponent("temp_export_\(UUID().uuidString).\(format)")
                 try? FileManager.default.removeItem(at: tempExportURL)
-                
+
                 let handlesArg: [String]? = selectedOnly ? Array(selectedHandles) : nil
                 
                 if format == "dxf" {
@@ -1751,13 +1840,13 @@ class AppState {
                         module: "dxf_ops",
                         op: "export_dxf",
                         args: [
-                            "input": currentUrl.path,
+                            "input": exportInputPath,
                             "output": tempExportURL.path,
                             "handles": handlesArg as Any
                         ]
                     )
                 } else if format == "svg" {
-                    var args: [String: Any] = ["input": currentUrl.path, "output": tempExportURL.path]
+                    var args: [String: Any] = ["input": exportInputPath, "output": tempExportURL.path]
                     if let handles = handlesArg {
                         args["handles"] = handles
                     }
@@ -1767,7 +1856,7 @@ class AppState {
                         args: args
                     )
                 } else if format == "pdf" {
-                    var args: [String: Any] = ["input": currentUrl.path, "output": tempExportURL.path]
+                    var args: [String: Any] = ["input": exportInputPath, "output": tempExportURL.path]
                     if let handles = handlesArg {
                         args["handles"] = handles
                     }
@@ -1780,7 +1869,7 @@ class AppState {
                     let tempSVG = tempDir.appendingPathComponent("temp_export_png_\(UUID().uuidString).svg")
                     try? FileManager.default.removeItem(at: tempSVG)
                     
-                    var args: [String: Any] = ["input": currentUrl.path, "output": tempSVG.path]
+                    var args: [String: Any] = ["input": exportInputPath, "output": tempSVG.path]
                     if let handles = handlesArg {
                         args["handles"] = handles
                     }
@@ -2354,7 +2443,13 @@ class AppState {
                 holeCornerBehavior: holeCornerBehavior,
                 holeSide: holeSide,
                 holeRowSpacing: holeRowSpacing,
-                batchItems: savedBatch
+                glueTabHeight: glueTabHeight,
+                glueTabType: glueTabType,
+                glueTabSide: glueTabSide,
+                glueTabStartOffset: glueTabStartOffset,
+                glueTabEndOffset: glueTabEndOffset,
+                batchItems: savedBatch,
+                exportMeasurementLines: exportMeasurementLines
             )
 
             let encoder = JSONEncoder()
@@ -2472,6 +2567,12 @@ class AppState {
             if let hCorn = validContainer.holeCornerBehavior { self.holeCornerBehavior = hCorn }
             if let hSide = validContainer.holeSide { self.holeSide = hSide }
             if let hRow = validContainer.holeRowSpacing { self.holeRowSpacing = hRow }
+            if let gtHeight = validContainer.glueTabHeight { self.glueTabHeight = gtHeight }
+            if let gtType = validContainer.glueTabType { self.glueTabType = gtType }
+            if let gtSide = validContainer.glueTabSide { self.glueTabSide = gtSide }
+            if let gtStart = validContainer.glueTabStartOffset { self.glueTabStartOffset = gtStart }
+            if let gtEnd = validContainer.glueTabEndOffset { self.glueTabEndOffset = gtEnd }
+            self.exportMeasurementLines = validContainer.exportMeasurementLines ?? false
 
             // Restore a persisted batch session, if any (MAS-24). DXFs are
             // written back to the session batch dir; svg/entities come straight
@@ -2797,10 +2898,16 @@ class AppState {
         }
     }
     
-    func applyGlueTabs(height: Double, type: String, side: String) {
+    func applyGlueTabs() {
         guard let url = currentFilePath, !selectedHandles.isEmpty else { return }
         saveToHistory()
         isProcessing = true
+        
+        let height = glueTabHeight
+        let type = glueTabType
+        let side = glueTabSide
+        let startOffset = glueTabStartOffset
+        let endOffset = glueTabEndOffset
         
         Task {
             do {
@@ -2815,6 +2922,8 @@ class AppState {
                         "height": height,
                         "type": type,
                         "side": side,
+                        "start_offset": startOffset,
+                        "end_offset": endOffset,
                         "layer": "GLUE_TABS"
                     ]
                 )
@@ -2822,7 +2931,7 @@ class AppState {
                     self.currentFilePath = activeDxfURL
                     self.selectedHandles.removeAll()
                     self.reloadDXF()
-                    logEntries.append(LogEntry(action: "Add Glue Tabs", details: "Added \(type) glue tabs on \(side) side, height: \(height)mm"))
+                    logEntries.append(LogEntry(action: "Add Glue Tabs", details: "Added \(type) glue tabs on \(side) side, height: \(height)mm, offsets: \(startOffset)/\(endOffset)mm"))
                 }
             } catch {
                 await MainActor.run {

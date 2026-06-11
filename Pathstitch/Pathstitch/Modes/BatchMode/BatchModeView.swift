@@ -36,6 +36,7 @@ struct BatchModeView: View {
                             selectBatchFiles()
                         }
                         .buttonStyle(BorderedButtonStyle())
+                        .help("Import DXF files into the batch queue")
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .background(Color.bg_base)
@@ -90,59 +91,7 @@ struct BatchModeView: View {
                             .padding(.bottom, 6)
                         
                         // Bulk Sewing Holes Accordion
-                        DisclosureGroup(isExpanded: $isHolesExpanded) {
-                            VStack(alignment: .leading, spacing: 8) {
-                                HStack {
-                                    Text("Hole Diameter")
-                                    Spacer()
-                                    TextField("", value: $state.holeDiameter, format: .number)
-                                        .textFieldStyle(PlainTextFieldStyle())
-                                        .frame(width: 50)
-                                        .padding(4)
-                                        .background(Color.bg_input)
-                                        .cornerRadius(4)
-                                        .multilineTextAlignment(.trailing)
-                                }
-                                
-                                HStack {
-                                    Text("Hole Spacing")
-                                    Spacer()
-                                    TextField("", value: $state.holeSpacing, format: .number)
-                                        .textFieldStyle(PlainTextFieldStyle())
-                                        .frame(width: 50)
-                                        .padding(4)
-                                        .background(Color.bg_input)
-                                        .cornerRadius(4)
-                                        .multilineTextAlignment(.trailing)
-                                }
-                                
-                                HStack {
-                                    Text("Offset Dist.")
-                                    Spacer()
-                                    TextField("", value: $state.holeOffsetDistance, format: .number)
-                                        .textFieldStyle(PlainTextFieldStyle())
-                                        .frame(width: 50)
-                                        .padding(4)
-                                        .background(Color.bg_input)
-                                        .cornerRadius(4)
-                                        .multilineTextAlignment(.trailing)
-                                }
-                                
-                                Picker("Pattern", selection: $state.holePattern) {
-                                    Text("Single").tag("single")
-                                    Text("Saddle").tag("saddle")
-                                }
-                                
-                                Button("Apply Holes to Selected") {
-                                    state.massApplySewingHoles()
-                                }
-                                .buttonStyle(PlasticityButtonStyle(isEnabled: !state.batchItems.filter { $0.isSelected }.isEmpty))
-                                .disabled(state.batchItems.filter { $0.isSelected }.isEmpty)
-                                .padding(.top, 4)
-                            }
-                            .font(PlasticityFont.body)
-                            .padding(.vertical, 4)
-                        } label: {
+                        VStack(alignment: .leading, spacing: 8) {
                             HStack {
                                 Image(systemName: "circle.dashed")
                                     .foregroundColor(Color.accent)
@@ -150,41 +99,81 @@ struct BatchModeView: View {
                                     .font(PlasticityFont.header)
                                     .foregroundColor(Color.text_primary)
                                 Spacer()
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 9, weight: .bold))
+                                    .foregroundColor(Color.text_secondary)
+                                    .rotationEffect(isHolesExpanded ? .degrees(90) : .zero)
                             }
                             .contentShape(Rectangle())
-                            .onTapGesture { isHolesExpanded.toggle() }
+                            .onTapGesture {
+                                withAnimation(.easeOut(duration: 0.15)) {
+                                    isHolesExpanded.toggle()
+                                }
+                            }
+                            .help("Toggle Bulk Sewing Holes settings panel")
+                            
+                            if isHolesExpanded {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    HStack {
+                                        Text("Hole Diameter")
+                                        Spacer()
+                                        TextField("", value: $state.holeDiameter, format: .number)
+                                            .textFieldStyle(PlainTextFieldStyle())
+                                            .frame(width: 50)
+                                            .padding(4)
+                                            .background(Color.bg_input)
+                                            .cornerRadius(4)
+                                            .multilineTextAlignment(.trailing)
+                                            .help("Diameter of generated sewing holes in millimeters")
+                                    }
+                                    
+                                    HStack {
+                                        Text("Hole Spacing")
+                                        Spacer()
+                                        TextField("", value: $state.holeSpacing, format: .number)
+                                            .textFieldStyle(PlainTextFieldStyle())
+                                            .frame(width: 50)
+                                            .padding(4)
+                                            .background(Color.bg_input)
+                                            .cornerRadius(4)
+                                            .multilineTextAlignment(.trailing)
+                                            .help("Distance between consecutive sewing holes in millimeters")
+                                    }
+                                    
+                                    HStack {
+                                        Text("Offset Dist.")
+                                        Spacer()
+                                        TextField("", value: $state.holeOffsetDistance, format: .number)
+                                            .textFieldStyle(PlainTextFieldStyle())
+                                            .frame(width: 50)
+                                            .padding(4)
+                                            .background(Color.bg_input)
+                                            .cornerRadius(4)
+                                            .multilineTextAlignment(.trailing)
+                                            .help("Offset distance from path boundary in millimeters")
+                                    }
+                                    
+                                    Picker("Pattern", selection: $state.holePattern) {
+                                        Text("Single").tag("single")
+                                        Text("Saddle").tag("saddle")
+                                    }
+                                    .help("Choose single row or double-row saddle stitch hole pattern")
+                                    
+                                    Button("Apply Holes to Selected") {
+                                        state.massApplySewingHoles()
+                                    }
+                                    .buttonStyle(PlasticityButtonStyle(isEnabled: !state.batchItems.filter { $0.isSelected }.isEmpty))
+                                    .disabled(state.batchItems.filter { $0.isSelected }.isEmpty)
+                                    .help("Generate sewing holes for all currently selected batch files")
+                                    .padding(.top, 4)
+                                }
+                                .font(PlasticityFont.body)
+                                .padding(.vertical, 4)
+                            }
                         }
                         
                         // Bulk Offset Accordion
-                        DisclosureGroup(isExpanded: $isOffsetExpanded) {
-                            VStack(alignment: .leading, spacing: 8) {
-                                HStack {
-                                    Text("Offset Dist.")
-                                    Spacer()
-                                    TextField("", value: $state.offsetDistance, format: .number)
-                                        .textFieldStyle(PlainTextFieldStyle())
-                                        .frame(width: 50)
-                                        .padding(4)
-                                        .background(Color.bg_input)
-                                        .cornerRadius(4)
-                                        .multilineTextAlignment(.trailing)
-                                }
-                                
-                                Picker("Side", selection: $state.offsetSide) {
-                                    Text("Left / Out").tag("left")
-                                    Text("Right / In").tag("right")
-                                }
-                                
-                                Button("Apply Offset to Selected") {
-                                    state.massApplyOffset()
-                                }
-                                .buttonStyle(PlasticityButtonStyle(isEnabled: !state.batchItems.filter { $0.isSelected }.isEmpty))
-                                .disabled(state.batchItems.filter { $0.isSelected }.isEmpty)
-                                .padding(.top, 4)
-                            }
-                            .font(PlasticityFont.body)
-                            .padding(.vertical, 4)
-                        } label: {
+                        VStack(alignment: .leading, spacing: 8) {
                             HStack {
                                 Image(systemName: "arrow.up.and.down")
                                     .foregroundColor(Color.accent)
@@ -192,9 +181,51 @@ struct BatchModeView: View {
                                     .font(PlasticityFont.header)
                                     .foregroundColor(Color.text_primary)
                                 Spacer()
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 9, weight: .bold))
+                                    .foregroundColor(Color.text_secondary)
+                                    .rotationEffect(isOffsetExpanded ? .degrees(90) : .zero)
                             }
                             .contentShape(Rectangle())
-                            .onTapGesture { isOffsetExpanded.toggle() }
+                            .onTapGesture {
+                                withAnimation(.easeOut(duration: 0.15)) {
+                                    isOffsetExpanded.toggle()
+                                }
+                            }
+                            .help("Toggle Bulk Offset settings panel")
+                            
+                            if isOffsetExpanded {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    HStack {
+                                        Text("Offset Dist.")
+                                        Spacer()
+                                        TextField("", value: $state.offsetDistance, format: .number)
+                                            .textFieldStyle(PlainTextFieldStyle())
+                                            .frame(width: 50)
+                                            .padding(4)
+                                            .background(Color.bg_input)
+                                            .cornerRadius(4)
+                                            .multilineTextAlignment(.trailing)
+                                            .help("Offset distance in millimeters")
+                                    }
+                                    
+                                    Picker("Side", selection: $state.offsetSide) {
+                                        Text("Left / Out").tag("left")
+                                        Text("Right / In").tag("right")
+                                    }
+                                    .help("Choose offset direction: left/out or right/in")
+                                    
+                                    Button("Apply Offset to Selected") {
+                                        state.massApplyOffset()
+                                    }
+                                    .buttonStyle(PlasticityButtonStyle(isEnabled: !state.batchItems.filter { $0.isSelected }.isEmpty))
+                                    .disabled(state.batchItems.filter { $0.isSelected }.isEmpty)
+                                    .help("Apply parallel curve offset for all currently selected batch files")
+                                    .padding(.top, 4)
+                                }
+                                .font(PlasticityFont.body)
+                                .padding(.vertical, 4)
+                            }
                         }
                     }
                     .padding(14)
@@ -215,17 +246,20 @@ struct BatchModeView: View {
                         Text("PNG (.png)").tag("png")
                     }
                     .pickerStyle(DefaultPickerStyle())
+                    .help("Choose file format for batch export")
                     
                     Toggle("Export Selected Only", isOn: $bulkExportSelectedOnly)
                         .font(PlasticityFont.label)
                         .foregroundColor(Color.text_primary)
                         .toggleStyle(.checkbox)
+                        .help("Export only selected batch files from the grid")
                     
                     Picker("Naming", selection: $namingOption) {
                         Text("Original Names").tag(NamingOption.original)
                         Text("Custom Name + Index").tag(NamingOption.customIndex)
                     }
                     .pickerStyle(DefaultPickerStyle())
+                    .help("Choose file naming convention for exported files")
                     
                     if namingOption == .customIndex {
                         TextField("Folder & Base name", text: $customBaseName)
@@ -236,6 +270,7 @@ struct BatchModeView: View {
                             .foregroundColor(Color.text_primary)
                             .font(PlasticityFont.body)
                             .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+                            .help("Set folder path and base name prefix for indexing")
                     }
                     
                     Button("Export Batch...") {
@@ -243,6 +278,7 @@ struct BatchModeView: View {
                     }
                     .buttonStyle(PlasticityButtonStyle(isEnabled: !state.batchItems.isEmpty))
                     .disabled(state.batchItems.isEmpty)
+                    .help("Export all batch items using the configured options")
                     .padding(.top, 4)
                 }
                 .padding(12)
@@ -304,6 +340,7 @@ struct BatchItemCard: View {
                         .font(.system(size: 14))
                 }
                 .buttonStyle(PlainButtonStyle())
+                .help("Select or deselect this file for batch actions")
                 
                 Spacer()
                 
@@ -315,6 +352,7 @@ struct BatchItemCard: View {
                         .font(.system(size: 12))
                 }
                 .buttonStyle(PlainButtonStyle())
+                .help("Remove this file from the batch queue")
             }
             .padding(6)
             .background(Color.bg_panel)
@@ -359,6 +397,7 @@ struct BatchItemCard: View {
                 }
                 .buttonStyle(LinkButtonStyle())
                 .font(.system(size: 10, weight: .bold))
+                .help("Open this file in the 2D canvas editor for modifications")
             }
             .padding(6)
             .background(Color.bg_panel)
