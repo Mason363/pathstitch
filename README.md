@@ -1,27 +1,81 @@
-# Pathstitch
+<h1 align="center">Pathstitch</h1>
 
-**Pathstitch** is a native macOS CAD/CAM application for leathercraft, pattern making, and sewing. It pairs a SwiftUI front‑end with a Python geometry engine to give you precise 2D vector sketching, parametric editing, automatic stitch‑hole generation, and 3D‑to‑2D unfolding — all in one app.
+<p align="center"><b>A native macOS CAD/CAM studio for leathercraft, pattern making, and sewing.</b></p>
 
-> **Distribution:** the release `.app` is **self‑contained** — it bundles its own Python backend, so it runs on any **Apple‑Silicon Mac (macOS 14+)** with nothing else installed. Build one with [`scripts/package_app.sh`](scripts/package_app.sh) → a ready‑to‑share `.dmg`. It is ad‑hoc signed (no Apple Developer ID), so users [bypass Gatekeeper once](#installing-a-non-notarized-app).
+<p align="center">
+  <img alt="Platform: macOS 14+" src="https://img.shields.io/badge/macOS-14%2B-000000?logo=apple&logoColor=white">
+  <img alt="Apple Silicon" src="https://img.shields.io/badge/Apple%20Silicon-arm64-0a84ff">
+  <img alt="Built with SwiftUI" src="https://img.shields.io/badge/SwiftUI-orange?logo=swift&logoColor=white">
+  <img alt="Engine: Python" src="https://img.shields.io/badge/engine-Python%20%2B%20OpenCASCADE-3776AB?logo=python&logoColor=white">
+  <img alt="Release v1.0.0" src="https://img.shields.io/badge/release-v1.0.0-success">
+</p>
+
+Pathstitch is for makers who want **CAD precision without CAD overhead**. Sketch a pattern with snapping and
+live dimensions, round corners parametrically, drop in saddle‑stitch holes and glue tabs, then export
+cut‑ready DXF/SVG/PDF — or import a 3D `.step` model and **unfold it into flat panels** you can actually cut
+and sew. It's a fast, native SwiftUI app backed by a real geometry kernel (`ezdxf`, `shapely`, OpenCASCADE),
+not a web wrapper.
+
+> ### 🟥 [IMAGE: Hero shot — the 2D editor with a finished leather wallet/bag pattern open: filleted corners, visible dimensions, stitch holes along the edges, layers panel on the right]
 
 ---
 
-## Features
+## Download
 
-- **2D sketching** — line, circle, rectangle, text, and an Illustrator‑style **pen** tool.
-- **Parametric corners** — per‑corner **fillet** and **chamfer** (G1/G2), live‑draggable radius, editable after the fact. Works on polylines, two‑line corners, and imported geometry.
-- **Trim** — Fusion‑style: click or drag across a segment and it's cut at its intersections.
-- **Offset, holes & stitching** — generate sewing holes / saddle‑stitch patterns along paths.
-- **Measure & dimensioning** — on‑creation dimensions, tab between fields, construction‑line export.
-- **Transforms** — move/rotate gizmo, point‑to‑point move, scale, mirror, reflect, duplicate, patterning.
-- **Layers**, **convert‑lines** styles, **paper folding** (crease lines + glue tabs).
-- **3D** — import `.step`/`.stp`, view in a Three.js viewport, and unfold developable nets to 2D.
-- **Import/Export** — DXF, SVG, PDF, PNG; native `.stch` project files; Finder QuickLook + thumbnails for DXF/STEP.
-- **Quality‑of‑life** — customizable keybinds, light/dark themes, a ⌘K command palette, and a rearrangeable toolbar.
+**[⬇ Download the latest release](https://github.com/Mason363/pathstitch/releases/latest)** — grab
+`Pathstitch-x.y.z.dmg`, drag it into Applications, and you're running. No Python, no setup; the geometry
+engine ships inside the app.
+
+- **Requires:** an Apple‑Silicon Mac (M1 or newer) on **macOS 14 (Sonoma)+**.
+- The app is **ad‑hoc signed, not Apple‑notarized**, so the first launch needs a one‑time Gatekeeper
+  approval — see **[Installing](#installing-the-app)**.
 
 ---
 
-## Architecture
+## What it does
+
+### Draw
+Line, circle, rectangle, text, and an Illustrator‑style **pen** tool, all with point/edge **snapping** and
+**on‑creation dimensions** — type a width, `Tab`, type a height, `Enter`, done.
+
+> ### 🟥 [IMAGE: Drawing a rectangle — the dimension input boxes (e.g. “80.00 mm” / “40.00 mm”) shown live on the canvas]
+
+### Edit
+- **Parametric fillet & chamfer** (G1/G2). Every corner is independent, draggable to size, and stays
+  editable forever — it can even grow until adjacent fillets meet. Works on polylines, the corner where two
+  separate lines meet, and imported geometry.
+- **Trim**, Fusion‑style: hover a segment to see exactly what will be removed, then click — or drag across
+  several — to cut at every intersection.
+- Move/rotate gizmo, point‑to‑point move, scale, mirror, reflect, duplicate.
+
+> ### 🟥 [IMAGE: Fillet in action — a rectangle with one corner mid‑drag showing the radius arrow and a large rounded corner, the others still sharp]
+
+> ### 🟥 [IMAGE: Trim hover preview — a line crossing a shape with the to‑be‑removed segment highlighted in red]
+
+### Make
+- **Stitch holes & saddle‑stitch patterns** generated along any path, with spacing and corner controls.
+- **Offset**, **convert‑lines** (dashed/perforated styles), **patterning**, and **paper folding**
+  (crease lines + glue tabs) for assembling 3D objects from flat stock.
+
+> ### 🟥 [IMAGE: Stitch‑hole generation — evenly spaced holes following the outline of a leather piece]
+
+### Go 3D → 2D
+Import `.step` / `.stp`, inspect it in a Three.js viewport, and **unfold developable surfaces into flat
+nets** ready for the 2D tools.
+
+> ### 🟥 [IMAGE: Split view — a 3D STEP model on the left, its unfolded 2D net with fold lines on the right]
+
+### Export & integrate
+DXF, SVG, PDF, and PNG export; native `.stch` project files; and **Finder QuickLook previews + thumbnails**
+for DXF and STEP. Plus the niceties: customizable keybinds, light/dark themes, a `⌘K` command palette, and a
+rearrangeable toolbar.
+
+---
+
+## Under the hood
+
+Pathstitch is a thin, fast SwiftUI front‑end over a persistent Python geometry worker. The UI never blocks on
+geometry: every operation is a JSON request streamed to a long‑lived backend process and rendered back.
 
 ```
 ┌──────────────────────────────┐        JSON over stdin/stdout        ┌────────────────────────────┐
@@ -32,164 +86,102 @@
                                                                        └────────────────────────────┘
 ```
 
-- **Front‑end:** Swift / SwiftUI (`Pathstitch/Pathstitch`). All geometry ops are dispatched to the backend through `PythonBridge.swift`, which keeps a persistent `python -m pathstitch_core.worker` process and streams JSON requests to it.
-- **Backend:** `pathstitch_core/` — `dxf_ops.py` (2D), `step_ops.py` / `surface_unfold.py` / `net_unfold.py` (3D), driven by `worker.py`.
-- **3D viewport:** `viewport3d.html` (Three.js) rendered inside a `WKWebView`.
+- **Front‑end** — Swift / SwiftUI (`Pathstitch/Pathstitch`). `PythonBridge.swift` keeps one
+  `python -m pathstitch_core.worker` process alive and streams framed JSON to it.
+- **Engine** — `pathstitch_core/`: `dxf_ops.py` (2D), `step_ops.py` / `surface_unfold.py` /
+  `net_unfold.py` (3D & unfolding), driven by `worker.py`.
+- **3D viewport** — `viewport3d.html` (Three.js) inside a `WKWebView`.
+
+For a packaged build, a trimmed copy of the Python environment and the engine are bundled into
+`Pathstitch.app/Contents/Resources/`, so the shipped app has no external dependencies.
 
 ---
 
-## Requirements
+## Build from source
 
-### To run / build from source
+You only need this if you want to develop Pathstitch; end users just download the `.dmg`.
+
+**Requirements**
 
 | Component | Version | Notes |
 |---|---|---|
-| **macOS** | **14.0 (Sonoma) or newer** | Built and tested on macOS 26 (Tahoe). No known upper bound. |
-| **Xcode** | **16 or newer** | Built with Xcode 26.5 / Swift 6.3. Needed only to build from source. |
-| **Python** | **3.11** | The backend; see the Python packages below. |
+| **macOS** | **14.0 (Sonoma)+** | Developed/tested on macOS 26. |
+| **Xcode** | **16+** | Built with Xcode 26.5 / Swift 6.3. |
+| **Python** | **3.11** | The geometry backend. |
 
-**Python packages** (`pathstitch_core/requirements.txt` + 3D extras):
+**Python packages** (`pathstitch_core/requirements.txt` + 3D/raster extras):
 
 ```
-ezdxf        # DXF read/write + 2D geometry
-shapely      # offsets, booleans, polygon ops
-numpy        # math
-svgwrite     # SVG export
-matplotlib   # PDF / PNG raster export
-pythonocc-core   # STEP import + 3D (OpenCASCADE bindings)
+ezdxf          # DXF read/write + 2D geometry
+shapely        # offsets, booleans, polygon ops
+numpy          # math
+svgwrite       # SVG export
+matplotlib     # PDF / PNG raster export
+pythonocc-core # STEP import + 3D (OpenCASCADE) — install via conda-forge, not pip
 ```
 
-> `pythonocc-core` (OpenCASCADE) is easiest to install via **conda/conda‑forge**, not pip.
+**Steps**
+
+```bash
+# 1. clone
+git clone https://github.com/Mason363/pathstitch.git
+cd pathstitch
+
+# 2. backend env (conda recommended for pythonocc-core)
+conda create -n pathstitch python=3.11
+conda activate pathstitch
+conda install -c conda-forge pythonocc-core
+pip install -r pathstitch_core/requirements.txt matplotlib
+
+# 3. sanity check the engine
+PYTHONPATH=. python pathstitch_core/test_dxf_ops.py   # → "ALL TESTS PASSED SUCCESSFULLY!"
+```
+
+When run **from Xcode**, the app falls back to your local interpreter + repo. Set the two fallback paths
+once near the top of
+[`Pathstitch/Pathstitch/Bridge/PythonBridge.swift`](Pathstitch/Pathstitch/Bridge/PythonBridge.swift):
+
+```swift
+"/opt/homebrew/Caskroom/miniconda/base/envs/pathstitch/bin/python"  // your env (echo $CONDA_PREFIX/bin/python)
+"/absolute/path/to/this/repo"                                       // this checkout
+```
+
+Then open `Pathstitch/Pathstitch.xcodeproj` and ⌘R (or `xcodebuild ... -configuration Debug build`).
 
 ---
 
-## Build & run from source
+## Packaging a distributable `.dmg`
 
-1. **Clone**
-   ```bash
-   git clone https://github.com/Mason363/pathstitch.git
-   cd pathstitch
-   ```
-
-2. **Create the Python environment** (conda recommended because of `pythonocc-core`):
-   ```bash
-   conda create -n pathstitch python=3.11
-   conda activate pathstitch
-   conda install -c conda-forge pythonocc-core
-   pip install -r pathstitch_core/requirements.txt
-   pip install matplotlib
-   ```
-
-3. **Verify the backend works:**
-   ```bash
-   PYTHONPATH=. python pathstitch_core/test_dxf_ops.py   # should print "ALL TESTS PASSED SUCCESSFULLY!"
-   ```
-
-4. **Point the app at your interpreter.** Open
-   [`Pathstitch/Pathstitch/Bridge/PythonBridge.swift`](Pathstitch/Pathstitch/Bridge/PythonBridge.swift)
-   and set the two paths near the top to match your machine:
-   ```swift
-   private let pythonPath  = "/opt/homebrew/Caskroom/miniconda/base/envs/pathstitch/bin/python"
-   private let projectPath = "/absolute/path/to/this/repo"
-   ```
-   (`echo $CONDA_PREFIX/bin/python` while the env is active gives you the first one.)
-
-5. **Build & run** in Xcode (open `Pathstitch/Pathstitch.xcodeproj`, ⌘R), or from the CLI:
-   ```bash
-   cd Pathstitch
-   xcodebuild -project Pathstitch.xcodeproj -scheme Pathstitch -configuration Debug build
-   ```
-
----
-
-## How distribution works
-
-The release app no longer depends on your conda env or repo path. At launch, `PythonBridge` looks for a
-bundled interpreter at `Pathstitch.app/Contents/Resources/pyenv/bin/python3.11` and a bundled copy of
-`pathstitch_core` next to it; if present (a packaged build) it uses those, otherwise it falls back to the
-developer conda env + repo (a build run straight from Xcode). So:
-
-- **From Xcode** → uses your local env (set the two fallback paths once, as in [Build & run](#build--run-from-source)).
-- **From a packaged `.dmg`** → uses the bundled env. Fully self‑contained.
-
-**Platform:** the bundled env is **Apple‑Silicon (arm64)**, so the `.dmg` targets **Apple‑Silicon Macs**.
-For Intel you'd repackage on an Intel Mac (or build a universal env).
-
----
-
-## Building a `.dmg` (one command)
+One command produces a self‑contained, drag‑to‑install image:
 
 ```bash
 bash scripts/package_app.sh
 # → dist/Pathstitch-1.0.dmg   (~400 MB, self-contained, ad-hoc signed)
 ```
 
-The script: builds the Release `.app`, copies a **trimmed** Python env (≈2.8 GB → ≈1.1 GB; OpenCASCADE
-stays, dev‑only LLVM/Qt/VTK/headers are dropped) and `pathstitch_core` into `Contents/Resources/`, ad‑hoc
-signs the bundle, and produces a **drag‑to‑install** `.dmg` (the app + an `Applications` symlink, so users
-drag one onto the other). Override the env location with `CONDA_ENV=/path/to/env bash scripts/package_app.sh`.
+It builds the Release app, copies a **trimmed** Python env (≈2.8 GB → ≈1.1 GB — OpenCASCADE stays; dev‑only
+LLVM/Qt/VTK/headers are dropped) plus `pathstitch_core` into the bundle, ad‑hoc signs it, and creates a
+`.dmg` whose window has the app next to an **Applications** shortcut (drag one onto the other). Point it at a
+different env with `CONDA_ENV=/path/to/env bash scripts/package_app.sh`.
 
-### Prefer a prettier window? (`create-dmg`)
-
-The `hdiutil` image the script makes is functional (app + Applications). For the classic window with a
-background arrow, install `brew install create-dmg` and run it against `dist/Pathstitch.app`:
-
-```bash
-create-dmg --volname "Pathstitch" --window-size 540 380 \
-  --icon "Pathstitch.app" 140 190 --app-drop-link 400 190 \
-  --hide-extension "Pathstitch.app" "Pathstitch-1.0.dmg" "dist/Pathstitch.app"
-```
-
-> **Real notarization:** for a no‑warning install you'd need a paid **Apple Developer ID** signature +
-> `xcrun notarytool`. Without it the app is ad‑hoc signed and users do the one‑time Gatekeeper bypass below.
+> The bundled env is **arm64**, so the image targets Apple‑Silicon Macs. For a no‑warning install you'd need a
+> paid **Apple Developer ID** signature + notarization (`xcrun notarytool`); without it, users do the
+> one‑time bypass below.
 
 ---
 
-## Installing a non‑notarized app
+## Installing the app
 
-Because the app isn't notarized by Apple, Gatekeeper will warn the first time. Pick **one**:
+Because Pathstitch isn't Apple‑notarized, Gatekeeper warns on first launch. Do this **once**:
 
-**Option A — System Settings (works on every modern macOS, required on macOS 15+):**
-1. Drag **Pathstitch** into **Applications** and double‑click it.
-2. macOS says it "cannot be opened because Apple cannot check it for malicious software." Click **Done**.
-3. Open **System Settings ▸ Privacy & Security**, scroll down, and click **Open Anyway** next to the
-   Pathstitch message. Confirm with your password / Touch ID.
+1. Open the `.dmg`, drag **Pathstitch** onto **Applications**, and double‑click it.
+2. On the “…cannot be opened because Apple cannot check it…” dialog, click **Done**.
+3. Go to **System Settings ▸ Privacy & Security**, scroll down, and click **Open Anyway** next to the
+   Pathstitch message. Confirm with Touch ID / your password.
 
-**Option B — Right‑click Open (macOS 14 only):**
-- Right‑click (Control‑click) **Pathstitch.app ▸ Open ▸ Open**.
-  *(Apple removed this shortcut starting in macOS 15 Sequoia — use Option A there.)*
+*(Terminal alternative, if you trust the source: `xattr -dr com.apple.quarantine /Applications/Pathstitch.app`.)*
 
-**Option C — Terminal (fastest if you trust the source):**
-```bash
-xattr -dr com.apple.quarantine /Applications/Pathstitch.app
-```
-
----
-
-## Checking your versions
-
-**Your macOS version** (to confirm it's 14.0+):
-- Menu  ▸ **About This Mac**, or in Terminal:
-  ```bash
-  sw_vers -productVersion
-  ```
-
-**The app's minimum macOS** (from a built `.app`):
-```bash
-plutil -p /Applications/Pathstitch.app/Contents/Info.plist | grep LSMinimumSystemVersion
-```
-
-**The deployment target in source** (what you'd change to support older systems):
-```bash
-grep MACOSX_DEPLOYMENT_TARGET Pathstitch/Pathstitch.xcodeproj/project.pbxproj   # → 14.0
-```
-
-**Your toolchain** (to build from source):
-```bash
-xcodebuild -version     # Xcode + build number
-swift --version         # Swift toolchain
-python --version        # should be 3.11.x in the pathstitch env
-```
+**Checking your macOS version:**  ▸ About This Mac, or `sw_vers -productVersion` (needs `14.0`+).
 
 ---
 
@@ -199,26 +191,28 @@ python --version        # should be 3.11.x in the pathstitch env
 pathstitch/
 ├── Pathstitch/                     # Xcode project + Swift sources
 │   ├── Pathstitch.xcodeproj
-│   ├── Pathstitch/                 # the main app target
-│   │   ├── App/                    # AppState, keybinds, toolbar layout
-│   │   ├── Bridge/PythonBridge.swift
-│   │   ├── Modes/{TwoDMode,ThreeDMode}/
-│   │   └── Welcome/                # start screen + window management
+│   ├── Pathstitch/                 # main app target (App/, Bridge/, Modes/, Welcome/)
 │   ├── DxfPreviewer/               # QuickLook preview extension
 │   └── PathstitchThumbnail/        # Finder thumbnail extension
-├── pathstitch_core/                # Python geometry engine
-│   ├── worker.py                   # persistent JSON worker
-│   ├── dxf_ops.py                  # 2D operations
-│   ├── step_ops.py · surface_unfold.py · net_unfold.py   # 3D / unfolding
-│   └── requirements.txt
+├── pathstitch_core/                # Python geometry engine (worker.py, dxf_ops.py, *unfold*.py)
+├── scripts/package_app.sh          # build a self-contained .dmg
 └── README.md
 ```
 
 ---
 
-## License & credits
+## Status & roadmap
+
+Pathstitch is an actively developed **1.0**. The 2D pipeline (draw → edit → stitch → export) is the mature
+core; 3D STEP import + unfolding works for developable surfaces and is expanding. Currently **Apple‑Silicon
+only** — an Intel/universal build is possible by repackaging the backend on an Intel Mac.
+
+Issues and ideas are welcome via the tracker.
+
+---
+
+## Credits
 
 Built with ❤️ by **Mason Chen**.
 
-This project is a personal/work‑in‑progress build; add a license file if you intend to share or accept
-contributions.
+> *No license file is included yet — add one before accepting outside contributions or redistribution.*
