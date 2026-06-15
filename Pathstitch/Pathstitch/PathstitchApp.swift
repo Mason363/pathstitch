@@ -1,9 +1,29 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
+import Combine
 
 class AppDelegate: NSObject, NSApplicationDelegate {
+    private var appearanceCancellable: AnyCancellable?
+    
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Apply the saved appearance app-wide BEFORE any window is shown so the
+        // Start screen, Settings, Help and document windows all open themed (MAS-72).
+        ThemeManager.apply()
+
         WindowManager.shared.applicationDidFinishLaunching(notification)
+
+        // Monitor system appearance to update dock icon dynamically
+        appearanceCancellable = NSApp.publisher(for: \.effectiveAppearance)
+            .sink { [weak self] _ in
+                self?.updateAppIcon()
+            }
+        updateAppIcon()
+    }
+    
+    private func updateAppIcon() {
+        // Honors the user's icon preference; "auto" follows system appearance (MAS-72).
+        AppIconManager.refresh()
     }
     
     func applicationShouldOpenUntitledFile(_ sender: NSApplication) -> Bool {
@@ -15,6 +35,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// nothing useful and macOS could surface a blank window (MAS-14, MAS-37).
     func application(_ application: NSApplication, open urls: [URL]) {
         WindowManager.shared.openFiles(urls)
+    }
+
+    /// Prompt to save any unsaved documents before the app quits (⌘Q). Without
+    /// this, quitting silently discarded changes since per-window
+    /// `windowShouldClose` isn't consulted on termination.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        return WindowManager.shared.applicationShouldTerminate(sender)
     }
 }
 
@@ -31,11 +58,10 @@ extension NSApplication {
 @main
 struct PathstitchApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    @Environment(\.openWindow) private var openWindow
-    
+
     var body: some Scene {
         Settings {
-            EmptyView()
+            PreferencesView()
         }
         .commands {
             CommandGroup(after: .appInfo) {
@@ -55,6 +81,11 @@ struct PathstitchApp: App {
                     WindowManager.shared.openProjectWithDialog()
                 }
                 .keyboardShortcut("o", modifiers: [.command])
+                
+                Button("Import...") {
+                    WindowManager.shared.importFileWithDialog()
+                }
+                .keyboardShortcut("i", modifiers: [.command, .shift])
                 
                 Divider()
                 
@@ -76,6 +107,103 @@ struct PathstitchApp: App {
                     }
                 }
                 .keyboardShortcut("s", modifiers: [.command, .shift])
+
+                Divider()
+
+                // Export (was the top-level "Export Settings" menu — MAS-68)
+                Menu("Export") {
+                    Button("Export...") {
+                        NSApp.activeAppState?.exportWithDialog()
+                    }
+                    .keyboardShortcut("e", modifiers: [.command])
+                    .disabled(NSApp.activeAppState?.currentFilePath == nil)
+
+                    Divider()
+
+                    Picker("Export Format", selection: Binding(
+                        get: { NSApp.activeAppState?.exportFormat ?? "dxf" },
+                        set: { NSApp.activeAppState?.exportFormat = $0 }
+                    )) {
+                        Text("AutoCAD DXF (.dxf)").tag("dxf")
+                        Text("Scalable Vector Graphics (.svg)").tag("svg")
+                        Text("Document PDF (.pdf)").tag("pdf")
+                        Text("Raster Image (.png)").tag("png")
+                    }
+
+                    Toggle("Export Selected Only", isOn: Binding(
+                        get: { NSApp.activeAppState?.exportSelectedOnly ?? false },
+                        set: { NSApp.activeAppState?.exportSelectedOnly = $0 }
+                    ))
+
+                    Toggle("Export Measurement Lines", isOn: Binding(
+                        get: { NSApp.activeAppState?.exportMeasurementLines ?? false },
+                        set: { NSApp.activeAppState?.exportMeasurementLines = $0 }
+                    ))
+                }
+
+                // Image (was the top-level "Reference Image" menu — MAS-68)
+                Menu("Image") {
+                    Button("Load Reference Image...") {
+                        if let state = NSApp.activeAppState {
+                            let openPanel = NSOpenPanel()
+                            openPanel.allowedContentTypes = [.image]
+                            openPanel.allowsMultipleSelection = false
+                            openPanel.canChooseDirectories = false
+                            openPanel.canChooseFiles = true
+                            if openPanel.runModal() == .OK, let url = openPanel.url {
+                                state.loadReferenceImage(from: url)
+                            }
+                        }
+                    }
+
+                    Button("Clear Reference Image") {
+                        if let state = NSApp.activeAppState {
+                            state.refImage = nil
+                            state.refImageBase64 = nil
+                        }
+                    }
+                    .disabled(NSApp.activeAppState?.refImage == nil)
+
+                    Divider()
+
+                    Toggle("Calibration Mode", isOn: Binding(
+                        get: { NSApp.activeAppState?.isCalibrationActive ?? false },
+                        set: { NSApp.activeAppState?.isCalibrationActive = $0 }
+                    ))
+                    .disabled(NSApp.activeAppState?.refImage == nil)
+
+                    Button("Set Calibration Distance...") {
+                        if let state = NSApp.activeAppState {
+                            let alert = NSAlert()
+                            alert.messageText = "Set Calibration Distance"
+                            alert.informativeText = "Enter target distance in millimeters:"
+                            alert.addButton(withTitle: "OK")
+                            alert.addButton(withTitle: "Cancel")
+
+                            let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
+                            input.stringValue = String(format: "%.1f", state.calibrationDistance)
+                            alert.accessoryView = input
+
+                            if alert.runModal() == .alertFirstButtonReturn {
+                                if let val = Double(input.stringValue) {
+                                    state.calibrationDistance = val
+                                }
+                            }
+                        }
+                    }
+                    .disabled(NSApp.activeAppState?.refImage == nil)
+
+                    Divider()
+
+                    Menu("Opacity") {
+                        Button("10%") { NSApp.activeAppState?.refImageOpacity = 0.1 }
+                        Button("25%") { NSApp.activeAppState?.refImageOpacity = 0.25 }
+                        Button("50%") { NSApp.activeAppState?.refImageOpacity = 0.50 }
+                        Button("75%") { NSApp.activeAppState?.refImageOpacity = 0.75 }
+                        Button("100%") { NSApp.activeAppState?.refImageOpacity = 1.0 }
+                    }
+                    .disabled(NSApp.activeAppState?.refImage == nil)
+                }
             }
             
             CommandGroup(replacing: .undoRedo) {
@@ -97,33 +225,53 @@ struct PathstitchApp: App {
                 .keyboardShortcut(.delete, modifiers: [])
             }
             
-            // Selection / Tools menu
+            // Selection / Tools menu. Keyboard shortcuts for these live in the
+            // customizable keybind registry (MAS-72) and are captured by the
+            // hidden hotkey buttons in ContentView, so the menu items here carry
+            // no hardcoded shortcuts (single source of truth). Use ⌘K (Search)
+            // or Preferences to discover/change them.
             CommandMenu("Tools") {
-                Button("Select") { NSApp.activeAppState?.currentTool = .select }
-                    .keyboardShortcut("v", modifiers: [])
-                Button("Pan") { NSApp.activeAppState?.currentTool = .pan }
-                    .keyboardShortcut("h", modifiers: [])
-                Button("Offset") { NSApp.activeAppState?.currentTool = .offset }
-                    .keyboardShortcut("o", modifiers: [])
-                Button("Add Holes") { NSApp.activeAppState?.currentTool = .addHoles }
-                    .keyboardShortcut("s", modifiers: [])
-                Button("Join/Cleanup") { NSApp.activeAppState?.currentTool = .cleanup }
-                    .keyboardShortcut("j", modifiers: [])
-                Button("Measure") { NSApp.activeAppState?.currentTool = .measure }
-                    .keyboardShortcut("m", modifiers: [])
-                
+                Button("Search…") { NSApp.activeAppState?.showSearchPalette = true }
+                    .keyboardShortcut("k", modifiers: [.command])
                 Divider()
-                
+                Button("Select") { NSApp.activeAppState?.currentTool = .select }
+                Button("Move") { NSApp.activeAppState?.currentTool = .move }
+                Button("Pan") { NSApp.activeAppState?.currentTool = .pan }
+                Button("Offset") { NSApp.activeAppState?.currentTool = .offset }
+                Button("Add Holes") { NSApp.activeAppState?.currentTool = .addHoles }
+                Button("Join/Cleanup") { NSApp.activeAppState?.currentTool = .cleanup }
+                Button("Measure") { NSApp.activeAppState?.currentTool = .measure }
+                Button("Mirror") { NSApp.activeAppState?.currentTool = .mirror }
+                Button("Convert Lines") { NSApp.activeAppState?.currentTool = .convertLines }
+                Button("Trim") { NSApp.activeAppState?.currentTool = .trim }
+                Button("Paper Folding") { NSApp.activeAppState?.currentTool = .paperFolding }
+                Button("Patterning") { NSApp.activeAppState?.currentTool = .patterning }
+
+                Divider()
+
                 Button("Line Sketch") { NSApp.activeAppState?.currentTool = .sketchLine }
-                    .keyboardShortcut("l", modifiers: [])
                 Button("Circle Sketch") { NSApp.activeAppState?.currentTool = .sketchCircle }
-                    .keyboardShortcut("c", modifiers: [])
                 Button("Rectangle Sketch") { NSApp.activeAppState?.currentTool = .sketchRectangle }
-                    .keyboardShortcut("r", modifiers: [])
                 Button("Text Sketch") { NSApp.activeAppState?.currentTool = .sketchText }
-                    .keyboardShortcut("t", modifiers: [])
+                Button("Pen") { NSApp.activeAppState?.currentTool = .pen }
+                Button("Fillet") { NSApp.activeAppState?.currentTool = .fillet }
+                Button("Chamfer") { NSApp.activeAppState?.currentTool = .chamfer }
             }
-            
+
+            // Modify menu — geometric transforms on the current selection.
+            // Shortcuts live in the keybind registry (edit.flipH / edit.flipV).
+            CommandMenu("Modify") {
+                Button("Flip Horizontal") {
+                    NSApp.activeAppState?.reflectSelectedEntities(axis: "horizontal")
+                }
+                .disabled((NSApp.activeAppState?.selectedHandles.isEmpty ?? true))
+
+                Button("Flip Vertical") {
+                    NSApp.activeAppState?.reflectSelectedEntities(axis: "vertical")
+                }
+                .disabled((NSApp.activeAppState?.selectedHandles.isEmpty ?? true))
+            }
+
             // Custom item to toggle logs & learn mode
             CommandGroup(after: .sidebar) {
                 Button(NSApp.activeAppState?.isLogTrayExpanded == true ? "Hide Logs" : "Show Logs") {
@@ -137,16 +285,13 @@ struct PathstitchApp: App {
             
             // Custom Help menu
             CommandGroup(replacing: .help) {
-                Button("Pathstitch Help & Documentation") {
-                    openWindow(id: "help-window")
+                Button("Documentation") {
+                    WindowManager.shared.showDocumentationWindow()
                 }
             }
         }
-        
-        // Help Window Scene
-        Window("Pathstitch Help & Documentation", id: "help-window") {
-            HelpView()
-        }
-        .windowResizability(.contentSize)
+        // NOTE: the Documentation window is intentionally NOT a top-level `Window`
+        // scene — those auto-open at launch and caused a ghost window. It's hosted
+        // on demand in an AppKit window by WindowManager instead.
     }
 }

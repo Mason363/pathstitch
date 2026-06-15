@@ -34,19 +34,31 @@ struct BatchItem: Identifiable, Hashable, Equatable {
 
 enum TwoDTool: String, CaseIterable {
     case select = "Select (V)"
+    case move = "Move (W)"
     case pan = "Pan (H)"
     case offset = "Offset (O)"
-    case addHoles = "Add Holes (S)"
+    case addHoles = "Add Holes (D)"
     case cleanup = "Join/Cleanup (J)"
     case measure = "Measure (M)"
     case sketchLine = "Line (L)"
     case sketchCircle = "Circle (C)"
     case sketchRectangle = "Rectangle (R)"
     case sketchText = "Text (T)"
-    
+    case pen = "Pen"
+    case fillet = "Fillet (K)"
+    case chamfer = "Chamfer (B)"
+    case convertLines = "Convert Lines (E)"
+    case mirror = "Mirror (I)"
+    case trim = "Trim"
+    case paperFolding = "Paper Folding (F)"
+    case patterning = "Patterning (P)"
+
+    /// SF Symbol fallback. The Fillet/Chamfer tools draw a custom corner glyph in
+    /// the toolbar (see ToolButton), since SF Symbols has no true fillet/chamfer.
     var icon: String {
         switch self {
         case .select: return "cursorarrow"
+        case .move: return "arrow.up.and.down.and.arrow.left.and.right"
         case .pan: return "hand.raised"
         case .offset: return "arrow.up.and.down"
         case .addHoles: return "circle.dashed"
@@ -56,8 +68,18 @@ enum TwoDTool: String, CaseIterable {
         case .sketchCircle: return "circle"
         case .sketchRectangle: return "rectangle"
         case .sketchText: return "character.cursor.ibeam"
+        case .pen: return "pencil.tip"
+        case .fillet: return "square"
+        case .chamfer: return "square"
+        case .convertLines: return "scribble"
+        case .mirror: return "flip.horizontal"
+        case .trim: return "scissors.badge.ellipsis"
+        case .paperFolding: return "scissors"
+        case .patterning: return "square.grid.3x3"
         }
     }
+
+    var isCornerTool: Bool { self == .fillet || self == .chamfer }
 }
 
 struct MeasurementLine: Identifiable, Codable, Hashable {
@@ -98,16 +120,44 @@ struct MeasurementLine: Identifiable, Codable, Hashable {
 }
 
 struct HistoryState {
-    let dxfData: Data?
+    let dxfDataTask: Task<Data?, Never>
     let measurements: [MeasurementLine]
     let selectedHandles: Set<String>
+    // Parametric corner models + their snap points travel with the geometry so
+    // fillets/chamfers stay parametric and in-sync across undo/redo (MAS-62).
+    let parametricShapes: [String: ParametricCornerShape]
+    let cornerSnapPoints: [String: [CornerSnapPoint]]
+}
+
+/// One parametric corner modifier on a shape (MAS-62).
+struct CornerMod: Codable, Equatable, Hashable {
+    var index: Int          // index into the shape's sharp base polygon
+    var kind: String        // "fillet" | "chamfer"
+    var value: Double       // fillet radius / chamfer setback (mm)
+    var continuity: String  // "G1" | "G2"
+}
+
+/// A shape kept editable as a sharp base polygon + corner modifiers; the visible
+/// curve (true arcs / biarc / chamfer) is regenerated from it (MAS-62).
+struct ParametricCornerShape: Codable, Equatable {
+    var base: [[Double]]
+    var closed: Bool
+    var corners: [CornerMod]
+}
+
+/// A snap target produced for a parametric shape: the two tangent ends and the
+/// center of each blend, plus the untouched sharp corners (MAS-62).
+struct CornerSnapPoint: Codable, Equatable {
+    var x: Double
+    var y: Double
+    var role: String  // "tangent" | "center" | "corner"
 }
 
 struct DXFEntity: Identifiable, Codable, Equatable, Hashable {
     var id: String { handle }
     let handle: String
     let type: String
-    let layer: String
+    var layer: String
     let color: Int
     
     // Geometry bounds or representation helper
@@ -122,6 +172,7 @@ struct DXFEntity: Identifiable, Codable, Equatable, Hashable {
     let text: String?
     let height: Double?
     var rotation: Double? = nil   // TEXT rotation, degrees CCW (DXF convention)
+    var layerId: String? = nil
 
     var geometryDetails: String {
         switch type.uppercased() {
@@ -168,8 +219,15 @@ struct DXFEntity: Identifiable, Codable, Equatable, Hashable {
         }
     }
 
+    func getLayer(in layers: [DXFLayer]) -> DXFLayer? {
+        if let lid = layerId, let matched = layers.first(where: { $0.id == lid }) {
+            return matched
+        }
+        return layers.first(where: { $0.name == layer })
+    }
+
     func translated(dx: Double, dy: Double) -> DXFEntity {
-        DXFEntity(
+        var ent = DXFEntity(
             handle: handle,
             type: type,
             layer: layer,
@@ -186,6 +244,63 @@ struct DXFEntity: Identifiable, Codable, Equatable, Hashable {
             height: height,
             rotation: rotation
         )
+        ent.layerId = layerId
+        return ent
+    }
+
+    /// Returns a copy with new vertex geometry (MAS-62 free vertex editing).
+    /// LINE uses the first/last point; LWPOLYLINE/POLYLINE use the whole list.
+    func withVertices(_ newVerts: [[Double]]) -> DXFEntity {
+        let isLine = type.uppercased() == "LINE"
+        let isPoly = type.uppercased() == "LWPOLYLINE" || type.uppercased() == "POLYLINE"
+        var ent = DXFEntity(
+            handle: handle,
+            type: type,
+            layer: layer,
+            color: color,
+            start: (isLine && newVerts.count >= 1) ? newVerts.first : start,
+            end: (isLine && newVerts.count >= 2) ? newVerts.last : end,
+            center: center,
+            radius: radius,
+            start_angle: start_angle,
+            end_angle: end_angle,
+            vertices: isPoly ? newVerts : vertices,
+            closed: closed,
+            text: text,
+            height: height,
+            rotation: rotation
+        )
+        ent.layerId = layerId
+        return ent
+    }
+
+    /// Editable vertices in model space ([] if the type has none). Closed
+    /// polylines report a redundant closing vertex (== the first); it is dropped
+    /// so indices line up with the Python ops' `get_points` (MAS-62).
+    var editableVertices: [[Double]] {
+        switch type.uppercased() {
+        case "LINE":
+            if let s = start, let e = end { return [s, e] }
+            return []
+        case "LWPOLYLINE", "POLYLINE":
+            guard var v = vertices, v.count >= 2 else { return vertices ?? [] }
+            if (closed ?? false), let f = v.first, let l = v.last,
+               abs(f[0] - l[0]) < 1e-6, abs(f[1] - l[1]) < 1e-6 {
+                v.removeLast()
+            }
+            return v
+        default:
+            return []
+        }
+    }
+
+    /// Indices of corners eligible for fillet/chamfer: all corners of a closed
+    /// polyline, interior corners of an open one, none for a line (MAS-62).
+    var filletableCornerIndices: [Int] {
+        let v = editableVertices
+        guard type.uppercased() == "LWPOLYLINE" || type.uppercased() == "POLYLINE", v.count >= 3 else { return [] }
+        if closed ?? false { return Array(0..<v.count) }
+        return v.count >= 3 ? Array(1..<(v.count - 1)) : []
     }
 
     func rotated(angleDegrees: Double, centerPt: [Double]) -> DXFEntity {
@@ -208,7 +323,7 @@ struct DXFEntity: Identifiable, Codable, Equatable, Hashable {
             }
         }
         
-        return DXFEntity(
+        var ent = DXFEntity(
             handle: handle,
             type: type,
             layer: layer,
@@ -225,14 +340,44 @@ struct DXFEntity: Identifiable, Codable, Equatable, Hashable {
             height: height,
             rotation: (type == "TEXT") ? ((rotation ?? 0.0) + angleDegrees) : rotation
         )
+        ent.layerId = layerId
+        return ent
     }
 }
 
-struct DXFLayer: Identifiable, Hashable {
-    var id: String { name }
-    let name: String
-    var color: Color
+struct DXFLayer: Identifiable, Hashable, Codable {
+    var id: String
+    var name: String
+    var colorHex: String
     var visible: Bool = true
+    var parentFolderId: String? = nil
+    
+    var color: Color {
+        get { Color(hex: colorHex) }
+        set { colorHex = newValue.toHex() }
+    }
+    
+    init(id: String = UUID().uuidString, name: String, colorHex: String, visible: Bool = true, parentFolderId: String? = nil) {
+        self.id = id
+        self.name = name
+        self.colorHex = colorHex
+        self.visible = visible
+        self.parentFolderId = parentFolderId
+    }
+    
+    init(id: String = UUID().uuidString, name: String, color: Color, visible: Bool = true, parentFolderId: String? = nil) {
+        self.id = id
+        self.name = name
+        self.colorHex = color.toHex()
+        self.visible = visible
+        self.parentFolderId = parentFolderId
+    }
+}
+
+struct DXFLayerFolder: Identifiable, Hashable, Codable {
+    var id: String = UUID().uuidString
+    var name: String
+    var parentFolderId: String? = nil
 }
 
 struct LogEntry: Identifiable, Codable, Hashable {
@@ -274,11 +419,15 @@ struct ProjectSaveContainer: Codable {
     
     // Optional settings
     var isLearnModeEnabled: Bool? = nil
+    // Parametric fillet/chamfer corner specs, keyed by entity handle (MAS-62).
+    var parametricShapes: [String: ParametricCornerShape]? = nil
     var offsetDistance: Double? = nil
     var offsetSide: String? = nil
     var holeOffsetDistance: Double? = nil
     var holeDiameter: Double? = nil
     var holeSpacing: Double? = nil
+    var holeDistribution: String? = nil
+    var holeCount: Int? = nil
     var holePattern: String? = nil
     var holeCornerBehavior: String? = nil
     var holeSide: String? = nil
@@ -296,9 +445,19 @@ struct ProjectSaveContainer: Codable {
 
     // §6: persist the "export measurement lines as construction lines" setting.
     var exportMeasurementLines: Bool? = nil
+
+    // Phase 9 layering fields
+    var savedLayers: [DXFLayer]? = nil
+    var savedLayerFolders: [DXFLayerFolder]? = nil
+    var savedActiveLayerId: String? = nil
+
+    // 3D workspace persistence (MAS-75): the 3D model + body visibility travel
+    // inside the same .stch as the 2D drawing, so 3D shares saving/unsaved state.
+    var savedStepJson: String? = nil
+    var savedBodies3D: [Body3D]? = nil
 }
 
-@Observable
+@MainActor @Observable
 class AppState {
     var activeMode: AppMode = .twoD
     var currentFilePath: URL?
@@ -325,7 +484,10 @@ class AppState {
     var editingTextHeight: Double = 5.0
     var editingTextWidth: Double = 0.0  // model-space width of the drawn text box
     var escapePressedToken: Int = 0
-    
+
+    // Search palette (MAS-53): set true to present the command search overlay.
+    var showSearchPalette: Bool = false
+
     // Log entries
     var logEntries: [LogEntry] = []
     
@@ -349,18 +511,64 @@ class AppState {
     // 2D Canvas State
     var currentTool: TwoDTool = .select
     var chainSelectionEnabled: Bool = false
-    var selectedHandles: Set<String> = []
+    var selectedHandles: Set<String> = [] {
+        didSet {
+            updateActiveLayersFromSelection()
+            // A new selection starts a fresh rotation accumulation (MAS-57).
+            if selectedHandles != oldValue { gizmoAccumulatedRotation = 0 }
+        }
+    }
+
+    /// Cumulative rotation (degrees, [0,360)) applied to the current selection via
+    /// the rotation gizmo — never resets to zero between rotations of the same
+    /// selection, only when the selection changes (MAS-57).
+    var gizmoAccumulatedRotation: Double = 0
     var entities: [DXFEntity] = []
     var previewEntities: [DXFEntity] = []
     var layers: [DXFLayer] = []
+    var layerFolders: [DXFLayerFolder] = []
+    var activeLayerId: String? = nil {
+        didSet {
+            if let lid = activeLayerId {
+                if !activeLayerIds.contains(lid) {
+                    activeLayerIds = [lid]
+                }
+            } else {
+                activeLayerIds.removeAll()
+            }
+        }
+    }
+    var activeLayerIds: Set<String> = []
+    var expandedFolderIds: Set<String> = []
+    
+    var activeLayer: DXFLayer? {
+        if let lid = activeLayerId, let matched = layers.first(where: { $0.id == lid }) {
+            return matched
+        }
+        return layers.first
+    }
+    
+    func sanitizeLayerName(_ name: String) -> String {
+        let invalidChars = CharacterSet(charactersIn: "\\/:*?\"<>|;,=`")
+        let components = name.components(separatedBy: invalidChars)
+        let sanitized = components.joined(separator: "_").trimmingCharacters(in: .whitespacesAndNewlines)
+        return sanitized.isEmpty ? "Layer" : String(sanitized.prefix(255))
+    }
     var canvasScale: CGFloat = 1.0
     var canvasOffset: CGSize = .zero
     var gridVisible: Bool = true
+    var threeDOrthographic: Bool = false
     /// Incremented to ask the 2D canvas to zoom/pan so all geometry is visible
     /// (e.g. after a multi-file distribute import). The canvas owns the view
     /// size, so it computes the actual fit — see `DxfCanvasView.fitToContent`.
     var fitRequestToken: Int = 0
-    
+    /// Bumped to request opening the Documentation window from a non-View
+    /// context (e.g. the search palette). ContentView observes it.
+    var openDocsToken: Int = 0
+    /// Bumped when Return/Enter is pressed with a commit-capable tool active
+    /// (Line, Pen). The 2D canvas observes it to finish the in-progress shape.
+    var commitToolToken: Int = 0
+
     // Operations Configs
     var offsetDistance: Double = 1.0
     var offsetSide: String = "left"
@@ -368,6 +576,10 @@ class AppState {
     var holeOffsetDistance: Double = 2.0
     var holeDiameter: Double = 1.0
     var holeSpacing: Double = 4.0
+    // Distribution: "spacing" fills the contour at a fixed pitch (variable spacing
+    // allowed); "count" places exactly holeCount evenly-spaced holes (MAS-59).
+    var holeDistribution: String = "spacing"
+    var holeCount: Int = 12
     var holePattern: String = "single" // "single" or "saddle"
     var holeCornerBehavior: String = "skip" // "skip" or "wrap"
     var holeSide: String = "left"
@@ -383,6 +595,8 @@ class AppState {
     
     var consolidateSvgStrokes: Bool = true
     var cleanupTolerance: Double = 0.1
+    var exportFormat: String = "dxf"
+    var exportSelectedOnly: Bool = false
     
     // Glue Tab Configs
     var glueTabHeight: Double = 5.0
@@ -395,7 +609,484 @@ class AppState {
     var sketchFilletRadius: Double = 0.0
     var bboxOffsetDistance: Double = 5.0
     var bboxOffsetFillet: Double = 0.0
-    
+
+    // Dedicated Fillet/Chamfer tools (MAS-62). The active tool decides
+    // fillet vs chamfer; corners are stored parametrically so they stay
+    // editable and convertible.
+    var filletContinuity: String = "G1"      // "G1" (arc) | "G2" (biarc blend)
+    var filletToolRadius: Double = 3.0       // radius (fillet) / setback (chamfer)
+    var filletSelectedHandle: String? = nil  // the shape the corner tools act on
+    /// Undo-stack depth captured when a Fillet/Chamfer session began, so Enter can
+    /// confirm (keep) and Esc can cancel (revert the whole session).
+    private var cornerSessionUndoDepth: Int? = nil
+    /// The last corner the user toggled — the one the radius box / arrow edits.
+    /// Fillets are individual (MAS-91): there is no single radius for all corners.
+    var activeCornerIndex: Int? = nil
+    /// Sharp base polygon + per-corner fillet/chamfer specs, keyed by entity
+    /// handle. The visible curve is regenerated from this, so a fillet can be
+    /// re-edited, resized, or converted to a chamfer at any time.
+    var parametricShapes: [String: ParametricCornerShape] = [:]
+    /// Snap points for parametric shapes (two tangent ends + one center per
+    /// blend, plus sharp corners), returned by op_apply_corners.
+    var cornerSnapPoints: [String: [CornerSnapPoint]] = [:]
+    // The creation fillet handle shows only right after a rectangle is drawn,
+    // never again on mere re-selection (MAS-62).
+    var justCreatedRectangleHandle: String? = nil
+
+    // MARK: - Cross-feature links (MAS-55 mirror / MAS-76 imports / MAS-58 convert)
+
+    /// A live mirror relationship between two entity handles (MAS-55). Edits to
+    /// either side are reflected to the other across the stored axis until the
+    /// user breaks the link.
+    struct MirrorLink: Equatable {
+        var partner: String
+        var axisStart: CGPoint
+        var axisEnd: CGPoint
+        var mirror: Bool
+    }
+    var mirrorLinks: [String: MirrorLink] = [:]
+    func mirrorLink(for handle: String) -> MirrorLink? { mirrorLinks[handle] }
+
+    // Move tool state (MAS-80). Create-copy resets to off each activation.
+    var moveCreateCopy: Bool = false
+    var moveScaleFactor: Double = 1.0
+    var moveScaleFromCenter: Bool = true   // false = scale from bbox corner "dot"
+    var moveP2PActive: Bool = false        // point-to-point picking armed
+    var moveP2PFrom: CGPoint? = nil        // first picked point
+
+    /// Bounding box (model coords) of the current selection, or nil if empty.
+    var selectionBBox: CGRect? {
+        var minX = Double.greatestFiniteMagnitude, minY = Double.greatestFiniteMagnitude
+        var maxX = -Double.greatestFiniteMagnitude, maxY = -Double.greatestFiniteMagnitude
+        var found = false
+        for e in entities where selectedHandles.contains(e.handle) {
+            let pts: [[Double]]
+            switch e.type.uppercased() {
+            case "LINE": pts = [e.start, e.end].compactMap { $0 }
+            case "CIRCLE", "ARC":
+                if let c = e.center, c.count >= 2, let r = e.radius {
+                    pts = [[c[0]-r, c[1]-r], [c[0]+r, c[1]+r]]
+                } else { pts = [] }
+            case "LWPOLYLINE", "POLYLINE": pts = e.vertices ?? []
+            case "TEXT": pts = [e.start].compactMap { $0 }
+            default: pts = [e.center, e.start].compactMap { $0 }
+            }
+            for p in pts where p.count >= 2 {
+                found = true
+                minX = min(minX, p[0]); minY = min(minY, p[1])
+                maxX = max(maxX, p[0]); maxY = max(maxY, p[1])
+            }
+        }
+        guard found, minX <= maxX else { return nil }
+        return CGRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+    }
+
+    /// Scales the selection by `factor` about its center (or bbox corner), with
+    /// optional create-copy (MAS-80).
+    func scaleSelected(factor: Double) {
+        guard let url = currentFilePath, !selectedHandles.isEmpty, factor > 0,
+              let bbox = selectionBBox else { return }
+        let pivot: CGPoint = moveScaleFromCenter
+            ? CGPoint(x: bbox.midX, y: bbox.midY)
+            : CGPoint(x: bbox.minX, y: bbox.minY)
+        let handles = Array(selectedHandles)
+        let copy = moveCreateCopy
+        saveToHistory()
+        isProcessing = true
+        let activeDxfURL = sessionTempDirectory.appendingPathComponent("active.dxf")
+        Task {
+            do {
+                var workingHandles = handles
+                var inputPath = url.path
+                if copy {
+                    let dup = try await PythonBridge.shared.run(
+                        module: "dxf_ops", op: "duplicate_entities",
+                        args: ["input": inputPath, "output": activeDxfURL.path,
+                               "handles": handles, "dx": 0.0, "dy": 0.0])
+                    if let nh = (dup["data"] as? [String: Any])?["new_handles"] as? [String], !nh.isEmpty {
+                        workingHandles = nh
+                    }
+                    inputPath = activeDxfURL.path
+                }
+                let res = try await PythonBridge.shared.run(
+                    module: "dxf_ops", op: "scale_entities",
+                    args: ["input": inputPath, "output": activeDxfURL.path,
+                           "handles": workingHandles, "factor": factor,
+                           "cx": Double(pivot.x), "cy": Double(pivot.y)])
+                await MainActor.run {
+                    if let status = res["status"] as? String, status != "ok" {
+                        self.errorMessage = (res["message"] as? String) ?? "Scale failed."
+                        self.isProcessing = false
+                        return
+                    }
+                    self.currentFilePath = activeDxfURL
+                    self.reloadDXF()
+                    self.selectedHandles = Set(workingHandles)
+                    self.logEntries.append(LogEntry(action: "Scale", details: String(format: "Scaled selection ×%.3f", factor)))
+                }
+            } catch {
+                await MainActor.run {
+                    self.errorMessage = error.localizedDescription
+                    self.isProcessing = false
+                }
+            }
+        }
+    }
+
+    /// Point-to-point move (MAS-80): translate the selection by (to − from),
+    /// duplicating first when create-copy is on.
+    func moveSelection(by dx: CGFloat, dy: CGFloat, copy: Bool) {
+        guard let url = currentFilePath, !selectedHandles.isEmpty else { return }
+        if !copy {
+            translateSelected(dx: dx, dy: dy)
+            return
+        }
+        let handles = Array(selectedHandles)
+        saveToHistory()
+        isProcessing = true
+        let activeDxfURL = sessionTempDirectory.appendingPathComponent("active.dxf")
+        Task {
+            do {
+                let res = try await PythonBridge.shared.run(
+                    module: "dxf_ops", op: "duplicate_entities",
+                    args: ["input": url.path, "output": activeDxfURL.path,
+                           "handles": handles, "dx": Double(dx), "dy": Double(dy)])
+                await MainActor.run {
+                    if let status = res["status"] as? String, status != "ok" {
+                        self.errorMessage = (res["message"] as? String) ?? "Move-copy failed."
+                        self.isProcessing = false
+                        return
+                    }
+                    let nh = (res["data"] as? [String: Any])?["new_handles"] as? [String] ?? []
+                    self.currentFilePath = activeDxfURL
+                    self.reloadDXF()
+                    if !nh.isEmpty { self.selectedHandles = Set(nh) }
+                }
+            } catch {
+                await MainActor.run { self.errorMessage = error.localizedDescription; self.isProcessing = false }
+            }
+        }
+    }
+
+    /// Records a point-to-point click; on the second point performs the move.
+    func moveP2PClick(_ pt: CGPoint) {
+        if let from = moveP2PFrom {
+            moveSelection(by: pt.x - from.x, dy: pt.y - from.y, copy: moveCreateCopy)
+            moveP2PFrom = nil
+            moveP2PActive = false
+        } else {
+            moveP2PFrom = pt
+        }
+    }
+
+    // Mirror tool interaction state (MAS-55).
+    var mirrorFlip: Bool = true          // mirror (flip) the copy, vs. plain copy
+    var mirrorKeepLink: Bool = true      // keep a live two-way link after mirroring
+    var mirrorSelection: Set<String> = [] // entities chosen to mirror
+    var mirrorAxisStart: CGPoint? = nil   // first click of the mirror axis
+    var mirrorAxisEnd: CGPoint? = nil     // second click (live until confirm)
+
+    /// One-line guidance for the current mirror-tool stage, shown in options.
+    var mirrorStageHint: String {
+        if selectedHandles.isEmpty { return "Select shapes to mirror, then click two points for the axis." }
+        if mirrorAxisStart == nil { return "Click to place the first axis point." }
+        if mirrorAxisEnd == nil { return "Click to place the second axis point." }
+        return "Adjust options, then Confirm Mirror."
+    }
+
+    func resetMirrorTool() {
+        mirrorSelection.removeAll()
+        mirrorAxisStart = nil
+        mirrorAxisEnd = nil
+    }
+
+    /// Records a mirror-axis click (canvas), filling start then end (MAS-55).
+    func mirrorAxisClick(_ pt: CGPoint) {
+        if mirrorAxisStart == nil { mirrorAxisStart = pt }
+        else if mirrorAxisEnd == nil { mirrorAxisEnd = pt }
+        else { mirrorAxisStart = pt; mirrorAxisEnd = nil }
+    }
+
+    /// Creates the mirrored copy of the selection across the chosen axis as real
+    /// geometry on the same layer, optionally keeping a live link (MAS-55).
+    func confirmMirror() {
+        guard let url = currentFilePath,
+              !selectedHandles.isEmpty,
+              let a = mirrorAxisStart, let b = mirrorAxisEnd else { return }
+        let handlesSnapshot = Array(selectedHandles)
+        let layer = entities.first { selectedHandles.contains($0.handle) }?.layer ?? "0"
+        let flip = mirrorFlip
+        let keepLink = mirrorKeepLink
+        saveToHistory()
+        isProcessing = true
+        Task {
+            do {
+                let activeDxfURL = sessionTempDirectory.appendingPathComponent("active.dxf")
+                let res = try await PythonBridge.shared.run(
+                    module: "dxf_ops",
+                    op: "mirror_entities",
+                    args: [
+                        "input": url.path,
+                        "output": activeDxfURL.path,
+                        "handles": handlesSnapshot,
+                        "axis_start": [Double(a.x), Double(a.y)],
+                        "axis_end": [Double(b.x), Double(b.y)],
+                        "layer": layer,
+                        "flip": flip
+                    ]
+                )
+                await MainActor.run {
+                    if let status = res["status"] as? String, status != "ok" {
+                        self.errorMessage = (res["message"] as? String) ?? "Mirror failed."
+                        self.isProcessing = false
+                        return
+                    }
+                    let pairs = (res["data"] as? [String: Any])?["pairs"] as? [[String]] ?? []
+                    if keepLink {
+                        for pair in pairs where pair.count == 2 {
+                            let link = MirrorLink(partner: pair[1], axisStart: a, axisEnd: b, mirror: flip)
+                            self.mirrorLinks[pair[0]] = link
+                            self.mirrorLinks[pair[1]] = MirrorLink(partner: pair[0], axisStart: a, axisEnd: b, mirror: flip)
+                        }
+                    }
+                    self.currentFilePath = activeDxfURL
+                    self.reloadDXF()
+                    self.selectedHandles = Set(pairs.compactMap { $0.count == 2 ? $0[1] : nil })
+                    self.resetMirrorTool()
+                    self.logEntries.append(LogEntry(action: "Mirror", details: "Mirrored \(handlesSnapshot.count) entit\(handlesSnapshot.count == 1 ? "y" : "ies")"))
+                }
+            } catch {
+                await MainActor.run {
+                    self.errorMessage = error.localizedDescription
+                    self.isProcessing = false
+                }
+            }
+        }
+    }
+
+    /// Removes the mirror relationship for every selected handle and its partner
+    /// (right-click → Break Mirror Link, MAS-55). The geometry stays; only the
+    /// live link is severed.
+    func breakMirrorLinkForSelection() {
+        var toRemove = Set<String>()
+        for h in selectedHandles {
+            if let link = mirrorLinks[h] {
+                toRemove.insert(h)
+                toRemove.insert(link.partner)
+            }
+        }
+        guard !toRemove.isEmpty else { return }
+        for h in toRemove { mirrorLinks.removeValue(forKey: h) }
+        logEntries.append(LogEntry(action: "Break Mirror Link", details: "Unlinked \(toRemove.count) entit\(toRemove.count == 1 ? "y" : "ies")"))
+    }
+
+    /// An imported file "fork": the on-disk origin plus the handles it produced.
+    /// Imports are copied into the project and never auto-update from disk; the
+    /// user reloads explicitly (MAS-76).
+    struct ImportSource: Equatable {
+        var url: URL
+        var handles: [String]
+    }
+    var importSources: [String: ImportSource] = [:]   // groupId -> source
+
+    func importGroupId(for handle: String) -> String? {
+        importSources.first { $0.value.handles.contains(handle) }?.key
+    }
+    func importedSource(for handle: String) -> ImportSource? {
+        importGroupId(for: handle).flatMap { importSources[$0] }
+    }
+
+    /// True when the selection contains at least one straight-segment entity that
+    /// the Convert Lines tool can restyle (MAS-58).
+    var selectionHasConvertibleLines: Bool {
+        entities.contains {
+            selectedHandles.contains($0.handle) &&
+            ["LINE", "LWPOLYLINE", "POLYLINE"].contains($0.type.uppercased())
+        }
+    }
+
+    // MARK: - Convert Lines (MAS-58)
+
+    /// The seven supported line styles, in menu order.
+    static let convertLineStyles: [String] = ["dashed", "dotted", "zigzag", "wave", "striped", "square", "triangle"]
+
+    /// Currently selected style in the Convert Lines tool.
+    var convertLineStyle: String = "dashed"
+
+    /// Per-style parameters (mm / degrees). Edited in the tool options and the
+    /// selection panel; defaults chosen to look good out of the box.
+    var convertLineSettings: [String: [String: Double]] = [
+        "dashed":   ["dash_length": 4.0, "gap": 3.0],
+        "dotted":   ["spacing": 3.0, "dot_radius": 0.5],
+        "zigzag":   ["wavelength": 6.0, "amplitude": 2.0],
+        "wave":     ["wavelength": 6.0, "amplitude": 2.0, "samples_per_wave": 12.0],
+        "striped":  ["dash_length": 3.0, "gap": 3.0, "tilt": 45.0],
+        "square":   ["spacing": 4.0, "size": 1.5],
+        "triangle": ["spacing": 5.0, "size": 2.0],
+    ]
+
+    /// Ordered parameter keys per style, for building the settings UI.
+    static let convertLineParamKeys: [String: [String]] = [
+        "dashed":   ["dash_length", "gap"],
+        "dotted":   ["spacing", "dot_radius"],
+        "zigzag":   ["wavelength", "amplitude"],
+        "wave":     ["wavelength", "amplitude", "samples_per_wave"],
+        "striped":  ["dash_length", "gap", "tilt"],
+        "square":   ["spacing", "size"],
+        "triangle": ["spacing", "size"],
+    ]
+
+    /// A converted-line group: the original segments plus the live style/settings,
+    /// so it can be re-styled in place from the selection panel (MAS-58).
+    struct ConvertedLineGroup: Equatable {
+        var segments: [[[Double]]]
+        var style: String
+        var settings: [String: Double]
+        var layer: String
+        var handles: [String]
+    }
+    var convertedLineGroups: [String: ConvertedLineGroup] = [:]
+
+    func convertedGroupId(for handle: String) -> String? {
+        convertedLineGroups.first { $0.value.handles.contains(handle) }?.key
+    }
+    /// The group selected for editing, if exactly one converted group is selected.
+    var selectedConvertedGroupId: String? {
+        let gids = Set(selectedHandles.compactMap { convertedGroupId(for: $0) })
+        return gids.count == 1 ? gids.first : nil
+    }
+
+    /// Straight-segment polylines for an entity (model coords), or nil if it has
+    /// no usable straight geometry.
+    private func segmentsForEntity(_ e: DXFEntity) -> [[[Double]]]? {
+        switch e.type.uppercased() {
+        case "LINE":
+            if let s = e.start, let en = e.end, s.count >= 2, en.count >= 2 {
+                return [[[s[0], s[1]], [en[0], en[1]]]]
+            }
+        case "LWPOLYLINE", "POLYLINE":
+            if let v = e.vertices, v.count >= 2 {
+                var pts = v.map { [$0[0], $0[1]] }
+                if (e.closed ?? false), let first = pts.first { pts.append(first) }
+                return [pts]
+            }
+        default:
+            break
+        }
+        return nil
+    }
+
+    /// Converts the selected straight lines to `style` using the current settings.
+    func quickConvertSelectedLines(to style: String) {
+        convertLineStyle = style
+        convertSelectedLines(style: style, settings: convertLineSettings[style] ?? [:])
+    }
+
+    /// Replaces the selected straight lines with real styled geometry, tracking a
+    /// re-editable group (MAS-58).
+    func convertSelectedLines(style: String, settings: [String: Double]) {
+        guard let url = currentFilePath else { return }
+        let targets = entities.filter { selectedHandles.contains($0.handle) }
+        var segments: [[[Double]]] = []
+        var deleteHandles: [String] = []
+        var layer = "0"
+        for e in targets {
+            if let segs = segmentsForEntity(e) {
+                segments.append(contentsOf: segs)
+                deleteHandles.append(e.handle)
+                layer = e.layer
+            }
+        }
+        guard !segments.isEmpty else { return }
+        saveToHistory()
+        isProcessing = true
+        let groupId = UUID().uuidString
+        Task {
+            do {
+                let activeDxfURL = sessionTempDirectory.appendingPathComponent("active.dxf")
+                let res = try await PythonBridge.shared.run(
+                    module: "dxf_ops",
+                    op: "convert_lines",
+                    args: [
+                        "input": url.path,
+                        "output": activeDxfURL.path,
+                        "delete_handles": deleteHandles,
+                        "segments": segments,
+                        "style": style,
+                        "settings": settings,
+                        "layer": layer
+                    ]
+                )
+                await MainActor.run {
+                    if let status = res["status"] as? String, status != "ok" {
+                        self.errorMessage = (res["message"] as? String) ?? "Convert failed."
+                        self.isProcessing = false
+                        return
+                    }
+                    let newHandles = (res["data"] as? [String: Any])?["new_handles"] as? [String] ?? []
+                    self.convertedLineGroups[groupId] = ConvertedLineGroup(
+                        segments: segments, style: style, settings: settings, layer: layer, handles: newHandles)
+                    self.currentFilePath = activeDxfURL
+                    self.reloadDXF()
+                    self.selectedHandles = Set(newHandles)
+                    self.logEntries.append(LogEntry(action: "Convert Lines", details: "Converted to \(style)"))
+                }
+            } catch {
+                await MainActor.run {
+                    self.errorMessage = error.localizedDescription
+                    self.isProcessing = false
+                }
+            }
+        }
+    }
+
+    /// Re-styles an existing converted group from its stored original segments.
+    func reconvertGroup(_ groupId: String, style: String? = nil, settings: [String: Double]? = nil) {
+        guard let url = currentFilePath, var group = convertedLineGroups[groupId] else { return }
+        if let style = style { group.style = style }
+        if let settings = settings { group.settings = settings }
+        saveToHistory()
+        isProcessing = true
+        let snapshot = group
+        Task {
+            do {
+                let activeDxfURL = sessionTempDirectory.appendingPathComponent("active.dxf")
+                let res = try await PythonBridge.shared.run(
+                    module: "dxf_ops",
+                    op: "convert_lines",
+                    args: [
+                        "input": url.path,
+                        "output": activeDxfURL.path,
+                        "delete_handles": snapshot.handles,
+                        "segments": snapshot.segments,
+                        "style": snapshot.style,
+                        "settings": snapshot.settings,
+                        "layer": snapshot.layer
+                    ]
+                )
+                await MainActor.run {
+                    if let status = res["status"] as? String, status != "ok" {
+                        self.errorMessage = (res["message"] as? String) ?? "Convert failed."
+                        self.isProcessing = false
+                        return
+                    }
+                    let newHandles = (res["data"] as? [String: Any])?["new_handles"] as? [String] ?? []
+                    var updated = snapshot
+                    updated.handles = newHandles
+                    self.convertedLineGroups[groupId] = updated
+                    self.currentFilePath = activeDxfURL
+                    self.reloadDXF()
+                    self.selectedHandles = Set(newHandles)
+                }
+            } catch {
+                await MainActor.run {
+                    self.errorMessage = error.localizedDescription
+                    self.isProcessing = false
+                }
+            }
+        }
+    }
+
     // Measure Tool State
     var activeMeasureStart: CGPoint? // in model coordinates
     var measurements: [MeasurementLine] = []
@@ -414,6 +1105,135 @@ class AppState {
     var selectedFaces3D: Set<SelectedFace> = []
     var bodies3D: [Body3D] = []
     
+    // Plane Projection State Machine
+    var isPlaneSelectionActive: Bool = false
+    var planeSelectionModeType: String = "origin" // "origin" or "face"
+    var selectedProjectionPlane: String? = nil // "XY", "XZ", "YZ", or "face"
+    var selectedProjectionFaceIndex: Int? = nil
+    var selectedProjectionBodyIndex: Int? = nil
+    var planeOffset: Double = 0.0
+    var selectedProjectionFaceNormal: [Double]? = nil
+    var selectedProjectionFaceOrigin: [Double]? = nil
+    var triggerCameraAnimationToken: Int = 0
+    /// Bumped by the 3D "Home" button to recenter/frame the camera optimally.
+    var triggerHomeFrameToken: Int = 0
+
+    /// Frames the 3D model optimally (Home button in 3D mode).
+    func frameHome3D() {
+        triggerHomeFrameToken += 1
+    }
+
+    func startPlaneSelection() {
+        if selectedFaces3D.count == 1 {
+            let face = selectedFaces3D.first!
+            isPlaneSelectionActive = true
+            planeSelectionModeType = "face"
+            selectedProjectionPlane = "face"
+            selectedProjectionFaceIndex = face.faceIndex
+            selectedProjectionBodyIndex = face.bodyIndex
+            planeOffset = 0.0
+            
+            selectedHandles.removeAll()
+            selectedMeasurement = nil
+        } else {
+            selectedFaces3D.removeAll()
+            selectedHandles.removeAll()
+            selectedMeasurement = nil
+            
+            isPlaneSelectionActive = true
+            planeSelectionModeType = "origin"
+            selectedProjectionPlane = nil
+            selectedProjectionFaceIndex = nil
+            selectedProjectionBodyIndex = nil
+            planeOffset = 0.0
+            selectedProjectionFaceNormal = nil
+            selectedProjectionFaceOrigin = nil
+        }
+    }
+    
+    func cancelPlaneSelection() {
+        isPlaneSelectionActive = false
+        selectedProjectionPlane = nil
+        selectedProjectionFaceIndex = nil
+        selectedProjectionBodyIndex = nil
+        planeOffset = 0.0
+        selectedProjectionFaceNormal = nil
+        selectedProjectionFaceOrigin = nil
+    }
+    
+    func confirmPlaneProjection() {
+        triggerCameraAnimationToken += 1
+    }
+    
+    func executeProjection() {
+        saveToHistory()
+        guard let stepUrl = currentStepFilePath else { return }
+        isProcessing = true
+        
+        let planeType = selectedProjectionPlane ?? "XY"
+        let offsetVal = planeOffset
+        let faceIdx = selectedProjectionFaceIndex
+        let faceBodyIdx = selectedProjectionBodyIndex ?? 0
+        
+        // Get visible body indices
+        let visibleIndices = bodies3D.filter { $0.visible }.map { $0.body_index }
+        
+        Task {
+            do {
+                let tempDir = sessionTempDirectory
+                try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+                let uuidStr = UUID().uuidString
+                let outputDxf = tempDir.appendingPathComponent("projected_\(uuidStr).dxf")
+                
+                var args: [String: Any] = [
+                    "input": stepUrl.path,
+                    "output": outputDxf.path,
+                    "plane_type": planeType,
+                    "offset": offsetVal,
+                    "visible_bodies": visibleIndices
+                ]
+                if planeType == "face", let faceIdx = faceIdx {
+                    args["face_index"] = faceIdx
+                    args["face_body_index"] = faceBodyIdx
+                }
+                if let existing = currentFilePath {
+                    args["existing_dxf"] = existing.path
+                }
+                
+                _ = try await PythonBridge.shared.run(
+                    module: "step_ops",
+                    op: "project_edges",
+                    args: args
+                )
+                
+                await MainActor.run {
+                    self.currentFilePath = outputDxf
+                    self.activeMode = .twoD
+                    self.selectedHandles.removeAll()
+                    self.selectedFaces3D.removeAll()
+                    
+                    // Reset selection plane state
+                    self.isPlaneSelectionActive = false
+                    self.selectedProjectionPlane = nil
+                    self.selectedProjectionFaceIndex = nil
+                    self.selectedProjectionBodyIndex = nil
+                    self.planeOffset = 0.0
+                    self.selectedProjectionFaceNormal = nil
+                    self.selectedProjectionFaceOrigin = nil
+
+                    // Optimal framing on a 3D→2D projection (MAS-67).
+                    self.reloadDXF(fitToContentAfter: true)
+                    self.hasUnsavedChanges = true   // 3D edits dirty the doc (MAS-75)
+                }
+            } catch {
+                await MainActor.run {
+                    self.errorMessage = error.localizedDescription
+                    self.isProcessing = false
+                }
+            }
+        }
+    }
+    
     // Status/Progress
     var isProcessing: Bool = false
     var progress: Double = 0.0
@@ -425,14 +1245,24 @@ class AppState {
     var selectedMeasurement: MeasurementLine? = nil
     
     func saveToHistory() {
-        var dxfData: Data? = nil
-        if let url = currentFilePath {
-            dxfData = try? Data(contentsOf: url)
+        // Every undoable mutation funnels through here, so this is the single
+        // reliable place to mark the document dirty — it guarantees the
+        // "save changes?" prompt fires for any 2D/3D edit (MAS-21). Loads and
+        // blank-document setup clear the flag again on completion.
+        hasUnsavedChanges = true
+        let url = currentFilePath
+        let dxfDataTask = Task.detached(priority: .userInitiated) { () -> Data? in
+            if let url = url {
+                return try? Data(contentsOf: url)
+            }
+            return nil
         }
         let state = HistoryState(
-            dxfData: dxfData,
+            dxfDataTask: dxfDataTask,
             measurements: measurements,
-            selectedHandles: selectedHandles
+            selectedHandles: selectedHandles,
+            parametricShapes: parametricShapes,
+            cornerSnapPoints: cornerSnapPoints
         )
         undoStack.append(state)
         redoStack.removeAll()
@@ -447,37 +1277,47 @@ class AppState {
         pendingDeletedHandles.removeAll()
         reconcileTask?.cancel()
 
-        var currentDxfData: Data? = nil
-        if let url = currentFilePath {
-            currentDxfData = try? Data(contentsOf: url)
+        let url = currentFilePath
+        let currentDxfDataTask = Task.detached(priority: .userInitiated) { () -> Data? in
+            if let url = url {
+                return try? Data(contentsOf: url)
+            }
+            return nil
         }
         let currentState = HistoryState(
-            dxfData: currentDxfData,
+            dxfDataTask: currentDxfDataTask,
             measurements: measurements,
-            selectedHandles: selectedHandles
+            selectedHandles: selectedHandles,
+            parametricShapes: parametricShapes,
+            cornerSnapPoints: cornerSnapPoints
         )
         redoStack.append(currentState)
-        
+
         let previousState = undoStack.removeLast()
-        
+
         self.measurements = previousState.measurements
         self.selectedHandles = previousState.selectedHandles
+        self.parametricShapes = previousState.parametricShapes
+        self.cornerSnapPoints = previousState.cornerSnapPoints
         self.selectedMeasurement = nil
+        self.hasUnsavedChanges = true
         
-        if let dxfData = previousState.dxfData {
-            let activeDxfURL = ensureActiveDXFFileExists()
-            do {
-                try dxfData.write(to: activeDxfURL)
-                reloadDXF()
-            } catch {
-                errorMessage = "Undo failed to restore DXF file: \(error.localizedDescription)"
+        Task {
+            if let dxfData = await previousState.dxfDataTask.value {
+                let activeDxfURL = ensureActiveDXFFileExists()
+                do {
+                    try dxfData.write(to: activeDxfURL)
+                    reloadDXF()
+                } catch {
+                    errorMessage = "Undo failed to restore DXF file: \(error.localizedDescription)"
+                }
+            } else {
+                currentFilePath = nil
+                svgContent = nil
+                entities = []
+                previewEntities = []
+                layers = []
             }
-        } else {
-            currentFilePath = nil
-            svgContent = nil
-            entities = []
-            previewEntities = []
-            layers = []
         }
     }
     
@@ -488,37 +1328,47 @@ class AppState {
         pendingDeletedHandles.removeAll()
         reconcileTask?.cancel()
 
-        var currentDxfData: Data? = nil
-        if let url = currentFilePath {
-            currentDxfData = try? Data(contentsOf: url)
+        let url = currentFilePath
+        let currentDxfDataTask = Task.detached(priority: .userInitiated) { () -> Data? in
+            if let url = url {
+                return try? Data(contentsOf: url)
+            }
+            return nil
         }
         let currentState = HistoryState(
-            dxfData: currentDxfData,
+            dxfDataTask: currentDxfDataTask,
             measurements: measurements,
-            selectedHandles: selectedHandles
+            selectedHandles: selectedHandles,
+            parametricShapes: parametricShapes,
+            cornerSnapPoints: cornerSnapPoints
         )
         undoStack.append(currentState)
-        
+
         let nextState = redoStack.removeLast()
-        
+
         self.measurements = nextState.measurements
         self.selectedHandles = nextState.selectedHandles
+        self.parametricShapes = nextState.parametricShapes
+        self.cornerSnapPoints = nextState.cornerSnapPoints
         self.selectedMeasurement = nil
+        self.hasUnsavedChanges = true
         
-        if let dxfData = nextState.dxfData {
-            let activeDxfURL = ensureActiveDXFFileExists()
-            do {
-                try dxfData.write(to: activeDxfURL)
-                reloadDXF()
-            } catch {
-                errorMessage = "Redo failed to restore DXF file: \(error.localizedDescription)"
+        Task {
+            if let dxfData = await nextState.dxfDataTask.value {
+                let activeDxfURL = ensureActiveDXFFileExists()
+                do {
+                    try dxfData.write(to: activeDxfURL)
+                    reloadDXF()
+                } catch {
+                    errorMessage = "Redo failed to restore DXF file: \(error.localizedDescription)"
+                }
+            } else {
+                currentFilePath = nil
+                svgContent = nil
+                entities = []
+                previewEntities = []
+                layers = []
             }
-        } else {
-            currentFilePath = nil
-            svgContent = nil
-            entities = []
-            previewEntities = []
-            layers = []
         }
     }
     
@@ -527,7 +1377,39 @@ class AppState {
               let handle = selected.entityHandle,
               let dimType = selected.dimensionType,
               let url = currentFilePath else { return }
-        
+
+        // Parametric rectangle resize → drive the model so geometry, snaps and the
+        // editable corners stay one source of truth (MAS-62).
+        if (dimType == "width" || dimType == "height"),
+           var model = parametricShapes[handle],
+           let p1 = selected.rectP1, let p2 = selected.rectP2 {
+            saveToHistory()
+            var newP2 = p2
+            if dimType == "width" {
+                newP2.x = p1.x + (p2.x >= p1.x ? 1 : -1) * CGFloat(newValue)
+            } else {
+                newP2.y = p1.y + (p2.y >= p1.y ? 1 : -1) * CGFloat(newValue)
+            }
+            let bl = p1, tr = newP2
+            model.base = [[Double(bl.x), Double(bl.y)], [Double(tr.x), Double(bl.y)],
+                          [Double(tr.x), Double(tr.y)], [Double(bl.x), Double(tr.y)]]
+            parametricShapes[handle] = model
+            for idx in measurements.indices where measurements[idx].entityHandle == handle {
+                measurements[idx].rectP2 = newP2
+                if measurements[idx].dimensionType == "width" {
+                    measurements[idx].start = bl; measurements[idx].end = CGPoint(x: tr.x, y: bl.y)
+                    measurements[idx].distanceMm = Double(abs(tr.x - bl.x))
+                } else if measurements[idx].dimensionType == "height" {
+                    measurements[idx].start = bl; measurements[idx].end = CGPoint(x: bl.x, y: tr.y)
+                    measurements[idx].distanceMm = Double(abs(tr.y - bl.y))
+                }
+            }
+            selectedMeasurement?.rectP2 = newP2
+            selectedMeasurement?.distanceMm = newValue
+            applyParametricShape(handle: handle)
+            return
+        }
+
         saveToHistory()
         isProcessing = true
         
@@ -964,14 +1846,16 @@ class AppState {
                 // Flush optimistic edits so we distribute onto current geometry.
                 await reconcileBufferIfNeeded()
 
-                var tempPaths: [String] = []
+                // Keep each source URL paired with its temp DXF so imports can be
+                // tracked and later reloaded from disk (MAS-76).
+                var pairs: [(url: URL, temp: String)] = []
                 for url in urls {
                     if let temp = try await convertToTempDXF(url) {
-                        tempPaths.append(temp.path)
+                        pairs.append((url, temp.path))
                     }
                 }
 
-                guard !tempPaths.isEmpty else {
+                guard !pairs.isEmpty else {
                     await MainActor.run {
                         self.isProcessing = false
                         self.errorMessage = "No importable geometry found in the dropped file(s)."
@@ -979,27 +1863,35 @@ class AppState {
                     return
                 }
 
-                _ = try await PythonBridge.shared.run(
+                let layerNames = pairs.map { self.sanitizeLayerName($0.url.deletingPathExtension().lastPathComponent) }
+                let result = try await PythonBridge.shared.run(
                     module: "dxf_ops",
                     op: "import_distribute",
                     args: [
                         "primary": activeURL.path,
-                        "secondaries": tempPaths,
+                        "secondaries": pairs.map { $0.temp },
+                        "layer_names": layerNames,
                         "output": activeURL.path
-                        // No explicit "gap" → Python sizes it to the content.
                     ]
                 )
+                let handlesPerFile = (result["data"] as? [String: Any])?["handles_per_file"] as? [[String]] ?? []
 
-                for p in tempPaths { try? FileManager.default.removeItem(at: URL(fileURLWithPath: p)) }
+                for p in pairs { try? FileManager.default.removeItem(at: URL(fileURLWithPath: p.temp)) }
 
                 await MainActor.run {
                     self.currentFilePath = activeURL
                     self.activeMode = .twoD
                     self.selectedHandles.removeAll()
+                    // Register one import "fork" per file (MAS-76): the on-disk
+                    // origin + the handles it produced, for later reload from disk.
+                    for (i, pair) in pairs.enumerated() where i < handlesPerFile.count {
+                        let gid = UUID().uuidString
+                        self.importSources[gid] = ImportSource(url: pair.url, handles: handlesPerFile[i])
+                    }
                     // Fit the view so every imported file is visible at once.
                     self.reloadDXF(fitToContentAfter: true)
                     self.hasUnsavedChanges = true
-                    self.logAction("Import & Distribute", details: "Imported and distributed \(tempPaths.count) file(s) side by side.")
+                    self.logAction("Import & Distribute", details: "Imported and distributed \(pairs.count) file(s) side by side.")
                 }
             } catch {
                 await MainActor.run {
@@ -1161,6 +2053,8 @@ class AppState {
                             "offset_distance": holeOffsetDistance,
                             "hole_diameter": holeDiameter,
                             "hole_spacing": holeSpacing,
+                            "distribution": holeDistribution,
+                            "hole_count": holeCount,
                             "pattern": holePattern,
                             "corner_behavior": holeCornerBehavior,
                             "side": holeSide,
@@ -1414,6 +2308,7 @@ class AppState {
                     self.stepJsonContent = modelJsonStr
                     self.bodies3D = decodedBodies
                     self.isProcessing = false
+                    self.hasUnsavedChanges = true   // loading a 3D model dirties the doc (MAS-75)
                 }
             } catch {
                 await MainActor.run {
@@ -1456,7 +2351,8 @@ class AppState {
                     self.currentFilePath = outputDxf
                     self.activeMode = .twoD
                     self.selectedHandles.removeAll()
-                    self.reloadDXF()
+                    // Optimal framing on a 3D→2D unfold (MAS-67).
+                    self.reloadDXF(fitToContentAfter: true)
                 }
             } catch {
                 await MainActor.run {
@@ -1499,13 +2395,84 @@ class AppState {
                     op: "unfold_faces",
                     args: args
                 )
-                
+
                 await MainActor.run {
                     self.currentFilePath = outputDxf
                     self.activeMode = .twoD
                     self.selectedHandles.removeAll()
                     self.selectedFaces3D.removeAll()
-                    self.reloadDXF()
+                    // Optimal framing on a 3D→2D unfold (MAS-67).
+                    self.reloadDXF(fitToContentAfter: true)
+                }
+            } catch {
+                await MainActor.run {
+                    self.errorMessage = error.localizedDescription
+                    self.isProcessing = false
+                }
+            }
+        }
+    }
+
+    /// Unfolds the selection (or every face of every body) as connected nets:
+    /// faces stay joined at shared straight edges (dashed CREASE lines), cuts
+    /// land on SEAM_CUT, and seam pairs optionally get glue tabs or sew holes.
+    func unfoldConnected(wholeBody: Bool, mode: String, decoration: String) {
+        saveToHistory()
+        guard let stepUrl = currentStepFilePath else { return }
+        if !wholeBody && selectedFaces3D.isEmpty { return }
+        isProcessing = true
+
+        Task {
+            do {
+                let tempDir = sessionTempDirectory
+                try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+                let outputDxf = tempDir.appendingPathComponent("unfolded_net_\(UUID().uuidString).dxf")
+
+                var args: [String: Any] = [
+                    "input": stepUrl.path,
+                    "output": outputDxf.path,
+                    "mode": mode,
+                    "decoration": decoration,
+                    "tab_height": glueTabHeight,
+                    "hole_diameter": holeDiameter,
+                    "hole_spacing": holeSpacing,
+                    "hole_margin": holeOffsetDistance
+                ]
+                if wholeBody {
+                    args["whole_body"] = true
+                } else {
+                    args["faces"] = Array(selectedFaces3D).map { [
+                        "body_index": $0.bodyIndex,
+                        "face_index": $0.faceIndex
+                    ] }
+                }
+                if let existing = currentFilePath {
+                    args["existing_dxf"] = existing.path
+                }
+
+                let result = try await PythonBridge.shared.run(
+                    module: "step_ops",
+                    op: "unfold_connected",
+                    args: args
+                )
+
+                await MainActor.run {
+                    self.currentFilePath = outputDxf
+                    self.activeMode = .twoD
+                    self.selectedHandles.removeAll()
+                    self.selectedFaces3D.removeAll()
+                    if let data = result["data"] as? [String: Any] {
+                        let patches = data["patches"] as? Int ?? 0
+                        let faces = data["faces_unfolded"] as? Int ?? 0
+                        let folds = data["fold_edges"] as? Int ?? 0
+                        var details = "\(faces) face(s) → \(patches) piece(s), \(folds) fold(s)"
+                        if let skipped = data["skipped_faces"] as? [[String: Any]], !skipped.isEmpty {
+                            details += " — skipped \(skipped.count) non-developable face(s)"
+                        }
+                        self.logAction("Connected Unfold", details: details)
+                    }
+                    // Optimal framing on a 3D→2D unfold (MAS-67).
+                    self.reloadDXF(fitToContentAfter: true)
                 }
             } catch {
                 await MainActor.run {
@@ -1568,14 +2535,31 @@ class AppState {
                 await MainActor.run {
                     self.svgContent = svgStr
                     self.entities = decodedEntities
-                    self.layers = uniqueLayers.map { layerName in
-                        // Basic default coloring or preserve visibility
-                        let existing = self.layers.first(where: { $0.name == layerName })
-                        return DXFLayer(
-                            name: layerName,
-                            color: existing?.color ?? self.colorForLayerName(layerName),
-                            visible: existing?.visible ?? true
-                        )
+                    // Append new layers found in DXF if they do not exist, preserving user modifications & ordering
+                    for layerName in uniqueLayers {
+                        if !self.layers.contains(where: { $0.name == layerName }) {
+                            let newLayer = DXFLayer(
+                                id: UUID().uuidString,
+                                name: layerName,
+                                color: self.colorForLayerName(layerName),
+                                visible: true,
+                                parentFolderId: nil
+                            )
+                            self.layers.append(newLayer)
+                        }
+                    }
+                    
+                    // Back-populate layerId on entities
+                    for i in 0..<self.entities.count {
+                        if self.entities[i].layerId == nil {
+                            if let matched = self.layers.first(where: { $0.name == self.entities[i].layer }) {
+                                self.entities[i].layerId = matched.id
+                            }
+                        }
+                    }
+                    
+                    if self.activeLayerId == nil || !self.layers.contains(where: { $0.id == self.activeLayerId }) {
+                        self.activeLayerId = self.layers.first?.id
                     }
                     if fitToContentAfter { self.fitRequestToken += 1 }
                     self.isProcessing = false
@@ -1590,19 +2574,27 @@ class AppState {
     }
     
     func triggerChainSelect(seedHandle: String) {
-        guard let url = currentFilePath else { return }
         isProcessing = true
         
         Task {
             do {
+                // Ensure any pending deletions or optimistic edits are flushed to disk first
+                await reconcileBufferIfNeeded()
+                
+                guard let url = currentFilePath else {
+                    await MainActor.run { self.isProcessing = false }
+                    return
+                }
+                
                 let res = try await PythonBridge.shared.run(
                     module: "dxf_ops",
                     op: "chain_select",
-                    args: ["input": url.path, "seed_handle": seedHandle, "tolerance": 0.01]
+                    args: ["input": url.path, "seed_handle": seedHandle, "tolerance": 0.1]
                 )
                 
                 guard let data = res["data"] as? [String: Any],
                       let handlesList = data["handles"] as? [String] else {
+                    await MainActor.run { self.isProcessing = false }
                     return
                 }
                 
@@ -1626,24 +2618,404 @@ class AppState {
     func updateSelectedRectangleFillet(newFillet: Double) {
         guard let selected = selectedMeasurement,
               let handle = selected.entityHandle,
-              (selected.dimensionType == "width" || selected.dimensionType == "height"),
-              let url = currentFilePath else { return }
-        
-        saveToHistory()
+              (selected.dimensionType == "width" || selected.dimensionType == "height") else { return }
+
         sketchFilletRadius = max(0.0, newFillet)
-        
-        for idx in 0..<measurements.count {
-            if measurements[idx].entityHandle == handle {
-                measurements[idx].filletRadius = sketchFilletRadius
-            }
+        for idx in 0..<measurements.count where measurements[idx].entityHandle == handle {
+            measurements[idx].filletRadius = sketchFilletRadius
         }
         if selectedMeasurement?.entityHandle == handle {
             selectedMeasurement?.filletRadius = sketchFilletRadius
         }
-        
-        updateSelectedDimensionValue(newValue: selected.distanceMm)
+
+        // Drive the parametric model so the on-creation fillet is a true arc and
+        // remains editable/convertible by the corner tools (MAS-62).
+        guard ensureParametricModel(for: handle) != nil, var model = parametricShapes[handle] else { return }
+        let targets = filletableIndices(base: model.base, closed: model.closed)
+        model.corners = sketchFilletRadius > 1e-9
+            ? targets.map { CornerMod(index: $0, kind: "fillet", value: sketchFilletRadius, continuity: "G1") }
+            : []
+        parametricShapes[handle] = model
+        applyParametricShape(handle: handle)
     }
-    
+
+    // MARK: - Free vertex editing (MAS-62)
+
+    /// A handle is a "rectangle" while it still carries its parametric metadata
+    /// (rectP1/rectP2). Those vertices show but don't drag — until Expand drops
+    /// the constraint and turns it into a freely editable polyline.
+    func isRectangleHandle(_ handle: String) -> Bool {
+        measurements.contains { $0.entityHandle == handle && $0.rectP1 != nil && $0.rectP2 != nil }
+    }
+
+    /// Optimistic, in-memory move of one vertex (called continuously while
+    /// dragging). Persisted once on release via `commitEntityVertices`.
+    func setEntityVertexLocal(handle: String, index: Int, to point: CGPoint) {
+        guard let idx = entities.firstIndex(where: { $0.handle == handle }) else { return }
+        var verts = entities[idx].editableVertices
+        guard index >= 0 && index < verts.count else { return }
+        verts[index] = [Double(point.x), Double(point.y)]
+        entities[idx] = entities[idx].withVertices(verts)
+        hasUnsavedChanges = true
+    }
+
+    /// Writes the current in-memory vertices of `handle` back to the DXF buffer.
+    func commitEntityVertices(handle: String) {
+        guard let ent = entities.first(where: { $0.handle == handle }) else { return }
+        let verts = ent.editableVertices
+        guard verts.count >= 2 else { return }
+        saveToHistory()
+        let activeDxfURL = sessionTempDirectory.appendingPathComponent("active.dxf")
+        enqueueBufferWrite {
+            let inputPath = (await MainActor.run { self.currentFilePath?.path }) ?? activeDxfURL.path
+            do {
+                _ = try await PythonBridge.shared.run(
+                    module: "dxf_ops",
+                    op: "edit_vertices",
+                    args: [
+                        "input": inputPath,
+                        "output": activeDxfURL.path,
+                        "handle": handle,
+                        "vertices": verts
+                    ]
+                )
+                await MainActor.run { self.currentFilePath = activeDxfURL }
+            } catch {
+                print("Vertex edit persist failed: \(error)")
+            }
+        }
+    }
+
+    /// Right-click → Expand: drops the rectangle constraint (and its parametric
+    /// dimensions) on the selected rectangle(s), leaving a free polyline whose
+    /// vertices can be dragged.
+    func expandSelectedRectangle() {
+        let rectHandles = selectedHandles.filter { isRectangleHandle($0) }
+        guard !rectHandles.isEmpty else { return }
+        saveToHistory()
+        measurements.removeAll { m in
+            if let h = m.entityHandle { return rectHandles.contains(h) }
+            return false
+        }
+        if let sm = selectedMeasurement, let h = sm.entityHandle, rectHandles.contains(h) {
+            selectedMeasurement = nil
+        }
+        hasUnsavedChanges = true
+        logEntries.append(LogEntry(action: "Expand", details: "Converted rectangle to editable polyline"))
+    }
+
+    // MARK: - Parametric fillet / chamfer (MAS-62)
+
+    /// The kind ("fillet"/"chamfer") implied by the active tool.
+    var cornerToolKind: String { currentTool == .chamfer ? "chamfer" : "fillet" }
+
+    /// Indices of a base polygon's corners that can take a fillet/chamfer.
+    private func filletableIndices(base: [[Double]], closed: Bool) -> [Int] {
+        guard base.count >= 3 else { return [] }
+        return closed ? Array(0..<base.count) : Array(1..<(base.count - 1))
+    }
+
+    /// Ensures a parametric model exists for `handle`, seeding the sharp base
+    /// from the entity's current vertices. Returns the model (or nil if the
+    /// entity isn't a polyline with ≥3 corners).
+    @discardableResult
+    private func ensureParametricModel(for handle: String) -> ParametricCornerShape? {
+        if let existing = parametricShapes[handle] { return existing }
+        guard let ent = entities.first(where: { $0.handle == handle }) else { return nil }
+        let verts = ent.editableVertices
+        guard verts.count >= 3, ent.type.uppercased() == "LWPOLYLINE" || ent.type.uppercased() == "POLYLINE" else { return nil }
+        let model = ParametricCornerShape(base: verts, closed: ent.closed ?? false, corners: [])
+        parametricShapes[handle] = model
+        return model
+    }
+
+    /// Activating Fillet/Chamfer with geometry selected: apply (or convert) the
+    /// active kind to *every* corner of the selected polyline at the current
+    /// value, immediately and live-adjustable (MAS-62).
+    func activateCornerToolForSelection() {
+        let kind = cornerToolKind
+        guard let handle = selectedHandles.first(where: { ensureParametricModel(for: $0) != nil }),
+              var model = parametricShapes[handle] else {
+            filletSelectedHandle = selectedHandles.first
+            return
+        }
+        filletSelectedHandle = handle
+        let targets = filletableIndices(base: model.base, closed: model.closed)
+        var existing = Dictionary(uniqueKeysWithValues: model.corners.map { ($0.index, $0) })
+        for idx in targets {
+            // Each corner keeps its own value; new corners start at a fitting
+            // default (10 → 5 → 2 → 0), never one shared number (MAS-91).
+            let value = existing[idx]?.value ?? defaultFilletRadius(base: model.base, closed: model.closed, index: idx)
+            let cont = existing[idx]?.continuity ?? filletContinuity
+            existing[idx] = CornerMod(index: idx, kind: kind, value: value, continuity: cont)
+        }
+        model.corners = targets.compactMap { existing[$0] }
+        parametricShapes[handle] = model
+        activeCornerIndex = targets.last
+        applyParametricShape(handle: handle)
+    }
+
+    /// Toggle one corner's modifier (click on a corner with the tool active).
+    func toggleCorner(handle: String, index: Int) {
+        guard ensureParametricModel(for: handle) != nil, var model = parametricShapes[handle] else { return }
+        filletSelectedHandle = handle
+        if let i = model.corners.firstIndex(where: { $0.index == index }) {
+            model.corners.remove(at: i)
+            if activeCornerIndex == index { activeCornerIndex = model.corners.last?.index }
+        } else {
+            let value = defaultFilletRadius(base: model.base, closed: model.closed, index: index)
+            model.corners.append(CornerMod(index: index, kind: cornerToolKind, value: value, continuity: filletContinuity))
+            activeCornerIndex = index    // last selected — the radius box / arrow edits this one
+            filletToolRadius = value
+        }
+        parametricShapes[handle] = model
+        applyParametricShape(handle: handle)
+    }
+
+    /// Re-apply only continuity / kind to the active shape's modified corners,
+    /// preserving each corner's individual value (MAS-91 — no universal radius).
+    func refreshActiveCornerShape() {
+        guard let handle = filletSelectedHandle, var model = parametricShapes[handle], !model.corners.isEmpty else { return }
+        let kind = cornerToolKind
+        model.corners = model.corners.map {
+            CornerMod(index: $0.index, kind: kind, value: $0.value, continuity: filletContinuity)
+        }
+        parametricShapes[handle] = model
+        applyParametricShape(handle: handle)
+    }
+
+    /// Sets only the active corner's value (radius box / drag arrow), leaving all
+    /// other corners untouched (MAS-91).
+    func setActiveCornerValue(_ value: Double) {
+        guard let handle = filletSelectedHandle, var model = parametricShapes[handle],
+              let idx = activeCornerIndex,
+              let i = model.corners.firstIndex(where: { $0.index == idx }) else { return }
+        model.corners[i].value = max(0, value)
+        parametricShapes[handle] = model
+        applyParametricShape(handle: handle)
+    }
+
+    /// Live, in-memory update of the active corner's value while dragging the
+    /// radius arrow — no Python, no history, no reload. The canvas draws a local
+    /// blended preview; `commitActiveCornerValue()` persists once on release. This
+    /// is what makes the fillet drag fluid instead of one round-trip per frame.
+    func setActiveCornerValueLocal(_ value: Double) {
+        guard let handle = filletSelectedHandle, var model = parametricShapes[handle],
+              let idx = activeCornerIndex,
+              let i = model.corners.firstIndex(where: { $0.index == idx }) else { return }
+        model.corners[i].value = max(0, value)
+        parametricShapes[handle] = model
+    }
+
+    /// Persists the active parametric shape after a live arrow drag (one apply).
+    func commitActiveCornerValue() {
+        guard let handle = filletSelectedHandle else { return }
+        applyParametricShape(handle: handle)
+    }
+
+    // MARK: - Fillet/Chamfer confirm (Enter) / cancel (Esc) session
+
+    /// Records a revert point when a corner tool is entered, before any corner is
+    /// applied. Enter confirms (keep), Esc cancels (revert to here).
+    func beginCornerToolSession() {
+        cornerSessionUndoDepth = undoStack.count
+    }
+
+    /// Enter — confirm the in-progress fillet/chamfer: keep the changes.
+    func confirmCornerToolSession() {
+        cornerSessionUndoDepth = nil
+    }
+
+    /// Esc — cancel the in-progress fillet/chamfer: revert every change made since
+    /// the corner tool was entered (the live-applied blends), then end the session.
+    func cancelCornerToolSession() {
+        defer {
+            cornerSessionUndoDepth = nil
+            filletSelectedHandle = nil
+            activeCornerIndex = nil
+        }
+        guard let depth = cornerSessionUndoDepth, undoStack.count > depth else { return }
+        // The first session edit pushed the pre-fillet state at `depth`; restore it
+        // and drop the whole session's history.
+        let snapshot = undoStack[depth]
+        undoStack.removeSubrange(depth...)
+        restoreHistoryState(snapshot)
+    }
+
+    /// Restores a captured history snapshot in place (no redo push). Shared by the
+    /// corner-tool cancel.
+    private func restoreHistoryState(_ state: HistoryState) {
+        pendingDeletedHandles.removeAll()
+        reconcileTask?.cancel()
+        self.measurements = state.measurements
+        self.selectedHandles = state.selectedHandles
+        self.parametricShapes = state.parametricShapes
+        self.cornerSnapPoints = state.cornerSnapPoints
+        self.selectedMeasurement = nil
+        self.hasUnsavedChanges = true
+        Task {
+            if let dxfData = await state.dxfDataTask.value {
+                let activeDxfURL = ensureActiveDXFFileExists()
+                do {
+                    try dxfData.write(to: activeDxfURL)
+                    reloadDXF()
+                } catch {
+                    errorMessage = "Cancel failed to restore DXF file: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
+    /// Fillet/Chamfer on a corner built from two separate LINE entities (imported
+    /// geometry, two sketched lines). Joins the lines nearest `point` into one open
+    /// editable polyline, then blends its middle corner so it stays parametric and
+    /// further-editable — the same machinery used for polyline corners.
+    func joinLinesAndFillet(at point: CGPoint) {
+        guard let url = currentFilePath else { return }
+        let kind = cornerToolKind
+        saveToHistory()
+        isProcessing = true
+        Task {
+            do {
+                await reconcileBufferIfNeeded()
+                let activeDxfURL = sessionTempDirectory.appendingPathComponent("active.dxf")
+                let result = try await PythonBridge.shared.run(
+                    module: "dxf_ops",
+                    op: "join_lines",
+                    args: [
+                        "input": url.path,
+                        "output": activeDxfURL.path,
+                        "point": [Double(point.x), Double(point.y)],
+                        "tol": 12.0 / Double(canvasScale)
+                    ]
+                )
+                await MainActor.run {
+                    guard let data = result["data"] as? [String: Any],
+                          let handle = data["handle"] as? String,
+                          let base = data["base"] as? [[Double]] else {
+                        self.isProcessing = false
+                        return
+                    }
+                    self.currentFilePath = activeDxfURL
+                    // Seed the parametric model for the freshly-joined polyline and
+                    // blend its corner (index 1) at a fitting default radius.
+                    var model = ParametricCornerShape(base: base, closed: false, corners: [])
+                    let value = self.defaultFilletRadius(base: base, closed: false, index: 1)
+                    model.corners = [CornerMod(index: 1, kind: kind, value: value, continuity: self.filletContinuity)]
+                    self.parametricShapes[handle] = model
+                    self.filletSelectedHandle = handle
+                    self.activeCornerIndex = 1
+                    self.filletToolRadius = value
+                    self.selectedHandles = [handle]
+                    // Reload to pick up the joined polyline, then blend the corner.
+                    self.reloadDXF()
+                    self.applyParametricShape(handle: handle)
+                }
+            } catch {
+                await MainActor.run {
+                    self.errorMessage = error.localizedDescription
+                    self.isProcessing = false
+                }
+            }
+        }
+    }
+
+    /// Trim tool (MAS-98): cut the entity's clicked edge at its intersections with
+    /// other geometry and remove only the sub-segment under the cursor. `segIndex`
+    /// selects which edge of a polyline (0 for a line).
+    func trimSegment(handle: String, segIndex: Int = 0, at point: CGPoint) {
+        guard let url = currentFilePath else { return }
+        saveToHistory()
+        isProcessing = true
+        Task {
+            do {
+                await reconcileBufferIfNeeded()
+                let activeDxfURL = sessionTempDirectory.appendingPathComponent("active.dxf")
+                _ = try await PythonBridge.shared.run(
+                    module: "dxf_ops",
+                    op: "trim_segment",
+                    args: [
+                        "input": url.path,
+                        "output": activeDxfURL.path,
+                        "handle": handle,
+                        "seg_index": segIndex,
+                        "point": [Double(point.x), Double(point.y)]
+                    ]
+                )
+                await MainActor.run {
+                    self.currentFilePath = activeDxfURL
+                    self.selectedHandles.removeAll()
+                    self.reloadDXF()
+                }
+            } catch {
+                await MainActor.run {
+                    self.errorMessage = error.localizedDescription
+                    self.isProcessing = false
+                }
+            }
+        }
+    }
+
+    /// Largest radius that fits a corner, snapped to the first of 10 / 5 / 2 that
+    /// fits, else 0 (MAS-91 default-on-fillet behavior).
+    func defaultFilletRadius(base: [[Double]], closed: Bool, index: Int) -> Double {
+        guard base.count >= 3, index >= 0, index < base.count else { return 0 }
+        let n = base.count
+        let prev = base[(index - 1 + n) % n]
+        let cur = base[index]
+        let next = base[(index + 1) % n]
+        func len(_ a: [Double], _ b: [Double]) -> Double { hypot(a[0]-b[0], a[1]-b[1]) }
+        let maxFit = min(len(prev, cur), len(cur, next)) * 0.5
+        for preset in [10.0, 5.0, 2.0] where preset <= maxFit { return preset }
+        return 0
+    }
+
+    /// Regenerate the polyline geometry for one parametric shape and refresh its
+    /// snap points. Used on create / edit / convert / resize.
+    func applyParametricShape(handle: String, fitAfter: Bool = false) {
+        guard let model = parametricShapes[handle], let url = currentFilePath else { return }
+        saveToHistory()
+        isProcessing = true
+        let cornersArg: [[String: Any]] = model.corners.map {
+            ["index": $0.index, "kind": $0.kind, "value": $0.value, "continuity": $0.continuity]
+        }
+        Task {
+            do {
+                await reconcileBufferIfNeeded()
+                let activeDxfURL = sessionTempDirectory.appendingPathComponent("active.dxf")
+                let result = try await PythonBridge.shared.run(
+                    module: "dxf_ops",
+                    op: "apply_corners",
+                    args: [
+                        "input": url.path,
+                        "output": activeDxfURL.path,
+                        "handle": handle,
+                        "base": model.base,
+                        "closed": model.closed,
+                        "corners": cornersArg
+                    ]
+                )
+                await MainActor.run {
+                    if let data = result["data"] as? [String: Any],
+                       let snaps = data["snaps"] as? [[String: Any]] {
+                        self.cornerSnapPoints[handle] = snaps.compactMap { s in
+                            guard let x = s["x"] as? Double, let y = s["y"] as? Double,
+                                  let role = s["role"] as? String else { return nil }
+                            return CornerSnapPoint(x: x, y: y, role: role)
+                        }
+                    }
+                    self.currentFilePath = activeDxfURL
+                    self.reloadDXF(fitToContentAfter: fitAfter)
+                }
+            } catch {
+                await MainActor.run {
+                    self.errorMessage = error.localizedDescription
+                    self.isProcessing = false
+                }
+            }
+        }
+    }
+
     func applyOffset() {
         saveToHistory()
         guard let url = currentFilePath else { return }
@@ -1702,6 +3074,8 @@ class AppState {
                         "offset_distance": holeOffsetDistance,
                         "hole_diameter": holeDiameter,
                         "hole_spacing": holeSpacing,
+                        "distribution": holeDistribution,
+                        "hole_count": holeCount,
                         "pattern": holePattern,
                         "corner_behavior": holeCornerBehavior,
                         "side": holeSide,
@@ -1988,6 +3362,7 @@ class AppState {
     func addSketchedEntity(type: String, params: [String: Any]) async -> String? {
         saveToHistory()
         let activeDxfURL = ensureActiveDXFFileExists()
+        let activeLayerName = await MainActor.run { self.activeLayer?.name ?? "DRAWN_SHAPES" }
         await MainActor.run {
             self.isProcessing = true
         }
@@ -2004,7 +3379,7 @@ class AppState {
                     "output": activeDxfURL.path,
                     "type": type,
                     "params": params,
-                    "layer": "DRAWN_SHAPES"
+                    "layer": activeLayerName
                 ]
             )
             
@@ -2106,6 +3481,8 @@ class AppState {
                             "offset_distance": holeOffsetDistance,
                             "hole_diameter": holeDiameter,
                             "hole_spacing": holeSpacing,
+                            "distribution": holeDistribution,
+                            "hole_count": holeCount,
                             "pattern": holePattern,
                             "corner_behavior": holeCornerBehavior,
                             "side": holeSide,
@@ -2150,56 +3527,7 @@ class AppState {
         }
     }
     
-    func projectToSketch(planeType: String) {
-        saveToHistory()
-        guard let stepUrl = currentStepFilePath else { return }
-        isProcessing = true
-        
-        let singleFace = selectedFaces3D.first
-        let bodyIdx = singleFace?.bodyIndex ?? 0
-        let faceIdx = singleFace?.faceIndex
-        
-        Task {
-            do {
-                let tempDir = sessionTempDirectory
-                try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-                let uuidStr = UUID().uuidString
-                let outputDxf = tempDir.appendingPathComponent("projected_\(uuidStr).dxf")
-                
-                var args: [String: Any] = [
-                    "input": stepUrl.path,
-                    "output": outputDxf.path,
-                    "body_index": bodyIdx,
-                    "plane_type": planeType
-                ]
-                if planeType == "face", let faceIdx = faceIdx {
-                    args["face_index"] = faceIdx
-                }
-                if let existing = currentFilePath {
-                    args["existing_dxf"] = existing.path
-                }
-                
-                _ = try await PythonBridge.shared.run(
-                    module: "step_ops",
-                    op: "project_edges",
-                    args: args
-                )
-                
-                await MainActor.run {
-                    self.currentFilePath = outputDxf
-                    self.activeMode = .twoD
-                    self.selectedHandles.removeAll()
-                    self.selectedFaces3D.removeAll()
-                    self.reloadDXF()
-                }
-            } catch {
-                await MainActor.run {
-                    self.errorMessage = error.localizedDescription
-                    self.isProcessing = false
-                }
-            }
-        }
-    }
+
 
     func loadReferenceImage(from url: URL) {
         let isSecurityScoped = url.startAccessingSecurityScopedResource()
@@ -2233,7 +3561,7 @@ class AppState {
         hasUnsavedChanges = true
     }
     
-    func generatePreviewPNG(size: CGSize = CGSize(width: 480, height: 320)) -> Data? {
+    func generatePreviewPNG(size: CGSize = CGSize(width: 1500, height: 1000)) -> Data? {
         let width = Int(size.width)
         let height = Int(size.height)
         guard let context = CGContext(
@@ -2248,16 +3576,19 @@ class AppState {
             return nil
         }
         
-        // Fill background with #0d0d10
-        context.setFillColor(CGColor(red: 13.0/255.0, green: 13.0/255.0, blue: 16.0/255.0, alpha: 1.0))
+        // Opaque white background — previews are plain black-on-white line art so
+        // they read correctly as Finder/Quick Look thumbnails and recent-project
+        // cards regardless of the surrounding chrome.
+        context.setFillColor(CGColor(red: 1.0, green: 1.0, blue: 1.0, alpha: 1.0))
         context.fill(CGRect(origin: .zero, size: size))
-        
+
         if entities.isEmpty {
-            // Draw a generic placeholder wordmark centered
-            let font = NSFont.systemFont(ofSize: 28, weight: .bold)
+            // Draw a generic placeholder wordmark centered (font scales with the
+            // canvas so it reads the same regardless of render resolution).
+            let font = NSFont.systemFont(ofSize: size.height * 0.0875, weight: .bold)
             let attrs: [NSAttributedString.Key: Any] = [
                 .font: font,
-                .foregroundColor: NSColor(red: 0.89, green: 0.89, blue: 0.92, alpha: 1.0)
+                .foregroundColor: NSColor(red: 0.10, green: 0.10, blue: 0.12, alpha: 1.0)
             ]
             let string = NSAttributedString(string: "Pathstitch", attributes: attrs)
             let sizeStr = string.size()
@@ -2281,6 +3612,12 @@ class AppState {
             var maxY = -Double.infinity
             
             for ent in entities {
+                // Frame only what's actually drawn: skip geometry on hidden layers
+                // so an invisible (toggled-off) entity can't inflate the bounds and
+                // shove the visible drawing into a corner.
+                let layerVisible = layers.first(where: { $0.name == ent.layer })?.visible ?? true
+                if !layerVisible { continue }
+
                 if ent.type == "LINE", let s = ent.start, let e = ent.end {
                     minX = min(minX, s[0], e[0])
                     maxX = max(maxX, s[0], e[0])
@@ -2315,16 +3652,28 @@ class AppState {
             
             let centerX = bounds.midX
             let centerY = bounds.midY
-            let usableW = size.width * 0.8
-            let usableH = size.height * 0.8
+            // Tight framing: a small fixed margin (≈6%) instead of a fat 20% inset,
+            // so the drawing fills the card and the scale adapts to whatever the
+            // visible bounds happen to be — little blank space, no fixed gutter.
+            let margin = max(min(size.width, size.height) * 0.06, 8.0)
+            let usableW = size.width - margin * 2
+            let usableH = size.height - margin * 2
             let scaleX = bounds.width > 0 ? (usableW / bounds.width) : 1.0
             let scaleY = bounds.height > 0 ? (usableH / bounds.height) : 1.0
             let scale = min(scaleX, scaleY)
+
+            // Line width scales with render resolution so strokes stay visible when
+            // a high-res preview is downscaled to a Finder icon and crisp when it's
+            // shown large in Quick Look.
+            let strokeWidth = max(1.5, min(size.width, size.height) / 240.0)
             
+            // The CGContext is y-up (origin bottom-left), same as DXF model space,
+            // so map y with a + sign. Subtracting here flipped every preview
+            // upside-down.
             func toScreen(dx: Double, dy: Double) -> CGPoint {
                 return CGPoint(
                     x: size.width / 2 + CGFloat(dx - centerX) * scale,
-                    y: size.height / 2 - CGFloat(dy - centerY) * scale
+                    y: size.height / 2 + CGFloat(dy - centerY) * scale
                 )
             }
             
@@ -2332,11 +3681,10 @@ class AppState {
             for ent in entities {
                 let layerVisible = layers.first(where: { $0.name == ent.layer })?.visible ?? true
                 if !layerVisible { continue }
-                
-                let layerColor = layers.first(where: { $0.name == ent.layer })?.color ?? Color.white
-                let cgColor = NSColor(layerColor).cgColor
-                context.setStrokeColor(cgColor)
-                context.setLineWidth(1.0)
+
+                // Plain black line art, irrespective of layer colour.
+                context.setStrokeColor(CGColor(red: 0.0, green: 0.0, blue: 0.0, alpha: 1.0))
+                context.setLineWidth(strokeWidth)
                 
                 if ent.type == "LINE", let s = ent.start, let e = ent.end {
                     let p1 = toScreen(dx: s[0], dy: s[1])
@@ -2353,9 +3701,10 @@ class AppState {
                           let sa = ent.start_angle, let ea = ent.end_angle {
                     let sc = toScreen(dx: center[0], dy: center[1])
                     let r = CGFloat(radius) * scale
-                    let startRad = CGFloat(-sa * .pi / 180.0)
-                    let endRad = CGFloat(-ea * .pi / 180.0)
-                    context.addArc(center: sc, radius: r, startAngle: startRad, endAngle: endRad, clockwise: true)
+                    // y-up context matches DXF's CCW angle convention.
+                    let startRad = CGFloat(sa * .pi / 180.0)
+                    let endRad = CGFloat(ea * .pi / 180.0)
+                    context.addArc(center: sc, radius: r, startAngle: startRad, endAngle: endRad, clockwise: false)
                     context.strokePath()
                 } else if let vertices = ent.vertices, vertices.count >= 2 {
                     let pStart = toScreen(dx: vertices[0][0], dy: vertices[0][1])
@@ -2434,11 +3783,14 @@ class AppState {
                 refImageCalibrationEndX: calibrationPoints.count > 1 ? Double(calibrationPoints[1].x) : nil,
                 refImageCalibrationEndY: calibrationPoints.count > 1 ? Double(calibrationPoints[1].y) : nil,
                 isLearnModeEnabled: isLearnModeEnabled,
+                parametricShapes: parametricShapes.isEmpty ? nil : parametricShapes,
                 offsetDistance: offsetDistance,
                 offsetSide: offsetSide,
                 holeOffsetDistance: holeOffsetDistance,
                 holeDiameter: holeDiameter,
                 holeSpacing: holeSpacing,
+                holeDistribution: holeDistribution,
+                holeCount: holeCount,
                 holePattern: holePattern,
                 holeCornerBehavior: holeCornerBehavior,
                 holeSide: holeSide,
@@ -2449,7 +3801,12 @@ class AppState {
                 glueTabStartOffset: glueTabStartOffset,
                 glueTabEndOffset: glueTabEndOffset,
                 batchItems: savedBatch,
-                exportMeasurementLines: exportMeasurementLines
+                exportMeasurementLines: exportMeasurementLines,
+                savedLayers: layers,
+                savedLayerFolders: layerFolders,
+                savedActiveLayerId: activeLayerId,
+                savedStepJson: stepJsonContent,
+                savedBodies3D: bodies3D.isEmpty ? nil : bodies3D
             )
 
             let encoder = JSONEncoder()
@@ -2533,6 +3890,12 @@ class AppState {
 
             self.currentProjectPath = url
             self.measurements = validContainer.measurements
+            self.layers = validContainer.savedLayers ?? []
+            self.layerFolders = validContainer.savedLayerFolders ?? []
+            self.activeLayerId = validContainer.savedActiveLayerId
+            // Restore the 3D workspace that travels inside the .stch (MAS-75).
+            self.stepJsonContent = validContainer.savedStepJson
+            self.bodies3D = validContainer.savedBodies3D ?? []
             self.logEntries = validContainer.logEntries
             self.canvasScale = CGFloat(validContainer.canvasScale)
             self.canvasOffset = CGSize(width: CGFloat(validContainer.canvasOffsetX), height: CGFloat(validContainer.canvasOffsetY))
@@ -2558,11 +3921,14 @@ class AppState {
             }
             
             if let learn = validContainer.isLearnModeEnabled { self.isLearnModeEnabled = learn }
+            if let pShapes = validContainer.parametricShapes { self.parametricShapes = pShapes }
             if let dist = validContainer.offsetDistance { self.offsetDistance = dist }
             if let side = validContainer.offsetSide { self.offsetSide = side }
             if let hDist = validContainer.holeOffsetDistance { self.holeOffsetDistance = hDist }
             if let hDiam = validContainer.holeDiameter { self.holeDiameter = hDiam }
             if let hSpac = validContainer.holeSpacing { self.holeSpacing = hSpac }
+            if let hDistr = validContainer.holeDistribution { self.holeDistribution = hDistr }
+            if let hCnt = validContainer.holeCount { self.holeCount = hCnt }
             if let hPat = validContainer.holePattern { self.holePattern = hPat }
             if let hCorn = validContainer.holeCornerBehavior { self.holeCornerBehavior = hCorn }
             if let hSide = validContainer.holeSide { self.holeSide = hSide }
@@ -2611,11 +3977,271 @@ class AppState {
     func saveProjectWithDialog() {
         let savePanel = NSSavePanel()
         savePanel.title = "Save Project"
-        savePanel.nameFieldStringValue = "project.stch"
-        savePanel.allowedContentTypes = [UTType(filenameExtension: "stch")].compactMap { $0 }
+        
+        let defaultDir: URL
+        if let currentPath = currentProjectPath {
+            defaultDir = currentPath.deletingLastPathComponent()
+        } else {
+            defaultDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first ?? URL(fileURLWithPath: NSHomeDirectory())
+        }
+        
+        var index = 0
+        var filename = "untitled.stch"
+        while FileManager.default.fileExists(atPath: defaultDir.appendingPathComponent(filename).path) {
+            index += 1
+            filename = "untitled-\(index).stch"
+        }
+        
+        savePanel.directoryURL = defaultDir
+        savePanel.nameFieldStringValue = filename
+        
+        if let stchType = UTType("com.chen.pathstitch.stch") {
+            savePanel.allowedContentTypes = [stchType]
+        } else {
+            savePanel.allowedContentTypes = [UTType(filenameExtension: "stch")].compactMap { $0 }
+        }
         
         if savePanel.runModal() == .OK, let url = savePanel.url {
             self.saveProject(to: url)
+        }
+    }
+    
+    func combineProject(from url: URL) {
+        errorMessage = nil
+        let isSecurityScoped = url.startAccessingSecurityScopedResource()
+        defer {
+            if isSecurityScoped {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+        
+        do {
+            var container: ProjectSaveContainer? = nil
+            
+            // Try loading as ZIP archive first
+            if let archive = try? Archive(url: url, accessMode: .read) {
+                if let entry = archive["project.json"] {
+                    var projectData = Data()
+                    _ = try archive.extract(entry, consumer: { chunk in
+                        projectData.append(chunk)
+                    })
+                    container = try? JSONDecoder().decode(ProjectSaveContainer.self, from: projectData)
+                }
+            }
+            
+            // Fallback to plain JSON for older project files
+            if container == nil {
+                let data = try Data(contentsOf: url)
+                let decoder = JSONDecoder()
+                container = try decoder.decode(ProjectSaveContainer.self, from: data)
+            }
+            
+            guard let validContainer = container else {
+                errorMessage = "Failed to decode project save container."
+                return
+            }
+            
+            let tempDir = sessionTempDirectory
+            try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+            let importedDxfURL = tempDir.appendingPathComponent("imported_combine.dxf")
+            
+            let activeDxfURL = ensureActiveDXFFileExists()
+            
+            if let dxfBase64 = validContainer.dxfDataBase64, let dxfData = Data(base64Encoded: dxfBase64) {
+                try dxfData.write(to: importedDxfURL)
+                
+                saveToHistory()
+                isProcessing = true
+                
+                Task {
+                    do {
+                        await reconcileBufferIfNeeded()
+                        
+                        _ = try await PythonBridge.shared.run(
+                            module: "dxf_ops",
+                            op: "append_dxf",
+                            args: [
+                                "primary": activeDxfURL.path,
+                                "secondary": importedDxfURL.path,
+                                "output": activeDxfURL.path
+                            ]
+                        )
+                        
+                        await MainActor.run {
+                            // Merge measurements
+                            let existingMeasureIds = Set(self.measurements.map { $0.id })
+                            for m in validContainer.measurements {
+                                if !existingMeasureIds.contains(m.id) {
+                                    self.measurements.append(m)
+                                }
+                            }
+                            
+                            // Merge layers
+                            var existingLayersByName = Dictionary(uniqueKeysWithValues: self.layers.map { ($0.name, $0) })
+                            if let importedLayers = validContainer.savedLayers {
+                                for layer in importedLayers {
+                                    if existingLayersByName[layer.name] == nil {
+                                        self.layers.append(layer)
+                                        existingLayersByName[layer.name] = layer
+                                    }
+                                }
+                            }
+                            
+                            // Merge folders
+                            let existingFolderIds = Set(self.layerFolders.map { $0.id })
+                            if let importedFolders = validContainer.savedLayerFolders {
+                                for f in importedFolders {
+                                    if !existingFolderIds.contains(f.id) {
+                                        self.layerFolders.append(f)
+                                    }
+                                }
+                            }
+                            
+                            // Append log entries
+                            let existingLogIds = Set(self.logEntries.map { $0.id })
+                            for entry in validContainer.logEntries {
+                                if !existingLogIds.contains(entry.id) {
+                                    self.logEntries.append(entry)
+                                }
+                            }
+                            
+                            try? FileManager.default.removeItem(at: importedDxfURL)
+                            
+                            self.reloadDXF()
+                            self.hasUnsavedChanges = true
+                            
+                            logEntries.append(LogEntry(action: "Combine Project", details: "Combined project successfully from \(url.lastPathComponent)"))
+                        }
+                    } catch {
+                        await MainActor.run {
+                            self.errorMessage = "Failed to combine project: \(error.localizedDescription)"
+                            self.isProcessing = false
+                        }
+                    }
+                }
+            } else {
+                errorMessage = "Imported project contains no geometry."
+            }
+        } catch {
+            errorMessage = "Failed to combine project: \(error.localizedDescription)"
+        }
+    }
+    
+    func exportWithDialog() {
+        let format = self.exportFormat
+        let savePanel = NSSavePanel()
+        savePanel.title = "Export Drawing"
+        savePanel.nameFieldStringValue = "drawing.\(format)"
+        savePanel.allowedContentTypes = [UTType(filenameExtension: format)].compactMap { $0 }
+        
+        if savePanel.runModal() == .OK, let url = savePanel.url {
+            self.exportFile(to: url, format: format, selectedOnly: self.exportSelectedOnly)
+        }
+    }
+    
+    func updateRectangleDimensions(handle: String, width: Double?, height: Double?, filletRadius: Double?) {
+        guard let url = currentFilePath else { return }
+        
+        // Find existing measurements for this rectangle to get the current rectP1, rectP2, and filletRadius
+        guard let wMeasure = measurements.first(where: { $0.entityHandle == handle && $0.dimensionType == "width" }),
+              let hMeasure = measurements.first(where: { $0.entityHandle == handle && $0.dimensionType == "height" }),
+              let p1 = wMeasure.rectP1,
+              let p2 = wMeasure.rectP2 else {
+            return
+        }
+        
+        saveToHistory()
+        isProcessing = true
+        
+        Task {
+            do {
+                // Apply background reconcile if needed before writing to backend DXF
+                await reconcileBufferIfNeeded()
+                
+                var newP2 = p2
+                let finalWidth = width ?? wMeasure.distanceMm
+                let finalHeight = height ?? hMeasure.distanceMm
+                let finalFillet = filletRadius ?? wMeasure.filletRadius
+                
+                // Calculate newP2 based on finalWidth and finalHeight
+                let currentW = abs(p2.x - p1.x)
+                if currentW > 1e-5 {
+                    let sign: CGFloat = p2.x >= p1.x ? 1.0 : -1.0
+                    newP2.x = p1.x + sign * CGFloat(finalWidth)
+                }
+                let currentH = abs(p2.y - p1.y)
+                if currentH > 1e-5 {
+                    let sign: CGFloat = p2.y >= p1.y ? 1.0 : -1.0
+                    newP2.y = p1.y + sign * CGFloat(finalHeight)
+                }
+                
+                var params: [String: Any] = [:]
+                params["p1"] = [Double(p1.x), Double(p1.y)]
+                params["p2"] = [Double(newP2.x), Double(newP2.y)]
+                params["fillet_radius"] = finalFillet
+                
+                let activeDxfURL = sessionTempDirectory.appendingPathComponent("active.dxf")
+                
+                _ = try await PythonBridge.shared.run(
+                    module: "dxf_ops",
+                    op: "update_entity",
+                    args: [
+                        "input": url.path,
+                        "output": activeDxfURL.path,
+                        "handle": handle,
+                        "type": "rectangle",
+                        "params": params
+                    ]
+                )
+                
+                await MainActor.run {
+                    self.currentFilePath = activeDxfURL
+                    
+                    // Update in-memory measurements
+                    for mIdx in 0..<self.measurements.count {
+                        if self.measurements[mIdx].entityHandle == handle {
+                            self.measurements[mIdx].rectP1 = p1
+                            self.measurements[mIdx].rectP2 = newP2
+                            self.measurements[mIdx].filletRadius = finalFillet
+                            
+                            if self.measurements[mIdx].dimensionType == "width" {
+                                let w = abs(newP2.x - p1.x)
+                                self.measurements[mIdx].start = CGPoint(x: min(p1.x, newP2.x), y: min(p1.y, newP2.y))
+                                self.measurements[mIdx].end = CGPoint(x: max(p1.x, newP2.x), y: min(p1.y, newP2.y))
+                                self.measurements[mIdx].distanceMm = Double(w)
+                            } else if self.measurements[mIdx].dimensionType == "height" {
+                                let h = abs(newP2.y - p1.y)
+                                self.measurements[mIdx].start = CGPoint(x: min(p1.x, newP2.x), y: min(p1.y, newP2.y))
+                                self.measurements[mIdx].end = CGPoint(x: min(p1.x, newP2.x), y: max(p1.y, newP2.y))
+                                self.measurements[mIdx].distanceMm = Double(h)
+                            }
+                        }
+                    }
+                    
+                    // Update selectedMeasurement if it points to this rectangle
+                    if let sel = self.selectedMeasurement, sel.entityHandle == handle {
+                        self.selectedMeasurement?.rectP1 = p1
+                        self.selectedMeasurement?.rectP2 = newP2
+                        self.selectedMeasurement?.filletRadius = finalFillet
+                        if sel.dimensionType == "width" {
+                            self.selectedMeasurement?.start = CGPoint(x: min(p1.x, newP2.x), y: min(p1.y, newP2.y))
+                            self.selectedMeasurement?.end = CGPoint(x: max(p1.x, newP2.x), y: min(p1.y, newP2.y))
+                            self.selectedMeasurement?.distanceMm = finalWidth
+                        } else if sel.dimensionType == "height" {
+                            self.selectedMeasurement?.start = CGPoint(x: min(p1.x, newP2.x), y: min(p1.y, newP2.y))
+                            self.selectedMeasurement?.end = CGPoint(x: min(p1.x, newP2.x), y: max(p1.y, newP2.y))
+                            self.selectedMeasurement?.distanceMm = finalHeight
+                        }
+                    }
+                    
+                    self.reloadDXF()
+                }
+            } catch {
+                await MainActor.run {
+                    self.errorMessage = error.localizedDescription
+                    self.isProcessing = false
+                }
+            }
         }
     }
     
@@ -2751,7 +4377,17 @@ class AppState {
                 self.measurements[idx] = m
             }
         }
-        
+
+        // 2b. Keep parametric corner models in sync. Without this the sharp
+        //     base stays at the old origin, so corner/fillet handles are "left
+        //     behind" and the next parametric edit snaps the shape back (MAS-90).
+        for h in self.selectedHandles {
+            if var model = self.parametricShapes[h] {
+                model.base = model.base.map { [$0[0] + dxDouble, $0[1] + dyDouble] }
+                self.parametricShapes[h] = model
+            }
+        }
+
         self.hasUnsavedChanges = true
         logEntries.append(LogEntry(action: "Translate Entities", details: "Translated selected entities by dx: \(dx), dy: \(dy)"))
         
@@ -2824,6 +4460,18 @@ class AppState {
                 self.measurements[idx] = m
             }
         }
+
+        // Keep parametric corner models in sync with the rotation so corner/
+        // fillet handles track the shape and edits don't snap back (MAS-90).
+        for h in self.selectedHandles {
+            if var model = self.parametricShapes[h] {
+                model.base = model.base.map { pt in
+                    let p = rotPt(CGPoint(x: pt[0], y: pt[1]))
+                    return [Double(p.x), Double(p.y)]
+                }
+                self.parametricShapes[h] = model
+            }
+        }
         
         self.hasUnsavedChanges = true
         logEntries.append(LogEntry(action: "Rotate Entities", details: "Rotated selected entities by angle: \(angleDegrees) around center: \(center)"))
@@ -2851,6 +4499,154 @@ class AppState {
                 }
             } catch {
                 print("Background rotation failed: \(error)")
+            }
+        }
+    }
+
+    /// Flips the selected entities in place about their own bounding-box
+    /// center. axis "horizontal" mirrors left/right, "vertical" top/bottom.
+    func reflectSelectedEntities(axis: String) {
+        guard let url = currentFilePath, !selectedHandles.isEmpty else { return }
+        saveToHistory()
+        isProcessing = true
+
+        let handlesSnapshot = Array(selectedHandles)
+        Task {
+            do {
+                let activeDxfURL = sessionTempDirectory.appendingPathComponent("active.dxf")
+                let res = try await PythonBridge.shared.run(
+                    module: "dxf_ops",
+                    op: "reflect_entities",
+                    args: [
+                        "input": url.path,
+                        "output": activeDxfURL.path,
+                        "handles": handlesSnapshot,
+                        "axis": axis
+                    ]
+                )
+                await MainActor.run {
+                    if let status = res["status"] as? String, status != "ok" {
+                        self.errorMessage = (res["message"] as? String) ?? "Reflect failed."
+                        self.isProcessing = false
+                        return
+                    }
+                    self.currentFilePath = activeDxfURL
+                    self.reloadDXF()
+                    self.logEntries.append(LogEntry(action: "Reflect", details: "Reflected selected entities (\(axis))"))
+                }
+            } catch {
+                await MainActor.run {
+                    self.errorMessage = error.localizedDescription
+                    self.isProcessing = false
+                }
+            }
+        }
+    }
+
+    /// Duplicates the current selection, offset slightly, and selects the copies
+    /// (right-click → Duplicate, MAS-77). Offset scales with zoom so the copy is
+    /// always visibly nudged from the original.
+    func duplicateSelectedEntities() {
+        guard let url = currentFilePath, !selectedHandles.isEmpty else { return }
+        saveToHistory()
+        isProcessing = true
+        let handlesSnapshot = Array(selectedHandles)
+        let offset = 5.0
+        Task {
+            do {
+                let activeDxfURL = sessionTempDirectory.appendingPathComponent("active.dxf")
+                let res = try await PythonBridge.shared.run(
+                    module: "dxf_ops",
+                    op: "duplicate_entities",
+                    args: [
+                        "input": url.path,
+                        "output": activeDxfURL.path,
+                        "handles": handlesSnapshot,
+                        "dx": offset,
+                        "dy": offset
+                    ]
+                )
+                await MainActor.run {
+                    if let status = res["status"] as? String, status != "ok" {
+                        self.errorMessage = (res["message"] as? String) ?? "Duplicate failed."
+                        self.isProcessing = false
+                        return
+                    }
+                    let newHandles = (res["data"] as? [String: Any])?["new_handles"] as? [String] ?? []
+                    self.currentFilePath = activeDxfURL
+                    self.reloadDXF()
+                    if !newHandles.isEmpty { self.selectedHandles = Set(newHandles) }
+                    self.logEntries.append(LogEntry(action: "Duplicate", details: "Duplicated \(handlesSnapshot.count) entit\(handlesSnapshot.count == 1 ? "y" : "ies")"))
+                }
+            } catch {
+                await MainActor.run {
+                    self.errorMessage = error.localizedDescription
+                    self.isProcessing = false
+                }
+            }
+        }
+    }
+
+    /// Reloads every selected imported file from disk in place (MAS-76). The
+    /// fork's geometry is re-read and re-centred on where it currently sits, so
+    /// the user's placement is preserved; the 2D↔3D link is untouched.
+    func reloadSelectedImportFromDisk() {
+        guard let url = currentFilePath else { return }
+        // Snapshot the jobs on the main actor: group id, source, old handles, layer.
+        let jobs: [(gid: String, source: ImportSource, layer: String)] = Array(
+            Set(selectedHandles.compactMap { importGroupId(for: $0) })
+        ).compactMap { gid in
+            guard let src = importSources[gid] else { return nil }
+            let layer = entities.first { src.handles.contains($0.handle) }?.layer ?? "0"
+            return (gid, src, layer)
+        }
+        guard !jobs.isEmpty else { return }
+        saveToHistory()
+        isProcessing = true
+        let activeDxfURL = sessionTempDirectory.appendingPathComponent("active.dxf")
+        Task {
+            do {
+                var allNew: [String] = []
+                var updates: [String: [String]] = [:]
+                for job in jobs {
+                    guard let temp = try await convertToTempDXF(job.source.url) else { continue }
+                    let res = try await PythonBridge.shared.run(
+                        module: "dxf_ops",
+                        op: "replace_import",
+                        args: [
+                            "input": url.path,
+                            "output": activeDxfURL.path,
+                            "delete_handles": job.source.handles,
+                            "secondary": temp.path,
+                            "layer": job.layer
+                        ]
+                    )
+                    try? FileManager.default.removeItem(at: temp)
+                    if let status = res["status"] as? String, status != "ok" {
+                        await MainActor.run {
+                            self.errorMessage = (res["message"] as? String) ?? "Reload failed."
+                        }
+                        continue
+                    }
+                    let newHandles = (res["data"] as? [String: Any])?["new_handles"] as? [String] ?? []
+                    updates[job.gid] = newHandles
+                    allNew.append(contentsOf: newHandles)
+                }
+                await MainActor.run {
+                    for (gid, handles) in updates {
+                        if var src = self.importSources[gid] { src.handles = handles; self.importSources[gid] = src }
+                    }
+                    self.currentFilePath = activeDxfURL
+                    self.reloadDXF()
+                    if !allNew.isEmpty { self.selectedHandles = Set(allNew) }
+                    self.isProcessing = false
+                    self.logAction("Reload from Disk", details: "Reloaded \(jobs.count) import(s) from disk")
+                }
+            } catch {
+                await MainActor.run {
+                    self.errorMessage = error.localizedDescription
+                    self.isProcessing = false
+                }
             }
         }
     }
@@ -3017,6 +4813,7 @@ class AppState {
     func applyAddText(text: String, insert: CGPoint, height: Double) {
         saveToHistory()
         let activeDxfURL = ensureActiveDXFFileExists()
+        let activeLayerName = self.activeLayer?.name ?? "TEXT"
         isProcessing = true
         
         Task {
@@ -3032,7 +4829,7 @@ class AppState {
                         "text": text,
                         "insert": [Double(insert.x), Double(insert.y)],
                         "height": height,
-                        "layer": "TEXT"
+                        "layer": activeLayerName
                     ]
                 )
                 await MainActor.run {
@@ -3069,13 +4866,38 @@ class AppState {
     /// optimistic in-memory edit without a Python round-trip.
     func recomputeLayersFromEntities() {
         let uniqueLayers = Array(Set(entities.map { $0.layer })).sorted()
+        
         self.layers = uniqueLayers.map { layerName in
-            let existing = self.layers.first(where: { $0.name == layerName })
-            return DXFLayer(
-                name: layerName,
-                color: existing?.color ?? self.colorForLayerName(layerName),
-                visible: existing?.visible ?? true
-            )
+            if let existing = self.layers.first(where: { $0.name == layerName }) {
+                return DXFLayer(
+                    id: existing.id,
+                    name: layerName,
+                    color: existing.color,
+                    visible: existing.visible,
+                    parentFolderId: existing.parentFolderId
+                )
+            } else {
+                return DXFLayer(
+                    id: UUID().uuidString,
+                    name: layerName,
+                    color: self.colorForLayerName(layerName),
+                    visible: true,
+                    parentFolderId: nil
+                )
+            }
+        }
+        
+        // Back-populate layerId on entities
+        for i in 0..<entities.count {
+            if entities[i].layerId == nil {
+                if let matched = layers.first(where: { $0.name == entities[i].layer }) {
+                    entities[i].layerId = matched.id
+                }
+            }
+        }
+        
+        if activeLayerId == nil || !layers.contains(where: { $0.id == activeLayerId }) {
+            activeLayerId = layers.first?.id
         }
     }
 
@@ -3208,6 +5030,343 @@ class AppState {
         }
     }
 
+    // MARK: - Layer & Folder Management
+    
+    struct LayerHierarchicalItem: Identifiable {
+        let id: String
+        let name: String
+        let isFolder: Bool
+        let depth: Int
+        let visible: Bool
+        let color: Color?
+        var parentFolderId: String?
+    }
+    
+    func getFlattenedLayerItems() -> [LayerHierarchicalItem] {
+        var items: [LayerHierarchicalItem] = []
+        
+        func traverse(folderId: String?, depth: Int) {
+            // Add folders at this level
+            let levelFolders = layerFolders.filter { $0.parentFolderId == folderId }
+            for folder in levelFolders {
+                let isExpanded = expandedFolderIds.contains(folder.id)
+                items.append(LayerHierarchicalItem(
+                    id: folder.id,
+                    name: folder.name,
+                    isFolder: true,
+                    depth: depth,
+                    visible: true,
+                    color: nil,
+                    parentFolderId: folder.parentFolderId
+                ))
+                
+                if isExpanded {
+                    traverse(folderId: folder.id, depth: depth + 1)
+                }
+            }
+            
+            // Add layers at this level
+            let levelLayers = layers.filter { $0.parentFolderId == folderId }
+            for layer in levelLayers {
+                items.append(LayerHierarchicalItem(
+                    id: layer.id,
+                    name: layer.name,
+                    isFolder: false,
+                    depth: depth,
+                    visible: layer.visible,
+                    color: layer.color,
+                    parentFolderId: layer.parentFolderId
+                ))
+            }
+        }
+        
+        traverse(folderId: nil, depth: 0)
+        return items
+    }
+    
+    var selectionCenterModel: CGPoint? {
+        if selectedHandles.isEmpty { return nil }
+        var pts: [CGPoint] = []
+        for h in selectedHandles {
+            if let ent = entities.first(where: { $0.handle == h }) {
+                if let s = ent.start, s.count >= 2 { pts.append(CGPoint(x: s[0], y: s[1])) }
+                if let e = ent.end, e.count >= 2 { pts.append(CGPoint(x: e[0], y: e[1])) }
+                if let c = ent.center, c.count >= 2 { pts.append(CGPoint(x: c[0], y: c[1])) }
+                if let vertices = ent.vertices {
+                    for v in vertices {
+                        if v.count >= 2 { pts.append(CGPoint(x: v[0], y: v[1])) }
+                    }
+                }
+            }
+        }
+        if pts.isEmpty { return nil }
+        let sumX = pts.map { $0.x }.reduce(0, +)
+        let sumY = pts.map { $0.y }.reduce(0, +)
+        return CGPoint(x: sumX / CGFloat(pts.count), y: sumY / CGFloat(pts.count))
+    }
+    
+    /// Keeps the Layers panel highlight in lock-step with the canvas selection
+    /// (MAS-70): the active layers are exactly those owning the selected geometry,
+    /// and an empty selection clears the highlight. `activeLayerId` (the draw
+    /// target for new sketches) is preserved so creating geometry still has a home.
+    func updateActiveLayersFromSelection() {
+        guard !selectedHandles.isEmpty else {
+            // Nothing selected → no layers highlighted, but keep a draw target.
+            activeLayerIds = []
+            return
+        }
+        var selectedLayerIds = Set<String>()
+        for entity in entities {
+            if selectedHandles.contains(entity.handle) {
+                if let matchedLayer = layers.first(where: { $0.id == entity.layerId || $0.name == entity.layer }) {
+                    selectedLayerIds.insert(matchedLayer.id)
+                }
+            }
+        }
+        self.activeLayerIds = selectedLayerIds
+        if let first = selectedLayerIds.first {
+            self.activeLayerId = first
+        }
+    }
+
+    func addLayer(name: String, color: Color? = nil) {
+        let sanitizedName = sanitizeLayerName(name)
+        let actualColor = color ?? self.colorForLayerName(sanitizedName)
+        let newLayer = DXFLayer(
+            id: UUID().uuidString,
+            name: sanitizedName,
+            color: actualColor,
+            visible: true,
+            parentFolderId: nil
+        )
+        self.layers.append(newLayer)
+        self.activeLayerId = newLayer.id
+        self.hasUnsavedChanges = true
+        self.logAction("ADD LAYER", details: "Added layer \(sanitizedName)")
+    }
+    
+    func addFolder(name: String) {
+        let newFolder = DXFLayerFolder(id: UUID().uuidString, name: name, parentFolderId: nil)
+        self.layerFolders.append(newFolder)
+        self.hasUnsavedChanges = true
+        self.expandedFolderIds.insert(newFolder.id) // Auto expand new folders
+        self.logAction("ADD FOLDER", details: "Added folder \(name)")
+    }
+    
+    func deleteLayer(id: String) {
+        guard let idx = layers.firstIndex(where: { $0.id == id }) else { return }
+        let layerName = layers[idx].name
+        
+        saveToHistory()
+        
+        // Find entities in this layer
+        let toRemove = entities.filter { $0.layerId == id || ($0.layerId == nil && $0.layer == layerName) }
+        let removedHandles = Set(toRemove.map { $0.handle })
+        
+        entities.removeAll { removedHandles.contains($0.handle) }
+        previewEntities.removeAll { removedHandles.contains($0.handle) }
+        measurements.removeAll { m in
+            if let h = m.entityHandle { return removedHandles.contains(h) }
+            return false
+        }
+        if let sel = selectedMeasurement, let h = sel.entityHandle, removedHandles.contains(h) {
+            selectedMeasurement = nil
+        }
+        selectedHandles.subtract(removedHandles)
+        
+        layers.remove(at: idx)
+        if activeLayerId == id {
+            activeLayerId = layers.first?.id
+        }
+        
+        pendingDeletedHandles.formUnion(removedHandles)
+        hasUnsavedChanges = true
+        logAction("DELETE LAYER", details: "Deleted layer \(layerName) and \(removedHandles.count) associated entities")
+        
+        Task { await reconcileBufferIfNeeded() }
+    }
+    
+    func deleteFolder(id: String) {
+        guard let idx = layerFolders.firstIndex(where: { $0.id == id }) else { return }
+        let folderName = layerFolders[idx].name
+        
+        saveToHistory()
+        layerFolders.remove(at: idx)
+        
+        // Flatten children (move nested layers and subfolders to root level)
+        for i in 0..<layers.count {
+            if layers[i].parentFolderId == id {
+                layers[i].parentFolderId = nil
+            }
+        }
+        for i in 0..<layerFolders.count {
+            if layerFolders[i].parentFolderId == id {
+                layerFolders[i].parentFolderId = nil
+            }
+        }
+        expandedFolderIds.remove(id)
+        
+        hasUnsavedChanges = true
+        logAction("DELETE FOLDER", details: "Deleted folder \(folderName)")
+    }
+    
+    func renameLayer(id: String, newName: String) {
+        let sanitizedName = sanitizeLayerName(newName)
+        guard !sanitizedName.isEmpty else { return }
+        guard let idx = layers.firstIndex(where: { $0.id == id }) else { return }
+        let oldName = layers[idx].name
+        layers[idx].name = sanitizedName
+        
+        saveToHistory()
+        
+        entities = entities.map { ent in
+            if ent.layerId == id || (ent.layerId == nil && ent.layer == oldName) {
+                var newEnt = ent
+                newEnt.layer = sanitizedName
+                newEnt.layerId = id
+                return newEnt
+            }
+            return ent
+        }
+        
+        let handles = entities.filter { $0.layerId == id }.map { $0.handle }
+        if !handles.isEmpty {
+            let activeDxfURL = sessionTempDirectory.appendingPathComponent("active.dxf")
+            enqueueBufferWrite {
+                let inputPath = (await MainActor.run { self.currentFilePath?.path }) ?? activeDxfURL.path
+                do {
+                    _ = try await PythonBridge.shared.run(
+                        module: "dxf_ops",
+                        op: "set_layer",
+                        args: [
+                            "input": inputPath,
+                            "output": activeDxfURL.path,
+                            "handles": handles,
+                            "layer": sanitizedName
+                        ]
+                    )
+                } catch {
+                    print("Background layer rename failed: \(error)")
+                }
+            }
+        }
+        
+        hasUnsavedChanges = true
+        logAction("RENAME LAYER", details: "Renamed layer \(oldName) to \(sanitizedName)")
+    }
+    
+    func renameFolder(id: String, newName: String) {
+        guard !newName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        guard let idx = layerFolders.firstIndex(where: { $0.id == id }) else { return }
+        let oldName = layerFolders[idx].name
+        layerFolders[idx].name = newName
+        hasUnsavedChanges = true
+        logAction("RENAME FOLDER", details: "Renamed folder \(oldName) to \(newName)")
+    }
+    
+    func colorLayer(id: String, newColorHex: String) {
+        guard let idx = layers.firstIndex(where: { $0.id == id }) else { return }
+        layers[idx].colorHex = newColorHex
+        hasUnsavedChanges = true
+    }
+    
+    func moveLayer(id: String, toFolderId: String?) {
+        guard let idx = layers.firstIndex(where: { $0.id == id }) else { return }
+        layers[idx].parentFolderId = toFolderId
+        hasUnsavedChanges = true
+    }
+    
+    func moveFolder(id: String, toFolderId: String?) {
+        guard id != toFolderId else { return }
+        guard let idx = layerFolders.firstIndex(where: { $0.id == id }) else { return }
+        
+        var currentParent = toFolderId
+        while let parentId = currentParent {
+            if parentId == id {
+                return // Cycle detected
+            }
+            currentParent = layerFolders.first(where: { $0.id == parentId })?.parentFolderId
+        }
+        
+        layerFolders[idx].parentFolderId = toFolderId
+        hasUnsavedChanges = true
+    }
+    
+    func moveUp(id: String, isFolder: Bool) {
+        if isFolder {
+            guard let idx = layerFolders.firstIndex(where: { $0.id == id }), idx > 0 else { return }
+            layerFolders.swapAt(idx, idx - 1)
+        } else {
+            guard let idx = layers.firstIndex(where: { $0.id == id }), idx > 0 else { return }
+            layers.swapAt(idx, idx - 1)
+        }
+        hasUnsavedChanges = true
+    }
+    
+    func moveDown(id: String, isFolder: Bool) {
+        if isFolder {
+            guard let idx = layerFolders.firstIndex(where: { $0.id == id }), idx < layerFolders.count - 1 else { return }
+            layerFolders.swapAt(idx, idx + 1)
+        } else {
+            guard let idx = layers.firstIndex(where: { $0.id == id }), idx < layers.count - 1 else { return }
+            layers.swapAt(idx, idx + 1)
+        }
+        hasUnsavedChanges = true
+    }
+
+    func reorderLayerOrFolder(sourceId: String, targetId: String) {
+        guard sourceId != targetId else { return }
+        
+        let sourceIsFolder = layerFolders.contains(where: { $0.id == sourceId })
+        let targetIsFolder = layerFolders.contains(where: { $0.id == targetId })
+        
+        if sourceIsFolder {
+            if targetIsFolder {
+                var currentParent: String? = targetId
+                while let pId = currentParent {
+                    if pId == sourceId { return }
+                    currentParent = layerFolders.first(where: { $0.id == pId })?.parentFolderId
+                }
+            }
+            
+            guard let sourceIdx = layerFolders.firstIndex(where: { $0.id == sourceId }) else { return }
+            let sourceFolder = layerFolders.remove(at: sourceIdx)
+            
+            if targetIsFolder {
+                var updatedFolder = sourceFolder
+                updatedFolder.parentFolderId = targetId
+                layerFolders.insert(updatedFolder, at: 0)
+            } else {
+                guard let targetLayer = layers.first(where: { $0.id == targetId }) else {
+                    layerFolders.insert(sourceFolder, at: sourceIdx)
+                    return
+                }
+                var updatedFolder = sourceFolder
+                updatedFolder.parentFolderId = targetLayer.parentFolderId
+                layerFolders.insert(updatedFolder, at: 0)
+            }
+        } else {
+            guard let sourceIdx = layers.firstIndex(where: { $0.id == sourceId }) else { return }
+            let sourceLayer = layers.remove(at: sourceIdx)
+            
+            if targetIsFolder {
+                var updatedLayer = sourceLayer
+                updatedLayer.parentFolderId = targetId
+                layers.insert(updatedLayer, at: 0)
+            } else {
+                guard let targetIdx = layers.firstIndex(where: { $0.id == targetId }) else {
+                    layers.insert(sourceLayer, at: sourceIdx)
+                    return
+                }
+                var updatedLayer = sourceLayer
+                updatedLayer.parentFolderId = layers[targetIdx].parentFolderId
+                layers.insert(updatedLayer, at: targetIdx)
+            }
+        }
+        hasUnsavedChanges = true
+        logAction("REORDER LAYER/FOLDER", details: "Moved item \(sourceId) to target \(targetId)")
+    }
+
     // MARK: - Text Inline Editing
     func generateNextHandle() -> String {
         var maxHandleVal = 0
@@ -3314,10 +5473,12 @@ class AppState {
             // Create new text in-memory
             saveToHistory()
             let tempHandle = "TEMP_" + UUID().uuidString
+            let activeLayerName = self.activeLayer?.name ?? "TEXT"
+            let activeLayerIdVal = self.activeLayerId
             let newEntity = DXFEntity(
                 handle: tempHandle,
                 type: "TEXT",
-                layer: "TEXT",
+                layer: activeLayerName,
                 color: 7,
                 start: [Double(insert.x), Double(insert.y)],
                 end: nil,
@@ -3328,7 +5489,8 @@ class AppState {
                 vertices: nil,
                 closed: nil,
                 text: text,
-                height: height
+                height: height,
+                layerId: activeLayerIdVal
             )
             self.entities.append(newEntity)
             self.recomputeLayersFromEntities()
@@ -3347,7 +5509,7 @@ class AppState {
                             "text": text,
                             "insert": [Double(insert.x), Double(insert.y)],
                             "height": height,
-                            "layer": "TEXT"
+                            "layer": activeLayerName
                         ]
                     )
                     if let data = res["data"] as? [String: Any],

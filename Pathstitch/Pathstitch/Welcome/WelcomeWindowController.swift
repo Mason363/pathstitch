@@ -51,7 +51,7 @@ class WelcomeWindowController: NSWindowController {
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
         window.isMovableByWindowBackground = true
-        window.backgroundColor = NSColor(red: 13.0/255.0, green: 13.0/255.0, blue: 16.0/255.0, alpha: 1.0) // #0d0d10
+        window.backgroundColor = .pathstitchWindowBackground   // adaptive (MAS-72)
         
         self.init(window: window)
         window.center()

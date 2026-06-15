@@ -20,6 +20,20 @@ from ezdxf.path import make_path, Path
 from shapely.geometry import LineString, LinearRing, MultiLineString, Point as ShapelyPoint
 from shapely.ops import linemerge
 
+def sanitize_layer_name(name: str) -> str:
+    """
+    Sanitizes a layer name to ensure compatibility with AutoCAD / ezdxf constraints.
+    AutoCAD layer names cannot contain the characters: \ / : * ? " < > | ; = , `
+    Also strips trailing/leading whitespaces and limits length to 255.
+    """
+    if not name:
+        return "Layer"
+    invalid_chars = ['\\', '/', ':', '*', '?', '"', '<', '>', '|', ';', '=', ',', '`']
+    for char in invalid_chars:
+        name = name.replace(char, '_')
+    sanitized = name.strip()[:255]
+    return sanitized if sanitized else "Layer"
+
 def aci_to_hex(aci: int) -> str:
     """Converts AutoCAD Color Index (ACI) to hex color string."""
     try:
@@ -201,39 +215,62 @@ def sample_path(path: LineString, spacing: float, is_closed: bool, shift: float 
     return points
 
 def get_offset_geometry(geom: LineString, distance: float, side: str) -> Optional[Any]:
-    """Calculates parallel offset geometry, handling positive/negative distance offsets and inner/outer sides."""
+    """Offsets a curve, expanding/shrinking closed shapes and side-offsetting open
+    ones. Uses polygon ``buffer`` for closed rings (robust expand/shrink that never
+    self-intersects into a "shifted" copy) and ``offset_curve`` for open lines —
+    replacing shapely's deprecated, unreliable ``parallel_offset`` (MAS-71).
+
+    Side semantics:
+      * ``outer`` / ``inner`` — always expand / shrink (winding independent).
+      * ``left`` / ``right``  — offset toward the first edge's left / right normal,
+        which is what the on-canvas drag handle uses. Mapped to expand/shrink via
+        the ring winding so dragging the handle outward always grows the shape.
+    Returns a ``LinearRing`` (closed), ``LineString``/``MultiLineString`` (open),
+    ``MultiLineString`` (closed result that split), or ``None`` (e.g. shrunk away).
+    """
+    from shapely.geometry import Polygon, MultiPolygon, MultiLineString as _MLS, LinearRing as _LR
+
     if abs(distance) < 1e-5:
         return geom
-        
+
+    dist = abs(distance)
     is_closed = geom.is_closed or isinstance(geom, LinearRing)
+
     if is_closed:
         try:
-            geom = LinearRing(geom.coords)
+            ring = geom if isinstance(geom, LinearRing) else LinearRing(geom.coords)
+            poly = Polygon(ring)
+            if not poly.is_valid:
+                poly = poly.buffer(0)
+            if poly.is_empty:
+                return None
+
+            if side == "outer":
+                d = dist
+            elif side == "inner":
+                d = -dist
+            else:
+                # 'left'/'right' are handle-relative; the left normal points
+                # inward exactly when the ring is counter-clockwise.
+                toward_inside = (side == "left") == ring.is_ccw
+                d = -dist if toward_inside else dist
+
+            result = poly.buffer(d, join_style="mitre", mitre_limit=4.0)
+            if result.is_empty:
+                return None
+            if isinstance(result, MultiPolygon):
+                rings = [_LR(p.exterior.coords) for p in result.geoms if not p.is_empty]
+                return _MLS(rings) if rings else None
+            return _LR(result.exterior.coords)
         except Exception:
-            pass
-            
-    if side == "inner":
-        if is_closed and isinstance(geom, LinearRing):
-            actual_side = "left" if geom.is_ccw else "right"
-        else:
-            actual_side = "left"
-    elif side == "outer":
-        if is_closed and isinstance(geom, LinearRing):
-            actual_side = "right" if geom.is_ccw else "left"
-        else:
-            actual_side = "right"
+            return None
     else:
-        # Fallback to left/right if passed directly
-        actual_side = "left" if side == "left" else "right"
-        
-    try:
-        if distance < 0:
-            opp_side = "right" if actual_side == "left" else "left"
-            return geom.parallel_offset(abs(distance), opp_side)
-        else:
-            return geom.parallel_offset(distance, actual_side)
-    except Exception:
-        return None
+        try:
+            d = dist if side in ("left", "outer") else -dist
+            oc = geom.offset_curve(d, join_style="mitre", mitre_limit=4.0)
+            return None if oc.is_empty else oc
+        except Exception:
+            return None
 
 def op_list_entities(args: Dict[str, Any]) -> Dict[str, Any]:
     """Lists properties and geometry coordinates for entities in the DXF file."""
@@ -292,7 +329,7 @@ def op_offset_lines(args: Dict[str, Any]) -> Dict[str, Any]:
     handles = args.get("handles", [])
     distance = float(args.get("distance", 1.0))
     side = args.get("side", "left")
-    layer = args.get("layer", "OFFSET")
+    layer = sanitize_layer_name(args.get("layer", "OFFSET"))
 
     if not input_path or not os.path.exists(input_path):
         return {"status": "error", "message": f"Input file not found: {input_path}"}
@@ -355,7 +392,11 @@ def op_offset_lines(args: Dict[str, Any]) -> Dict[str, Any]:
         except Exception:
             merged = snapped
 
-        from shapely.geometry import MultiLineString, LineString, LinearRing
+        # NOTE: do NOT re-import LineString/LinearRing/MultiLineString here — they
+        # are module-level (top of file). A function-local import binds those names
+        # as locals for the WHOLE function, which made the LinearRing(...) call in
+        # the geom-building loop above raise UnboundLocalError (silently swallowed),
+        # so closed-shape offsets produced nothing. (MAS-71)
         if isinstance(merged, (LineString, LinearRing, MultiLineString)):
             if isinstance(merged, MultiLineString):
                 merged_list = list(merged.geoms)
@@ -366,8 +407,20 @@ def op_offset_lines(args: Dict[str, Any]) -> Dict[str, Any]:
         else:
             merged_list = []
 
+        def _emit(piece):
+            # Add one offset piece as an LWPOLYLINE, honoring closedness (a closed
+            # ring is stored with the closed flag, not a duplicate last vertex).
+            closed = piece.is_closed or isinstance(piece, LinearRing)
+            coords = list(piece.coords)
+            if closed and len(coords) > 1 and coords[0] == coords[-1]:
+                coords = coords[:-1]
+            if len(coords) < 2:
+                return
+            new_ent = msp.add_lwpolyline(coords, dxfattribs={"layer": layer})
+            new_ent.closed = closed
+            new_handles.append(new_ent.dxf.handle)
+
         for geom in merged_list:
-            is_closed = geom.is_closed or isinstance(geom, LinearRing)
             sides_to_try = ["inner", "outer"] if side == "both" else [side]
             for s in sides_to_try:
                 offset_geom = get_offset_geometry(geom, distance, s)
@@ -376,11 +429,9 @@ def op_offset_lines(args: Dict[str, Any]) -> Dict[str, Any]:
 
                 if isinstance(offset_geom, MultiLineString):
                     for sub_geom in offset_geom.geoms:
-                        new_ent = msp.add_lwpolyline(list(sub_geom.coords), dxfattribs={"layer": layer})
-                        new_handles.append(new_ent.dxf.handle)
+                        _emit(sub_geom)
                 elif isinstance(offset_geom, (LineString, LinearRing)):
-                    new_ent = msp.add_lwpolyline(list(offset_geom.coords), dxfattribs={"layer": layer})
-                    new_handles.append(new_ent.dxf.handle)
+                    _emit(offset_geom)
 
     doc.saveas(output_path)
     return {"status": "ok", "data": {"new_entities": new_handles}}
@@ -421,7 +472,7 @@ def op_add_entity(args: Dict[str, Any]) -> Dict[str, Any]:
     output_path = args.get("output")
     ent_type = args.get("type")  # line, circle, rectangle
     params = args.get("params", {})
-    layer = args.get("layer", "ORIGINAL")
+    layer = sanitize_layer_name(args.get("layer", "ORIGINAL"))
 
     if not input_path:
         return {"status": "error", "message": "Input path must be specified."}
@@ -458,6 +509,16 @@ def op_add_entity(args: Dict[str, Any]) -> Dict[str, Any]:
             fillet_radius = float(params.get("fillet_radius", 0.0))
             pts = make_rounded_rectangle_points(p1[0], p1[1], p2[0], p2[1], fillet_radius)
             new_ent = msp.add_lwpolyline(pts, dxfattribs={"layer": layer, "closed": True})
+            new_handle = new_ent.dxf.handle
+        elif ent_type == "path":
+            # Pen-tool path (MAS-94): an already-flattened point list becomes an
+            # editable LWPOLYLINE (open or closed), so fillet/vertex tools work on it.
+            raw_pts = params.get("points", [])
+            closed = bool(params.get("closed", False))
+            pts = [(float(p[0]), float(p[1])) for p in raw_pts if len(p) >= 2]
+            if len(pts) < 2:
+                return {"status": "error", "message": "A path needs at least two points."}
+            new_ent = msp.add_lwpolyline(pts, dxfattribs={"layer": layer, "closed": closed})
             new_handle = new_ent.dxf.handle
         else:
             return {"status": "error", "message": f"Unsupported entity type: {ent_type}"}
@@ -536,7 +597,7 @@ def op_offset_bbox(args: Dict[str, Any]) -> Dict[str, Any]:
     handles = args.get("handles", [])
     distance = float(args.get("distance", 5.0))
     fillet_radius = float(args.get("fillet_radius", 0.0))
-    layer = args.get("layer", "OFFSET")
+    layer = sanitize_layer_name(args.get("layer", "OFFSET"))
 
     if not input_path or not os.path.exists(input_path):
         return {"status": "error", "message": f"Input file not found: {input_path}"}
@@ -937,13 +998,14 @@ def op_set_layer(args: Dict[str, Any]) -> Dict[str, Any]:
     input_path = args.get("input")
     output_path = args.get("output")
     handles = args.get("handles", [])
-    layer = args.get("layer")
+    layer_raw = args.get("layer")
     if not input_path or not os.path.exists(input_path):
         return {"status": "error", "message": f"Input file not found: {input_path}"}
     if not output_path:
         return {"status": "error", "message": "Output path must be specified."}
-    if not layer:
+    if not layer_raw:
         return {"status": "error", "message": "Layer name must be specified."}
+    layer = sanitize_layer_name(layer_raw)
     doc = ezdxf.readfile(input_path)
     if layer not in doc.layers:
         doc.layers.new(layer)
@@ -1301,6 +1363,7 @@ def op_import_distribute(args: Dict[str, Any]) -> Dict[str, Any]:
     primary_path = args.get("primary")
     output_path = args.get("output")
     secondaries = args.get("secondaries", [])
+    layer_names = args.get("layer_names", [])
     margin_override = args.get("gap")
 
     if not primary_path or not os.path.exists(primary_path):
@@ -1358,7 +1421,8 @@ def op_import_distribute(args: Dict[str, Any]) -> Dict[str, Any]:
             return False
 
         merged = 0
-        for sec_doc, b in loaded:
+        handles_per_file = []   # MAS-76: new handles produced by each secondary
+        for idx, (sec_doc, b) in enumerate(loaded):
             w = b[2] - b[0]
             h = b[3] - b[1]
             fcx = (b[0] + b[2]) / 2.0
@@ -1448,21 +1512,26 @@ def op_import_distribute(args: Dict[str, Any]) -> Dict[str, Any]:
                 B = (best_cx - w/2.0, best_cy - h/2.0, best_cx + w/2.0, best_cy + h/2.0)
                 P.append(B)
 
-            # Merge secondary document layers and entities
+            # Merge secondary document entities to the target layer
+            target_layer = sanitize_layer_name(layer_names[idx] if idx < len(layer_names) else "IMPORTED")
+
+            if target_layer not in primary_doc.layers:
+                primary_doc.layers.new(target_layer)
+
             sec_msp = sec_doc.modelspace()
-            for layer in sec_doc.layers:
-                layer_name = layer.dxf.name
-                if layer_name not in primary_doc.layers:
-                    primary_doc.layers.new(layer_name, dxfattribs={"color": layer.dxf.color})
+            file_handles = []
             for ent in sec_msp:
                 try:
+                    ent.dxf.layer = target_layer
                     primary_msp.add_foreign_entity(ent)
+                    file_handles.append(ent.dxf.handle)
                 except Exception:
                     pass
+            handles_per_file.append(file_handles)
             merged += 1
 
         primary_doc.saveas(output_path)
-        return {"status": "ok", "data": {"merged": merged, "boxes": len(P)}}
+        return {"status": "ok", "data": {"merged": merged, "boxes": len(P), "handles_per_file": handles_per_file}}
     except Exception as e:
         return {"status": "error", "message": f"Failed to distribute import: {str(e)}"}
 
@@ -1506,13 +1575,14 @@ def op_append_dxf(args: Dict[str, Any]) -> Dict[str, Any]:
         # live under `.dxf` (there is no bare `.name`/`.color`) — using the wrong
         # accessor crashed every multi-file merge (MAS-13).
         for layer in secondary_doc.layers:
-            layer_name = layer.dxf.name
+            layer_name = sanitize_layer_name(layer.dxf.name)
             if layer_name not in primary_doc.layers:
                 primary_doc.layers.new(layer_name, dxfattribs={"color": layer.dxf.color})
 
         # Copy entities
         for ent in secondary_msp:
             try:
+                ent.dxf.layer = sanitize_layer_name(ent.dxf.layer)
                 primary_msp.add_foreign_entity(ent)
             except Exception:
                 pass
@@ -1578,6 +1648,7 @@ def op_import_svg(args: Dict[str, Any]) -> Dict[str, Any]:
                         layer_name = current_layer
                 else:
                     layer_name = current_layer
+                layer_name = sanitize_layer_name(layer_name)
                 if layer_name not in doc.layers:
                     doc.layers.new(layer_name)
                 for child in elem:
@@ -1670,6 +1741,14 @@ def op_add_holes(args: Dict[str, Any]) -> Dict[str, Any]:
     enable_variable_spacing = args.get("enable_variable_spacing", True)
     enable_proximity_filter = args.get("enable_proximity_filter", True)
     enable_corner_interpolation = args.get("enable_corner_interpolation", True)
+
+    # Distribution mode (MAS-59): "spacing" fills the contour at a fixed pitch;
+    # "count" places a fixed number of evenly-spaced holes per contour (the pitch
+    # is derived from the contour length, and variable spacing is disabled).
+    distribution = args.get("distribution", "spacing")
+    hole_count = int(args.get("hole_count", 0) or 0)
+    if distribution == "count" and hole_count > 0:
+        enable_variable_spacing = False
     
     # New customizable proximity and variable spacing parameters
     enable_line_proximity_filter = args.get("enable_line_proximity_filter", True)
@@ -1744,9 +1823,10 @@ def op_add_holes(args: Dict[str, Any]) -> Dict[str, Any]:
     hole_centers: List[Tuple[float, float]] = []
     hole_radius = hole_diameter / 2.0
 
-    def check_collision_with_others(p_pt, geoms_list, radius: float, current_path) -> bool:
+    def check_collision_with_others(p_pt, geoms_list, radius: float, og_distances: dict, og_contains_path: dict) -> bool:
         for og in geoms_list:
-            if og.distance(current_path) < 0.05:
+            dist_to_path = og_distances.get(id(og), 9999.0)
+            if dist_to_path < 0.05:
                 continue
             if enable_line_proximity_filter and og.distance(p_pt) < line_proximity_threshold:
                 return True
@@ -1755,9 +1835,9 @@ def op_add_holes(args: Dict[str, Any]) -> Dict[str, Any]:
             if isinstance(og, LinearRing):
                 from shapely.geometry import Polygon
                 try:
-                    poly = Polygon(og)
-                    if poly.contains(current_path):
+                    if og_contains_path.get(id(og), False):
                         continue
+                    poly = Polygon(og)
                     if poly.contains(p_pt):
                         return True
                 except Exception:
@@ -1765,6 +1845,25 @@ def op_add_holes(args: Dict[str, Any]) -> Dict[str, Any]:
         return False
 
     for path in paths:
+        # Precompute path-to-other-geoms distances and containment checks to avoid O(N*M) heavy calculations in the hot loop
+        og_distances = {}
+        og_contains_path = {}
+        for og in other_geoms:
+            try:
+                og_distances[id(og)] = og.distance(path)
+            except Exception:
+                og_distances[id(og)] = 9999.0
+            
+            if isinstance(og, LinearRing):
+                from shapely.geometry import Polygon
+                try:
+                    poly = Polygon(og)
+                    og_contains_path[id(og)] = poly.contains(path)
+                except Exception:
+                    og_contains_path[id(og)] = False
+            else:
+                og_contains_path[id(og)] = False
+
         is_closed = path.is_closed or math.hypot(path.coords[0][0] - path.coords[-1][0], path.coords[0][1] - path.coords[-1][1]) < 0.05
         polygon = None
         if is_closed:
@@ -1835,7 +1934,7 @@ def op_add_holes(args: Dict[str, Any]) -> Dict[str, Any]:
                                         if d_diff > 3.0 * offset_distance:
                                             continue
                                             
-                                    if check_collision_with_others(p_pt, other_geoms, hole_radius, path):
+                                    if check_collision_with_others(p_pt, other_geoms, hole_radius, og_distances, og_contains_path):
                                         continue
                                     if is_internal:
                                         contour_internal_candidates.append(p)
@@ -1867,7 +1966,7 @@ def op_add_holes(args: Dict[str, Any]) -> Dict[str, Any]:
                         if d_diff > 3.0 * offset_distance:
                             continue
                             
-                    if check_collision_with_others(p_pt, other_geoms, hole_radius, path):
+                    if check_collision_with_others(p_pt, other_geoms, hole_radius, og_distances, og_contains_path):
                         continue
                     if is_internal:
                         contour_internal_candidates.append(p)
@@ -1876,8 +1975,35 @@ def op_add_holes(args: Dict[str, Any]) -> Dict[str, Any]:
                 prev_pt = pt
                 prev_normal = normal
                 
-            spacing_internal = select_optimal_spacing(contour_internal_candidates, is_closed, hole_spacing, enable_variable_spacing, variable_spacing_min, variable_spacing_max)
-            spacing_external = select_optimal_spacing(contour_external_candidates, is_closed, hole_spacing, enable_variable_spacing, variable_spacing_min, variable_spacing_max)
+            if distribution == "count" and hole_count > 0:
+                # Even count per contour. Seed the pitch from contour length / count,
+                # then refine: filter_by_density's ">= spacing" test overshoots a
+                # little each step, so we proportionally rescale the pitch a few
+                # times until it yields exactly the requested number of holes.
+                def _spacing_for_count(pts, target):
+                    if target <= 0 or len(pts) < 2:
+                        return hole_spacing
+                    clen = sum(math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1])
+                               for i in range(1, len(pts)))
+                    if clen <= 1e-6:
+                        return hole_spacing
+                    spacing = clen / target
+                    best_spacing, best_err = spacing, None
+                    for _ in range(12):
+                        m = len(filter_by_density(pts, spacing, 0.0))
+                        err = abs(m - target)
+                        # Keep the closest; on a tie prefer not undershooting.
+                        if best_err is None or err < best_err or (err == best_err and m > target):
+                            best_err, best_spacing = err, spacing
+                        if m == target or m == 0:
+                            break
+                        spacing *= float(m) / float(target)
+                    return max(best_spacing, 1e-6)
+                spacing_internal = _spacing_for_count(contour_internal_candidates, hole_count)
+                spacing_external = _spacing_for_count(contour_external_candidates, hole_count)
+            else:
+                spacing_internal = select_optimal_spacing(contour_internal_candidates, is_closed, hole_spacing, enable_variable_spacing, variable_spacing_min, variable_spacing_max)
+                spacing_external = select_optimal_spacing(contour_external_candidates, is_closed, hole_spacing, enable_variable_spacing, variable_spacing_min, variable_spacing_max)
             
             final_internal = filter_by_density(contour_internal_candidates, spacing_internal, shift)
             final_external = filter_by_density(contour_external_candidates, spacing_external, shift)
@@ -2097,6 +2223,7 @@ def op_export_svg(args: Dict[str, Any]) -> Dict[str, Any]:
     import svgwrite
     dwg = svgwrite.Drawing(output_path, size=(width, height), viewBox=f"{svg_min_x} {svg_min_y} {width} {height}")
 
+    used_ids = set()
     for layer_name, entities in layers_data.items():
         try:
             dxf_layer = doc.layers.get(layer_name)
@@ -2105,30 +2232,42 @@ def op_export_svg(args: Dict[str, Any]) -> Dict[str, Any]:
             color_hex = "#ffffff"
 
         # Create SVG Group representing the DXF Layer
-        g = dwg.g(id=f"layer_{layer_name}", stroke=color_hex, fill="none", stroke_width=0.5)
+        # XML ID validation in svgwrite throws ValueError on invalid NCNames (like containing spaces, colons, etc.).
+        # Sanitize layer_name to be a valid XML NCName.
+        import re
+        safe_base = "layer_" + re.sub(r'[^a-zA-Z0-9\-_.]', '_', layer_name)
+        # Ensure uniqueness of IDs within the SVG document
+        safe_id = safe_base
+        counter = 1
+        while safe_id in used_ids:
+            safe_id = f"{safe_base}_{counter}"
+            counter += 1
+        used_ids.add(safe_id)
+
+        g = dwg.g(id=safe_id, stroke=color_hex, fill="none", stroke_width=0.5)
 
         for ent in entities:
             if ent["type"] == "CIRCLE":
                 cx, cy = ent["center"]
                 r = ent["radius"]
-                g.add(dwg.circle(center=(cx, -cy), r=r))
+                g.add(dwg.circle(center=(cx, -cy), r=r, stroke=color_hex))
             else:
                 pts = ent["vertices"]
                 svg_pts = [(p[0], -p[1]) for p in pts]
                 if ent["is_closed"]:
-                    g.add(dwg.polygon(points=svg_pts))
+                    g.add(dwg.polygon(points=svg_pts, stroke=color_hex))
                 else:
-                    g.add(dwg.polyline(points=svg_pts))
+                    g.add(dwg.polyline(points=svg_pts, stroke=color_hex))
         dwg.add(g)
 
     dwg.save()
     return {"status": "ok", "data": {"svg_path": output_path}}
 
 def op_chain_select(args: Dict[str, Any]) -> Dict[str, Any]:
-    """Finds all entity handles geometrically connected to the seed entity (within 0.01mm)."""
+    """Finds all entity handles geometrically connected to the seed entity (within tolerance)."""
     input_path = args.get("input")
     seed_handle = args.get("seed_handle")
-    tolerance = float(args.get("tolerance", 0.01))
+    tolerance = float(args.get("tolerance", 0.1))
 
     if not input_path or not os.path.exists(input_path):
         return {"status": "error", "message": f"Input file not found: {input_path}"}
@@ -2138,18 +2277,28 @@ def op_chain_select(args: Dict[str, Any]) -> Dict[str, Any]:
     doc = ezdxf.readfile(input_path)
     msp = doc.modelspace()
 
-    # Build segment endpoints lookup
+    # Build segment endpoints/vertices lookup
     entity_points = {}
     for ent in msp:
         if ent.dxftype() not in ("LINE", "ARC", "LWPOLYLINE", "SPLINE", "ELLIPSE"):
             continue
         try:
-            path = make_path(ent)
-            start = (path.start.x, path.start.y)
-            end = (path.end.x, path.end.y)
-            entity_points[ent.dxf.handle] = (start, end)
+            if ent.dxftype() in ("LWPOLYLINE", "POLYLINE"):
+                pts = [(p[0], p[1]) for p in (ent.get_points() if hasattr(ent, "get_points") else ent.points)]
+            else:
+                path = make_path(ent)
+                pts = [(path.start.x, path.start.y), (path.end.x, path.end.y)]
+            entity_points[ent.dxf.handle] = pts
         except Exception:
-            pass
+            try:
+                # Fallback for simple line
+                if ent.dxftype() == "LINE":
+                    entity_points[ent.dxf.handle] = [
+                        (ent.dxf.start.x, ent.dxf.start.y),
+                        (ent.dxf.end.x, ent.dxf.end.y)
+                    ]
+            except Exception:
+                pass
 
     if seed_handle not in entity_points:
         return {"status": "ok", "data": {"handles": [seed_handle]}}
@@ -2160,19 +2309,23 @@ def op_chain_select(args: Dict[str, Any]) -> Dict[str, Any]:
 
     while queue:
         curr = queue.pop(0)
-        curr_start, curr_end = entity_points[curr]
+        curr_pts = entity_points[curr]
 
-        for h, (start, end) in entity_points.items():
+        for h, pts in entity_points.items():
             if h in chain:
                 continue
 
-            # Check distance between all endpoint pairs
-            d1 = math.hypot(curr_start[0] - start[0], curr_start[1] - start[1])
-            d2 = math.hypot(curr_start[0] - end[0], curr_start[1] - end[1])
-            d3 = math.hypot(curr_end[0] - start[0], curr_end[1] - start[1])
-            d4 = math.hypot(curr_end[0] - end[0], curr_end[1] - end[1])
+            # Check if any point in curr_pts is close to any point in pts
+            connected = False
+            for cp in curr_pts:
+                for p in pts:
+                    if math.hypot(cp[0] - p[0], cp[1] - p[1]) < tolerance:
+                        connected = True
+                        break
+                if connected:
+                    break
 
-            if min(d1, d2, d3, d4) < tolerance:
+            if connected:
                 chain.add(h)
                 queue.append(h)
 
@@ -2374,6 +2527,233 @@ def op_translate_entities(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"status": "ok"}
     except Exception as e:
         return {"status": "error", "message": f"Failed to translate entities: {str(e)}"}
+
+def op_edit_vertices(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Replaces one entity's vertex geometry in place, preserving its handle,
+    layer, and (for polylines) closed flag. Used by free endpoint/vertex editing
+    of lines and polylines (MAS-62). `vertices` is a list of [x, y]."""
+    input_path = args.get("input")
+    output_path = args.get("output")
+    handle = args.get("handle")
+    vertices = args.get("vertices", [])
+
+    if not input_path or not os.path.exists(input_path):
+        return {"status": "error", "message": f"Input file not found: {input_path}"}
+    if not output_path:
+        return {"status": "error", "message": "Output path must be specified."}
+    if not handle or len(vertices) < 2:
+        return {"status": "error", "message": "A handle and at least two vertices are required."}
+
+    try:
+        doc = ezdxf.readfile(input_path)
+        ent = doc.entitydb.get(handle)
+        if ent is None:
+            return {"status": "error", "message": f"Entity {handle} not found."}
+
+        t = ent.dxftype()
+        if t == "LINE":
+            ent.dxf.start = (float(vertices[0][0]), float(vertices[0][1]))
+            ent.dxf.end = (float(vertices[-1][0]), float(vertices[-1][1]))
+        elif t in ("LWPOLYLINE", "POLYLINE"):
+            pts = [(float(v[0]), float(v[1])) for v in vertices]
+            if hasattr(ent, "set_points"):
+                ent.set_points(pts, format="xy")  # straight segments (bulges cleared)
+            else:
+                ent.points = pts
+        else:
+            return {"status": "error", "message": f"Vertex editing not supported for {t}."}
+
+        doc.saveas(output_path)
+        return {"status": "ok", "data": {"handle": handle}}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to edit vertices: {str(e)}"}
+
+def _v_unit(v):
+    L = math.hypot(v[0], v[1])
+    return (v[0] / L, v[1] / L) if L > 1e-9 else (0.0, 0.0)
+
+def _arc_bulge_3pt(A, B, C):
+    """Bulge for an LWPOLYLINE arc from A to C passing through B (0 if collinear)."""
+    ax, ay = A; bx, by = B; cx, cy = C
+    d = 2.0 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
+    if abs(d) < 1e-12:
+        return 0.0
+    ux = ((ax * ax + ay * ay) * (by - cy) + (bx * bx + by * by) * (cy - ay) + (cx * cx + cy * cy) * (ay - by)) / d
+    uy = ((ax * ax + ay * ay) * (cx - bx) + (bx * bx + by * by) * (ax - cx) + (cx * cx + cy * cy) * (bx - ax)) / d
+    a1 = math.atan2(ay - uy, ax - ux)
+    a2 = math.atan2(cy - uy, cx - ux)
+    da = a2 - a1
+    cross = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+    if cross > 0:
+        while da < 0: da += 2 * math.pi
+    else:
+        while da > 0: da -= 2 * math.pi
+    return math.tan(da / 4.0)
+
+def _corner_tangent(P, V, N, kind, value):
+    """The tangent setback `t` one corner *wants* along each of its edges, before
+    any neighbour clamping: `value/tan(half)` for a fillet, `value` for a chamfer.
+    Capped at the mathematical limit — the shorter adjacent edge (the setback
+    point can't pass the nearer vertex). Returns (t, half) or (0, 0)."""
+    u1 = _v_unit((P[0] - V[0], P[1] - V[1]))
+    u2 = _v_unit((N[0] - V[0], N[1] - V[1]))
+    dot = max(-1.0, min(1.0, u1[0] * u2[0] + u1[1] * u2[1]))
+    phi = math.acos(dot)
+    if phi < 1e-3 or phi > math.pi - 1e-3 or value <= 1e-9:
+        return 0.0, 0.0
+    half = phi / 2.0
+    len1 = math.hypot(P[0] - V[0], P[1] - V[1])
+    len2 = math.hypot(N[0] - V[0], N[1] - V[1])
+    raw = value if kind == "chamfer" else value / math.tan(half)
+    return max(0.0, min(raw, len1, len2)), half
+
+
+def _corner_blend(P, V, N, kind, t, continuity):
+    """Geometry for one corner V between neighbors P and N, given the final
+    tangent setback `t` (already resolved against the mathematical limit and any
+    adjacent blend — see op_apply_corners). Returns (vertices_with_bulge, snaps).
+    (MAS-62, parametric true-arc fillet / biarc G2 / chamfer.)"""
+    u1 = _v_unit((P[0] - V[0], P[1] - V[1]))
+    u2 = _v_unit((N[0] - V[0], N[1] - V[1]))
+    dot = max(-1.0, min(1.0, u1[0] * u2[0] + u1[1] * u2[1]))
+    phi = math.acos(dot)
+    if phi < 1e-3 or phi > math.pi - 1e-3 or t <= 1e-9:
+        return [], []
+    half = phi / 2.0
+
+    if kind == "chamfer":
+        T1 = (V[0] + u1[0] * t, V[1] + u1[1] * t)
+        T2 = (V[0] + u2[0] * t, V[1] + u2[1] * t)
+        mid = ((T1[0] + T2[0]) / 2.0, (T1[1] + T2[1]) / 2.0)
+        return [(T1[0], T1[1], 0.0), (T2[0], T2[1], 0.0)], [("tangent", T1), ("center", mid), ("tangent", T2)]
+
+    # Fillet — true circular arc with tangent setback `t`.
+    r = t * math.tan(half)
+    T1 = (V[0] + u1[0] * t, V[1] + u1[1] * t)
+    T2 = (V[0] + u2[0] * t, V[1] + u2[1] * t)
+    bis = _v_unit((u1[0] + u2[0], u1[1] + u2[1]))
+    cen = (V[0] + bis[0] * (r / math.sin(half)), V[1] + bis[1] * (r / math.sin(half)))
+    a1 = math.atan2(T1[1] - cen[1], T1[0] - cen[0])
+    a2 = math.atan2(T2[1] - cen[1], T2[0] - cen[0])
+    da = a2 - a1
+    while da <= -math.pi: da += 2 * math.pi
+    while da > math.pi: da -= 2 * math.pi
+    midang = a1 + da / 2.0
+    mid = (cen[0] + r * math.cos(midang), cen[1] + r * math.sin(midang))
+    snaps = [("tangent", T1), ("center", mid), ("tangent", T2)]
+
+    if continuity == "G2":
+        # Curvature-eased cubic Bézier, emitted as a short chain of true arcs
+        # (biarc) so the outline stays one clean polyline of real curves.
+        k = 0.62
+        C1 = (T1[0] + (V[0] - T1[0]) * k, T1[1] + (V[1] - T1[1]) * k)
+        C2 = (T2[0] + (V[0] - T2[0]) * k, T2[1] + (V[1] - T2[1]) * k)
+        seg = 8
+        bez = []
+        for i in range(seg + 1):
+            s = i / seg; mt = 1.0 - s
+            bez.append((mt**3 * T1[0] + 3 * mt * mt * s * C1[0] + 3 * mt * s * s * C2[0] + s**3 * T2[0],
+                        mt**3 * T1[1] + 3 * mt * mt * s * C1[1] + 3 * mt * s * s * C2[1] + s**3 * T2[1]))
+        verts = []
+        for j in range(0, seg, 2):
+            verts.append((bez[j][0], bez[j][1], _arc_bulge_3pt(bez[j], bez[j + 1], bez[j + 2])))
+        verts.append((bez[seg][0], bez[seg][1], 0.0))
+        return verts, snaps
+
+    # G1 — single true circular arc.
+    return [(T1[0], T1[1], math.tan(da / 4.0)), (T2[0], T2[1], 0.0)], snaps
+
+def op_apply_corners(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Regenerates a polyline from a parametric corner spec (MAS-62). The shape
+    is defined by a sharp `base` polygon plus per-corner modifiers, so fillets
+    and chamfers stay editable and convertible. Emits TRUE arcs (LWPOLYLINE
+    bulges) — G1 one arc, G2 a biarc chain, chamfer a straight cut — and returns
+    the snap points (each blend: two tangent ends + one center).
+    args: handle, base [[x,y]], closed (bool), corners [{index,kind,value,continuity}]."""
+    input_path = args.get("input")
+    output_path = args.get("output")
+    handle = args.get("handle")
+    base = args.get("base", [])
+    closed = bool(args.get("closed", False))
+    corners = args.get("corners", [])
+
+    if not input_path or not os.path.exists(input_path):
+        return {"status": "error", "message": f"Input file not found: {input_path}"}
+    if not output_path:
+        return {"status": "error", "message": "Output path must be specified."}
+    if not handle or len(base) < 2:
+        return {"status": "error", "message": "A handle and a base polygon are required."}
+
+    try:
+        doc = ezdxf.readfile(input_path)
+        ent = doc.entitydb.get(handle)
+        if ent is None or ent.dxftype() not in ("LWPOLYLINE", "POLYLINE"):
+            return {"status": "error", "message": "Parametric corners require a polyline."}
+
+        base = [(float(p[0]), float(p[1])) for p in base]
+        n = len(base)
+        cmap = {int(c["index"]): c for c in corners if "index" in c}
+
+        def neighbors(i):
+            if closed and n > 2:
+                return base[(i - 1) % n], base[(i + 1) % n]
+            if 0 < i < n - 1:
+                return base[i - 1], base[i + 1]
+            return None
+
+        # Desired tangent each corner wants (capped at its own mathematical limit).
+        dt = [0.0] * n
+        kinds = [None] * n
+        for i in range(n):
+            spec = cmap.get(i)
+            if spec is None or float(spec.get("value", 0.0)) <= 1e-9:
+                continue
+            nb = neighbors(i)
+            if nb is None:
+                continue
+            t, _ = _corner_tangent(nb[0], base[i], nb[1],
+                                   spec.get("kind", "fillet"), float(spec["value"]))
+            dt[i] = t
+            kinds[i] = spec.get("kind", "fillet")
+
+        # Resolve adjacent fillets sharing an edge: they may not overlap. The
+        # larger one keeps its full reach, the smaller stops where it meets it —
+        # so the first/biggest fillet on an edge can grow to the mathematical
+        # limit while its neighbour halts at the contact point (not the midpoint).
+        edges = [(i, (i + 1) % n) for i in range(n)] if (closed and n > 2) else [(i, i + 1) for i in range(n - 1)]
+        for _ in range(2):
+            for a, b in edges:
+                L = math.hypot(base[a][0] - base[b][0], base[a][1] - base[b][1])
+                if dt[a] + dt[b] > L + 1e-9:
+                    if dt[a] >= dt[b]:
+                        dt[b] = max(0.0, L - dt[a])
+                    else:
+                        dt[a] = max(0.0, L - dt[b])
+
+        out = []           # (x, y, bulge)
+        snaps = []         # {x, y, role}
+        for i in range(n):
+            if dt[i] > 1e-9:
+                nb = neighbors(i)
+                spec = cmap.get(i, {})
+                verts, csnaps = _corner_blend(nb[0], base[i], nb[1],
+                                              kinds[i] or "fillet", dt[i],
+                                              spec.get("continuity", "G1"))
+                if verts:
+                    out.extend(verts)
+                    for role, pt in csnaps:
+                        snaps.append({"x": pt[0], "y": pt[1], "role": role})
+                    continue
+            out.append((base[i][0], base[i][1], 0.0))
+            snaps.append({"x": base[i][0], "y": base[i][1], "role": "corner"})
+
+        ent.set_points([(p[0], p[1], p[2]) for p in out], format="xyb")
+        if hasattr(ent, "closed"):
+            ent.closed = closed
+        doc.saveas(output_path)
+        return {"status": "ok", "data": {"handle": handle, "snaps": snaps, "vertex_count": len(out)}}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to apply corners: {str(e)}"}
 
 def op_add_dashed_creases(args: Dict[str, Any]) -> Dict[str, Any]:
     input_path = args.get("input")
@@ -2830,6 +3210,112 @@ def op_rotate_entities(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"status": "error", "message": f"Failed to rotate entities: {str(e)}"}
 
 
+def op_reflect_entities(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Flips the selected entities about their own bounding-box center.
+
+    axis="horizontal" mirrors left/right (negates X about the center);
+    axis="vertical" mirrors top/bottom (negates Y about the center).
+    """
+    input_path = args.get("input")
+    output_path = args.get("output")
+    handles = args.get("handles", [])
+    axis = str(args.get("axis", "horizontal")).lower()
+
+    if not input_path or not os.path.exists(input_path):
+        return {"status": "error", "message": f"Input file not found: {input_path}"}
+    if not output_path:
+        return {"status": "error", "message": "Output path must be specified."}
+    if not handles:
+        return {"status": "error", "message": "No entities selected to reflect."}
+
+    try:
+        doc = ezdxf.readfile(input_path)
+        msp = doc.modelspace()
+        db = doc.entitydb
+
+        # Combined bounding box of the selected entities (in WCS) so the flip
+        # happens about the selection's own center, in place.
+        min_x = min_y = float("inf")
+        max_x = max_y = float("-inf")
+        targets = []
+        for h in handles:
+            if h not in db:
+                continue
+            entity = db[h]
+            targets.append(entity)
+            try:
+                p = make_path(entity)
+                for v in p.flattening(distance=0.1):
+                    min_x = min(min_x, v.x); max_x = max(max_x, v.x)
+                    min_y = min(min_y, v.y); max_y = max(max_y, v.y)
+            except Exception:
+                # Fall back to any explicit start/end points the entity exposes.
+                for attr in ("start", "end", "center"):
+                    pt = getattr(entity.dxf, attr, None)
+                    if pt is not None:
+                        min_x = min(min_x, pt.x); max_x = max(max_x, pt.x)
+                        min_y = min(min_y, pt.y); max_y = max(max_y, pt.y)
+
+        if not targets:
+            return {"status": "error", "message": "Selected handles were not found in the document."}
+        if min_x == float("inf"):
+            return {"status": "error", "message": "Could not determine geometry bounds for the selection."}
+
+        cx = (min_x + max_x) / 2.0
+        cy = (min_y + max_y) / 2.0
+        horizontal = axis == "horizontal"
+
+        def reflect_pt(x: float, y: float) -> Tuple[float, float]:
+            return (2.0 * cx - x, y) if horizontal else (x, 2.0 * cy - y)
+
+        def wcs_center(entity):
+            # CIRCLE/ARC store the center in OCS; only convert when the
+            # extrusion isn't the default +Z (Pathstitch geometry normally is).
+            c = entity.dxf.center
+            ext = tuple(round(v, 9) for v in entity.dxf.extrusion)
+            if ext != (0.0, 0.0, 1.0):
+                c = entity.ocs().to_wcs(c)
+            return c
+
+        sx, sy = (-1.0, 1.0) if horizontal else (1.0, -1.0)
+        m = (Matrix44.translate(-cx, -cy, 0.0)
+             @ Matrix44.scale(sx, sy, 1.0)
+             @ Matrix44.translate(cx, cy, 0.0))
+
+        for entity in targets:
+            et = entity.dxftype()
+            # A reflection is an improper transform, so ezdxf's entity.transform
+            # flips the OCS extrusion to -Z for CIRCLE/ARC. The canvas parser
+            # reads their raw center/angles and ignores the extrusion, which
+            # would place a flipped circle/arc at the mirrored-OCS position.
+            # Reflect those explicitly in WCS and keep a canonical +Z extrusion.
+            if et == "CIRCLE":
+                c = wcs_center(entity)
+                nx, ny = reflect_pt(c.x, c.y)
+                entity.dxf.extrusion = (0.0, 0.0, 1.0)
+                entity.dxf.center = (nx, ny, 0.0)
+            elif et == "ARC":
+                c = wcs_center(entity)
+                ncx, ncy = reflect_pt(c.x, c.y)
+                # Reflecting reverses the CCW sweep, so the new arc runs CCW
+                # from the reflected old end-point to the reflected old start.
+                rs = reflect_pt(entity.start_point.x, entity.start_point.y)
+                re = reflect_pt(entity.end_point.x, entity.end_point.y)
+                new_start = math.degrees(math.atan2(re[1] - ncy, re[0] - ncx)) % 360.0
+                new_end = math.degrees(math.atan2(rs[1] - ncy, rs[0] - ncx)) % 360.0
+                entity.dxf.extrusion = (0.0, 0.0, 1.0)
+                entity.dxf.center = (ncx, ncy, 0.0)
+                entity.dxf.start_angle = new_start
+                entity.dxf.end_angle = new_end
+            else:
+                entity.transform(m)
+
+        doc.saveas(output_path)
+        return {"status": "ok"}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to reflect entities: {str(e)}"}
+
+
 # Module-level dispatch table so both the CLI (`main`) and the persistent
 # worker (`pathstitch_core.worker`) share one source of truth for op routing.
 def op_add_construction_lines(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -2867,6 +3353,740 @@ def op_add_construction_lines(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"status": "error", "message": f"Failed to add construction lines: {str(e)}"}
 
 
+def op_convert_lines(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Replaces straight segments with real styled geometry (MAS-58).
+
+    `segments` is a list of polylines (each a list of [x, y] points). The source
+    entities named in `delete_handles` are removed and the generated geometry is
+    added on `layer`. Styles: dashed, dotted, zigzag, wave, striped, square,
+    triangle. `settings` holds per-style parameters (sensible defaults applied).
+    Generating real geometry guarantees the style survives DXF/SVG/PDF export.
+    """
+    import math
+    input_path = args.get("input")
+    output_path = args.get("output")
+    delete_handles = args.get("delete_handles", [])
+    segments = args.get("segments", [])
+    style = args.get("style", "dashed")
+    settings = args.get("settings", {}) or {}
+    layer = args.get("layer", "0")
+
+    if not input_path or not os.path.exists(input_path):
+        return {"status": "error", "message": f"Input file not found: {input_path}"}
+    if not output_path:
+        return {"status": "error", "message": "Output path must be specified."}
+
+    def f(key, default):
+        try:
+            return float(settings.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    try:
+        doc = ezdxf.readfile(input_path)
+        msp = doc.modelspace()
+        if layer and layer not in doc.layers:
+            try:
+                doc.layers.new(layer)
+            except Exception:
+                pass
+        attribs = {"layer": layer}
+        new_handles = []
+
+        def add_line(a, b):
+            e = msp.add_line(a, b, dxfattribs=attribs)
+            new_handles.append(e.dxf.handle)
+
+        def add_circle(c, r):
+            e = msp.add_circle(c, r, dxfattribs=attribs)
+            new_handles.append(e.dxf.handle)
+
+        def add_poly(pts, closed=False):
+            e = msp.add_lwpolyline(pts, close=closed, dxfattribs=attribs)
+            new_handles.append(e.dxf.handle)
+
+        # Iterate each consecutive point pair of each input polyline.
+        for poly in segments:
+            for i in range(len(poly) - 1):
+                x1, y1 = poly[i][0], poly[i][1]
+                x2, y2 = poly[i + 1][0], poly[i + 1][1]
+                dx, dy = x2 - x1, y2 - y1
+                L = math.hypot(dx, dy)
+                if L < 1e-9:
+                    continue
+                ux, uy = dx / L, dy / L          # unit direction
+                px, py = -uy, ux                 # unit perpendicular
+
+                def at(t):
+                    return (x1 + ux * t, y1 + uy * t)
+
+                if style == "dashed":
+                    dash = max(0.1, f("dash_length", 4.0))
+                    gap = max(0.1, f("gap", 3.0))
+                    t = 0.0
+                    while t < L:
+                        add_line(at(t), at(min(t + dash, L)))
+                        t += dash + gap
+
+                elif style == "dotted":
+                    spacing = max(0.2, f("spacing", 3.0))
+                    r = max(0.05, f("dot_radius", 0.5))
+                    n = max(1, int(round(L / spacing)))
+                    for k in range(n + 1):
+                        add_circle(at(L * k / n), r)
+
+                elif style == "square":
+                    spacing = max(0.3, f("spacing", 4.0))
+                    s = max(0.1, f("size", 1.5)) / 2.0
+                    n = max(1, int(round(L / spacing)))
+                    for k in range(n + 1):
+                        cx, cy = at(L * k / n)
+                        corners = [
+                            (cx + ux * s + px * s, cy + uy * s + py * s),
+                            (cx + ux * s - px * s, cy + uy * s - py * s),
+                            (cx - ux * s - px * s, cy - uy * s - py * s),
+                            (cx - ux * s + px * s, cy - uy * s + py * s),
+                        ]
+                        add_poly([(p[0], p[1]) for p in corners], closed=True)
+
+                elif style == "triangle":
+                    spacing = max(0.3, f("spacing", 5.0))
+                    s = max(0.1, f("size", 2.0))
+                    n = max(1, int(round(L / spacing)))
+                    for k in range(n + 1):
+                        bx, by = at(L * k / n)
+                        tip = (bx + px * s, by + py * s)
+                        left = (bx - ux * (s / 2), by - uy * (s / 2))
+                        right = (bx + ux * (s / 2), by + uy * (s / 2))
+                        add_poly([left, right, tip], closed=True)
+
+                elif style == "zigzag":
+                    wl = max(0.5, f("wavelength", 6.0))
+                    amp = f("amplitude", 2.0)
+                    n = max(2, int(round(L / (wl / 2.0))))
+                    pts = []
+                    for k in range(n + 1):
+                        t = L * k / n
+                        cx, cy = at(t)
+                        off = amp if (k % 2 == 1) else -amp
+                        # endpoints stay on the line for clean joins
+                        if k == 0 or k == n:
+                            off = 0.0
+                        pts.append((cx + px * off, cy + py * off))
+                    add_poly(pts, closed=False)
+
+                elif style == "wave":
+                    wl = max(0.5, f("wavelength", 6.0))
+                    amp = f("amplitude", 2.0)
+                    spw = max(4, int(f("samples_per_wave", 12)))
+                    n = max(spw, int(round(L / wl * spw)))
+                    pts = []
+                    for k in range(n + 1):
+                        t = L * k / n
+                        cx, cy = at(t)
+                        off = amp * math.sin(2.0 * math.pi * t / wl)
+                        pts.append((cx + px * off, cy + py * off))
+                    add_poly(pts, closed=False)
+
+                elif style == "striped":
+                    dash = max(0.1, f("dash_length", 3.0))
+                    gap = max(0.1, f("gap", 3.0))
+                    tilt = math.radians(f("tilt", 45.0))
+                    # direction of each stripe = segment direction rotated by tilt
+                    sdx = ux * math.cos(tilt) - uy * math.sin(tilt)
+                    sdy = ux * math.sin(tilt) + uy * math.cos(tilt)
+                    t = 0.0
+                    while t < L:
+                        mx, my = at(t)
+                        half = dash / 2.0
+                        add_line((mx - sdx * half, my - sdy * half),
+                                 (mx + sdx * half, my + sdy * half))
+                        t += gap
+
+                else:
+                    # Unknown style: keep the original segment as a plain line.
+                    add_line((x1, y1), (x2, y2))
+
+        for h in delete_handles:
+            try:
+                msp.delete_entity(doc.entitydb[h])
+            except KeyError:
+                pass
+
+        doc.saveas(output_path)
+        return {"status": "ok", "data": {"new_handles": new_handles}}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to convert lines: {str(e)}"}
+
+
+def op_scale_entities(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Uniformly scales the given handles about a pivot (cx, cy) by `factor`
+    (MAS-80). Edits in place, preserving handles."""
+    input_path = args.get("input")
+    output_path = args.get("output")
+    handles = args.get("handles", [])
+    factor = float(args.get("factor", 1.0))
+    cx = float(args.get("cx", 0.0))
+    cy = float(args.get("cy", 0.0))
+
+    if not input_path or not os.path.exists(input_path):
+        return {"status": "error", "message": f"Input file not found: {input_path}"}
+    if not output_path:
+        return {"status": "error", "message": "Output path must be specified."}
+    if factor <= 0:
+        return {"status": "error", "message": "Scale factor must be positive."}
+
+    def sc(x, y):
+        return (cx + (x - cx) * factor, cy + (y - cy) * factor)
+
+    try:
+        doc = ezdxf.readfile(input_path)
+        for h in handles:
+            try:
+                ent = doc.entitydb[h]
+            except KeyError:
+                continue
+            t = ent.dxftype()
+            if t == "LINE":
+                ent.dxf.start = sc(ent.dxf.start.x, ent.dxf.start.y)
+                ent.dxf.end = sc(ent.dxf.end.x, ent.dxf.end.y)
+            elif t in ("CIRCLE", "ARC"):
+                ent.dxf.center = sc(ent.dxf.center.x, ent.dxf.center.y)
+                ent.dxf.radius = ent.dxf.radius * factor
+            elif t in ("LWPOLYLINE", "POLYLINE"):
+                pts = []
+                src = ent.get_points() if hasattr(ent, "get_points") else list(ent.points)
+                for p in src:
+                    pl = list(p)
+                    nx, ny = sc(pl[0], pl[1])
+                    pl[0], pl[1] = nx, ny
+                    pts.append(tuple(pl))
+                if hasattr(ent, "set_points"):
+                    ent.set_points(pts)
+                else:
+                    ent.points = pts
+            elif t == "TEXT":
+                ent.dxf.insert = sc(ent.dxf.insert.x, ent.dxf.insert.y)
+                try:
+                    ent.dxf.height = ent.dxf.height * factor
+                except Exception:
+                    pass
+            else:
+                try:
+                    from ezdxf.math import Matrix44
+                    m = (Matrix44.translate(-cx, -cy, 0)
+                         @ Matrix44.scale(factor, factor, 1)
+                         @ Matrix44.translate(cx, cy, 0))
+                    ent.transform(m)
+                except Exception:
+                    pass
+        doc.saveas(output_path)
+        return {"status": "ok"}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to scale entities: {str(e)}"}
+
+
+def op_mirror_entities(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Mirrors the given handles across an arbitrary axis and adds the copies on
+    `layer` (MAS-55). Pure-coordinate reflection (no Matrix44) keeps CIRCLE/ARC
+    centers/angles canonical with +Z extrusion so the raw-reading 2D parser stays
+    correct. When `flip` is false the copy is translated to the mirrored position
+    but not reflected. Returns a [old_handle, new_handle] pair list."""
+    import math
+    input_path = args.get("input")
+    output_path = args.get("output")
+    handles = args.get("handles", [])
+    axis_start = args.get("axis_start", [0.0, 0.0])
+    axis_end = args.get("axis_end", [1.0, 0.0])
+    layer = args.get("layer")
+    flip = bool(args.get("flip", True))
+
+    if not input_path or not os.path.exists(input_path):
+        return {"status": "error", "message": f"Input file not found: {input_path}"}
+    if not output_path:
+        return {"status": "error", "message": "Output path must be specified."}
+
+    px, py = float(axis_start[0]), float(axis_start[1])
+    ex, ey = float(axis_end[0]), float(axis_end[1])
+    theta = math.atan2(ey - py, ex - px)
+    c2, s2 = math.cos(2 * theta), math.sin(2 * theta)
+
+    def reflect(x, y):
+        ox, oy = x - px, y - py
+        rx = c2 * ox + s2 * oy
+        ry = s2 * ox - c2 * oy
+        return (rx + px, ry + py)
+
+    try:
+        doc = ezdxf.readfile(input_path)
+        msp = doc.modelspace()
+        if layer and layer not in doc.layers:
+            try:
+                doc.layers.new(layer)
+            except Exception:
+                pass
+
+        pairs = []
+        for h in handles:
+            try:
+                ent = doc.entitydb[h]
+            except KeyError:
+                continue
+            new = ent.copy()
+            msp.add_entity(new)
+            if layer:
+                new.dxf.layer = layer
+
+            t = new.dxftype()
+
+            # No-mirror mode: translate the copy to the mirrored centroid only.
+            if not flip:
+                b = _entity_bbox(ent)
+                if b is not None:
+                    cx, cy = (b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0
+                    tx, ty = reflect(cx, cy)
+                    try:
+                        new.translate(tx - cx, ty - cy, 0)
+                    except Exception:
+                        pass
+                pairs.append([h, new.dxf.handle])
+                continue
+
+            if t == "LINE":
+                s = reflect(new.dxf.start.x, new.dxf.start.y)
+                e = reflect(new.dxf.end.x, new.dxf.end.y)
+                new.dxf.start = (s[0], s[1])
+                new.dxf.end = (e[0], e[1])
+            elif t == "CIRCLE":
+                cc = reflect(new.dxf.center.x, new.dxf.center.y)
+                new.dxf.center = (cc[0], cc[1])
+                new.dxf.extrusion = (0, 0, 1)
+            elif t == "ARC":
+                # Reflection reverses orientation: the new CCW arc runs from the
+                # reflected old end point to the reflected old start point.
+                old_start = ent.start_point
+                old_end = ent.end_point
+                cc = reflect(new.dxf.center.x, new.dxf.center.y)
+                rs = reflect(old_start.x, old_start.y)
+                re_ = reflect(old_end.x, old_end.y)
+                new.dxf.center = (cc[0], cc[1])
+                new.dxf.extrusion = (0, 0, 1)
+                new.dxf.start_angle = math.degrees(math.atan2(re_[1] - cc[1], re_[0] - cc[0]))
+                new.dxf.end_angle = math.degrees(math.atan2(rs[1] - cc[1], rs[0] - cc[0]))
+            elif t in ("LWPOLYLINE", "POLYLINE"):
+                pts = []
+                src = ent.get_points() if hasattr(ent, "get_points") else list(ent.points)
+                for p in src:
+                    pl = list(p)
+                    rx, ry = reflect(pl[0], pl[1])
+                    pl[0], pl[1] = rx, ry
+                    # Negate the bulge so polyline arcs reflect correctly.
+                    if len(pl) >= 5:
+                        pl[4] = -pl[4]
+                    pts.append(tuple(pl))
+                if hasattr(new, "set_points"):
+                    new.set_points(pts)
+                else:
+                    new.points = pts
+            elif t == "TEXT":
+                ins = reflect(new.dxf.insert.x, new.dxf.insert.y)
+                new.dxf.insert = (ins[0], ins[1])
+                try:
+                    new.dxf.rotation = math.degrees(2 * theta) - (new.dxf.rotation or 0.0)
+                except Exception:
+                    pass
+            else:
+                # Fallback: best-effort matrix reflection.
+                try:
+                    from ezdxf.math import Matrix44
+                    m = (Matrix44.translate(-px, -py, 0)
+                         @ Matrix44((c2, s2, 0, 0), (s2, -c2, 0, 0), (0, 0, 1, 0), (0, 0, 0, 1))
+                         @ Matrix44.translate(px, py, 0))
+                    new.transform(m)
+                except Exception:
+                    pass
+
+            pairs.append([h, new.dxf.handle])
+
+        doc.saveas(output_path)
+        return {"status": "ok", "data": {"pairs": pairs}}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to mirror entities: {str(e)}"}
+
+
+def op_replace_import(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Reloads an imported file from disk in place (MAS-76). Deletes the old
+    handles, re-reads `secondary`, positions it so its bounding-box center matches
+    the old geometry's center (preserving where the user placed it), merges it on
+    `layer`, and returns the new handles."""
+    input_path = args.get("input")
+    output_path = args.get("output")
+    delete_handles = args.get("delete_handles", [])
+    secondary = args.get("secondary")
+    layer = args.get("layer", "0")
+
+    if not input_path or not os.path.exists(input_path):
+        return {"status": "error", "message": f"Input file not found: {input_path}"}
+    if not secondary or not os.path.exists(secondary):
+        return {"status": "error", "message": f"Source file not found: {secondary}"}
+    if not output_path:
+        return {"status": "error", "message": "Output path must be specified."}
+
+    try:
+        doc = ezdxf.readfile(input_path)
+        msp = doc.modelspace()
+
+        # Combined bbox center of the geometry being replaced.
+        old_box = None
+        for h in delete_handles:
+            try:
+                b = _entity_bbox(doc.entitydb[h])
+            except KeyError:
+                b = None
+            if b is None:
+                continue
+            if old_box is None:
+                old_box = list(b)
+            else:
+                old_box[0] = min(old_box[0], b[0]); old_box[1] = min(old_box[1], b[1])
+                old_box[2] = max(old_box[2], b[2]); old_box[3] = max(old_box[3], b[3])
+        target_cx = (old_box[0] + old_box[2]) / 2.0 if old_box else 0.0
+        target_cy = (old_box[1] + old_box[3]) / 2.0 if old_box else 0.0
+
+        for h in delete_handles:
+            try:
+                msp.delete_entity(doc.entitydb[h])
+            except KeyError:
+                pass
+
+        sec = ezdxf.readfile(secondary)
+        sec_box = robust_shape_bounds(sec.modelspace())
+        if sec_box is not None:
+            sec_cx = (sec_box[0] + sec_box[2]) / 2.0
+            sec_cy = (sec_box[1] + sec_box[3]) / 2.0
+            translate_doc(sec, target_cx - sec_cx, target_cy - sec_cy)
+
+        layer = sanitize_layer_name(layer)
+        if layer not in doc.layers:
+            doc.layers.new(layer)
+
+        new_handles = []
+        for ent in sec.modelspace():
+            try:
+                ent.dxf.layer = layer
+                msp.add_foreign_entity(ent)
+                new_handles.append(ent.dxf.handle)
+            except Exception:
+                pass
+
+        doc.saveas(output_path)
+        return {"status": "ok", "data": {"new_handles": new_handles}}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to reload import: {str(e)}"}
+
+
+def op_duplicate_entities(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Duplicates the given entity handles, offsetting each copy by (dx, dy).
+    Returns the new handles so the UI can select the copies (MAS-77)."""
+    input_path = args.get("input")
+    output_path = args.get("output")
+    handles = args.get("handles", [])
+    dx = float(args.get("dx", 0.0))
+    dy = float(args.get("dy", 0.0))
+
+    if not input_path or not os.path.exists(input_path):
+        return {"status": "error", "message": f"Input file not found: {input_path}"}
+    if not output_path:
+        return {"status": "error", "message": "Output path must be specified."}
+
+    try:
+        doc = ezdxf.readfile(input_path)
+        msp = doc.modelspace()
+        new_handles = []
+        for h in handles:
+            try:
+                ent = doc.entitydb[h]
+            except KeyError:
+                continue
+            new = ent.copy()
+            msp.add_entity(new)
+            try:
+                new.translate(dx, dy, 0)
+            except Exception:
+                # Fallback for entity types without a generic translate().
+                try:
+                    if new.dxftype() == "LINE":
+                        new.dxf.start = (new.dxf.start.x + dx, new.dxf.start.y + dy)
+                        new.dxf.end = (new.dxf.end.x + dx, new.dxf.end.y + dy)
+                    elif new.dxftype() in ("CIRCLE", "ARC"):
+                        new.dxf.center = (new.dxf.center.x + dx, new.dxf.center.y + dy)
+                    elif new.dxftype() == "TEXT":
+                        new.dxf.insert = (new.dxf.insert.x + dx, new.dxf.insert.y + dy)
+                except Exception:
+                    pass
+            new_handles.append(new.dxf.handle)
+        doc.saveas(output_path)
+        return {"status": "ok", "data": {"new_handles": new_handles}}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to duplicate entities: {str(e)}"}
+
+
+def op_join_lines(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Joins two straight LINE entities that share a near-coincident endpoint into
+    one open editable LWPOLYLINE [far_A, corner, far_B]. Used so the Fillet/Chamfer
+    tools work on a corner built from two separate lines (imported geometry, two
+    sketched lines, etc.). The corner becomes index 1 of the returned base polygon
+    so the existing parametric corner machinery can blend it.
+    args: input, output, point [x, y], tol (model units, optional)."""
+    input_path = args.get("input")
+    output_path = args.get("output")
+    point = args.get("point")
+    tol = float(args.get("tol", 5.0))
+
+    if not input_path or not os.path.exists(input_path):
+        return {"status": "error", "message": f"Input file not found: {input_path}"}
+    if not output_path:
+        return {"status": "error", "message": "Output path must be specified."}
+    if not point or len(point) < 2:
+        return {"status": "error", "message": "A click point is required."}
+
+    px, py = float(point[0]), float(point[1])
+    try:
+        doc = ezdxf.readfile(input_path)
+        msp = doc.modelspace()
+
+        # Each candidate: (dist_to_click, handle, near_point, far_point, layer)
+        cands = []
+        for ent in msp.query("LINE"):
+            s = (float(ent.dxf.start.x), float(ent.dxf.start.y))
+            e = (float(ent.dxf.end.x), float(ent.dxf.end.y))
+            ds = math.hypot(s[0] - px, s[1] - py)
+            de = math.hypot(e[0] - px, e[1] - py)
+            if ds <= de:
+                near, far, d = s, e, ds
+            else:
+                near, far, d = e, s, de
+            if d <= tol:
+                cands.append((d, ent.dxf.handle, near, far, ent.dxf.layer))
+
+        if len(cands) < 2:
+            return {"status": "error",
+                    "message": "Click nearer the corner where two lines meet."}
+
+        cands.sort(key=lambda c: c[0])
+        a, b = cands[0], cands[1]
+        # The shared corner is the average of the two near endpoints (snapped).
+        corner = ((a[2][0] + b[2][0]) / 2.0, (a[2][1] + b[2][1]) / 2.0)
+        far_a, far_b = a[3], b[3]
+        layer = a[4]
+
+        # Replace the two lines with one open polyline through the corner.
+        for h in (a[1], b[1]):
+            try:
+                msp.delete_entity(doc.entitydb[h])
+            except KeyError:
+                pass
+        new_ent = msp.add_lwpolyline([far_a, corner, far_b],
+                                     dxfattribs={"layer": layer, "closed": False})
+        base = [[far_a[0], far_a[1]], [corner[0], corner[1]], [far_b[0], far_b[1]]]
+        doc.saveas(output_path)
+        return {"status": "ok",
+                "data": {"handle": new_ent.dxf.handle, "base": base, "closed": False}}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to join lines: {str(e)}"}
+
+
+def _trim_intersection_params(p0, p1, msp, target_handle):
+    """All intersection parameters t in (0,1) of segment p0->p1 with every other
+    LINE / LWPOLYLINE / POLYLINE edge and CIRCLE in the modelspace. Used by the
+    Trim tool to cut a line at its crossings (MAS-98)."""
+    rx, ry = p1[0] - p0[0], p1[1] - p0[1]
+    rr = rx * rx + ry * ry
+    if rr < 1e-12:
+        return []
+    ts = []
+
+    def seg_t(q0, q1):
+        sx, sy = q1[0] - q0[0], q1[1] - q0[1]
+        denom = rx * sy - ry * sx
+        if abs(denom) < 1e-12:
+            return None
+        qpx, qpy = q0[0] - p0[0], q0[1] - p0[1]
+        t = (qpx * sy - qpy * sx) / denom
+        u = (qpx * ry - qpy * rx) / denom
+        if -1e-9 <= t <= 1 + 1e-9 and -1e-9 <= u <= 1 + 1e-9:
+            return t
+        return None
+
+    def poly_points(ent):
+        if ent.dxftype() == "LWPOLYLINE":
+            pts = [(p[0], p[1]) for p in ent.get_points("xy")]
+            closed = bool(ent.closed)
+        else:
+            pts = [(v.dxf.location.x, v.dxf.location.y) for v in ent.vertices]
+            closed = bool(ent.is_closed)
+        return pts, closed
+
+    for ent in msp:
+        if ent.dxf.handle == target_handle:
+            continue
+        et = ent.dxftype()
+        if et == "LINE":
+            t = seg_t((ent.dxf.start.x, ent.dxf.start.y),
+                      (ent.dxf.end.x, ent.dxf.end.y))
+            if t is not None:
+                ts.append(t)
+        elif et in ("LWPOLYLINE", "POLYLINE"):
+            try:
+                pts, closed = poly_points(ent)
+            except Exception:
+                continue
+            edges = list(zip(pts, pts[1:]))
+            if closed and len(pts) > 2:
+                edges.append((pts[-1], pts[0]))
+            for q0, q1 in edges:
+                t = seg_t(q0, q1)
+                if t is not None:
+                    ts.append(t)
+        elif et == "CIRCLE":
+            cx, cy = ent.dxf.center.x, ent.dxf.center.y
+            R = ent.dxf.radius
+            fx, fy = p0[0] - cx, p0[1] - cy
+            a = rr
+            b = 2.0 * (fx * rx + fy * ry)
+            c = fx * fx + fy * fy - R * R
+            disc = b * b - 4 * a * c
+            if disc >= 0:
+                sq = math.sqrt(disc)
+                for t in ((-b - sq) / (2 * a), (-b + sq) / (2 * a)):
+                    if 1e-9 < t < 1 - 1e-9:
+                        ts.append(t)
+    # Keep only strictly-interior, de-duplicated parameters.
+    ts = sorted(t for t in ts if 1e-6 < t < 1 - 1e-6)
+    dedup = []
+    for t in ts:
+        if not dedup or abs(t - dedup[-1]) > 1e-6:
+            dedup.append(t)
+    return dedup
+
+
+def _host_points(ent):
+    """(points, closed) for a trimmable host entity, or None."""
+    et = ent.dxftype()
+    if et == "LINE":
+        return [(float(ent.dxf.start.x), float(ent.dxf.start.y)),
+                (float(ent.dxf.end.x), float(ent.dxf.end.y))], False
+    if et == "LWPOLYLINE":
+        return [(float(p[0]), float(p[1])) for p in ent.get_points("xy")], bool(ent.closed)
+    if et == "POLYLINE":
+        return [(float(v.dxf.location.x), float(v.dxf.location.y)) for v in ent.vertices], bool(ent.is_closed)
+    return None
+
+
+def _emit_path(msp, pts, layer):
+    """Adds a surviving trim fragment as a LINE (2 pts) or open LWPOLYLINE (>2),
+    skipping degenerate <2-point fragments. Returns the new handle or None."""
+    pts = [p for p in pts]
+    if len(pts) < 2:
+        return None
+    if len(pts) == 2:
+        return msp.add_line(pts[0], pts[1], dxfattribs={"layer": layer}).dxf.handle
+    return msp.add_lwpolyline(pts, dxfattribs={"layer": layer, "closed": False}).dxf.handle
+
+
+def op_trim_segment(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Fusion-style trim (MAS-98). Cuts the target entity's clicked edge at every
+    intersection with other geometry and removes only the sub-segment under the
+    cursor. Works on a LINE or any polyline edge: an end piece shortens, an interior
+    piece splits, a closed shape opens, and a fully-bounded-free piece deletes that
+    span. args: input, output, handle, seg_index (edge of a polyline; 0 for a line),
+    point [x, y]."""
+    input_path = args.get("input")
+    output_path = args.get("output")
+    handle = args.get("handle")
+    point = args.get("point")
+    seg_index = int(args.get("seg_index", 0))
+
+    if not input_path or not os.path.exists(input_path):
+        return {"status": "error", "message": f"Input file not found: {input_path}"}
+    if not output_path:
+        return {"status": "error", "message": "Output path must be specified."}
+    if not handle or not point or len(point) < 2:
+        return {"status": "error", "message": "A handle and click point are required."}
+
+    try:
+        doc = ezdxf.readfile(input_path)
+        msp = doc.modelspace()
+        ent = doc.entitydb.get(handle)
+        if ent is None:
+            return {"status": "error", "message": f"Entity {handle} not found."}
+        host = _host_points(ent)
+        if host is None:
+            return {"status": "error", "message": "Trim works on lines and polylines."}
+        pts, closed = host
+        m = len(pts)
+        if m < 2:
+            return {"status": "error", "message": "Nothing to trim."}
+
+        edge_count = m if (closed and m > 2) else m - 1
+        seg_index = max(0, min(seg_index, edge_count - 1))
+        layer = ent.dxf.layer
+        A = pts[seg_index]
+        B = pts[(seg_index + 1) % m]
+        rx, ry = B[0] - A[0], B[1] - A[1]
+        rr = rx * rx + ry * ry
+        if rr < 1e-12:
+            return {"status": "error", "message": "Degenerate edge."}
+
+        # Click parameter along the clicked edge, and the cut interval around it.
+        t_click = max(0.0, min(1.0, ((float(point[0]) - A[0]) * rx + (float(point[1]) - A[1]) * ry) / rr))
+        cuts = _trim_intersection_params(A, B, msp, handle)
+        bounds = [0.0] + cuts + [1.0]
+        lo, hi = 0.0, 1.0
+        for i in range(len(bounds) - 1):
+            if bounds[i] <= t_click <= bounds[i + 1]:
+                lo, hi = bounds[i], bounds[i + 1]
+                break
+
+        def at(t):
+            return (A[0] + rx * t, A[1] + ry * t)
+
+        msp.delete_entity(ent)
+        new_handles = []
+
+        if closed and m > 2:
+            # Removing one piece opens the loop: walk from the vertex after the cut
+            # edge all the way around to the cut edge's start vertex.
+            seq = [pts[(seg_index + 1 + k) % m] for k in range(m)]
+            path = []
+            if hi < 1 - 1e-6:
+                path.append(at(hi))
+            path += seq
+            if lo > 1e-6:
+                path.append(at(lo))
+            h = _emit_path(msp, path, layer)
+            if h:
+                new_handles.append(h)
+        else:
+            # Open host (line or open polyline): keep the path before and after.
+            left = list(pts[:seg_index + 1])
+            if lo > 1e-6:
+                left.append(at(lo))
+            right = []
+            if hi < 1 - 1e-6:
+                right.append(at(hi))
+            right += list(pts[seg_index + 1:])
+            for frag in (left, right):
+                h = _emit_path(msp, frag, layer)
+                if h:
+                    new_handles.append(h)
+
+        doc.saveas(output_path)
+        return {"status": "ok", "data": {"new_handles": new_handles}}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to trim: {str(e)}"}
+
+
 OPERATIONS = {
     "list_entities": op_list_entities,
     "offset_lines": op_offset_lines,
@@ -2883,7 +4103,10 @@ OPERATIONS = {
     "import_pdf": op_import_pdf,
     "trace_raster": op_trace_raster,
     "translate_entities": op_translate_entities,
+    "edit_vertices": op_edit_vertices,
+    "apply_corners": op_apply_corners,
     "rotate_entities": op_rotate_entities,
+    "reflect_entities": op_reflect_entities,
     "append_dxf": op_append_dxf,
     "import_distribute": op_import_distribute,
     "normalize_dxf": op_normalize_dxf,
@@ -2895,8 +4118,15 @@ OPERATIONS = {
     "add_text": op_add_text,
     "update_text": op_update_text,
     "delete_entities": op_delete_entities,
+    "duplicate_entities": op_duplicate_entities,
+    "convert_lines": op_convert_lines,
+    "replace_import": op_replace_import,
+    "mirror_entities": op_mirror_entities,
+    "scale_entities": op_scale_entities,
     "new_dxf": op_new_dxf,
     "add_construction_lines": op_add_construction_lines,
+    "join_lines": op_join_lines,
+    "trim_segment": op_trim_segment,
 }
 
 

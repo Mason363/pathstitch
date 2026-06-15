@@ -46,6 +46,17 @@ struct ThreeDViewport: NSViewRepresentable {
     let selectedFaces3D: Set<SelectedFace>
     let stepJsonContent: String?
     let bodies3D: [Body3D]
+    
+    let isPlaneSelectionActive: Bool
+    let planeSelectionModeType: String
+    let selectedProjectionPlane: String?
+    let selectedProjectionFaceIndex: Int?
+    let selectedProjectionBodyIndex: Int?
+    let planeOffset: Double
+    let threeDOrthographic: Bool
+    let triggerCameraAnimationToken: Int
+    let triggerHomeFrameToken: Int
+
     var state: AppState
     
     func makeCoordinator() -> Coordinator {
@@ -79,6 +90,9 @@ struct ThreeDViewport: NSViewRepresentable {
         context.coordinator.updateModel()
         context.coordinator.updateSelection()
         context.coordinator.updateBodyVisibilities()
+        context.coordinator.updatePlaneSelectionState()
+        context.coordinator.updateOrthographicMode()
+        context.coordinator.updateHomeFrame()
     }
 }
 
@@ -89,7 +103,18 @@ class Coordinator: NSObject, WKScriptMessageHandler {
     private var isWebViewReady = false
     private var lastLoadedModelPath: String?
     private var lastSelectedJson: String = ""
+    private var lastSelectedFaces: Set<SelectedFace> = []
     private var lastBodyVisibilities: [Int: Bool] = [:]
+    
+    private var lastPlaneSelectionActive = false
+    private var lastPlaneSelectionModeType = "origin"
+    private var lastSelectedProjectionPlane: String? = nil
+    private var lastSelectedProjectionFaceIndex: Int? = nil
+    private var lastSelectedProjectionBodyIndex: Int? = nil
+    private var lastPlaneOffset: Double = 0.0
+    private var lastTriggerCameraAnimationToken = 0
+    private var lastTriggerHomeFrameToken = 0
+    private var lastThreeDOrthographic = false
     
     init(state: AppState) {
         self.state = state
@@ -111,6 +136,11 @@ class Coordinator: NSObject, WKScriptMessageHandler {
                 self.updateModel()
                 self.updateSelection()
                 self.updateBodyVisibilities()
+                self.updatePlaneSelectionState()
+                
+                // Force update orthographic mode
+                self.lastThreeDOrthographic = !self.state.threeDOrthographic
+                self.updateOrthographicMode()
             }
         } else if op == "selectFace" {
             let bodyIndex = json["bodyIndex"] as? Int ?? 0
@@ -133,6 +163,88 @@ class Coordinator: NSObject, WKScriptMessageHandler {
             DispatchQueue.main.async {
                 self.state.selectedFaces3D.removeAll()
             }
+        } else if op == "selectProjectionPlane" {
+            let plane = json["plane"] as? String ?? "XY"
+            DispatchQueue.main.async {
+                self.state.selectedProjectionPlane = plane
+            }
+        } else if op == "selectProjectionFace" {
+            let bodyIdx = json["bodyIndex"] as? Int ?? 0
+            let faceIdx = json["faceIndex"] as? Int ?? 0
+            let norm = json["normal"] as? [Double]
+            let orig = json["origin"] as? [Double]
+            DispatchQueue.main.async {
+                self.state.selectedProjectionPlane = "face"
+                self.state.selectedProjectionFaceIndex = faceIdx
+                self.state.selectedProjectionBodyIndex = bodyIdx
+                self.state.selectedProjectionFaceNormal = norm
+                self.state.selectedProjectionFaceOrigin = orig
+            }
+        } else if op == "updateOffset" {
+            let offset = json["offset"] as? Double ?? 0.0
+            DispatchQueue.main.async {
+                self.state.planeOffset = offset
+                self.lastPlaneOffset = offset
+            }
+        } else if op == "confirmProjection" {
+            DispatchQueue.main.async {
+                self.state.confirmPlaneProjection()
+            }
+        } else if op == "cameraAnimationComplete" {
+            DispatchQueue.main.async {
+                self.state.executeProjection()
+            }
+        } else if op == "consoleError" {
+            let msg = json["message"] as? String ?? ""
+            let src = json["source"] as? String ?? ""
+            let line = json["lineno"] as? Int ?? 0
+            let col = json["colno"] as? Int ?? 0
+            let stack = json["error"] as? String ?? ""
+            print("🔴 JS ERROR: \(msg) at \(src):\(line):\(col)\n\(stack)")
+        }
+    }
+    
+    func updatePlaneSelectionState() {
+        guard isWebViewReady, let webView = webView else { return }
+        
+        let active = state.isPlaneSelectionActive
+        let modeType = state.planeSelectionModeType
+        let selPlane = state.selectedProjectionPlane ?? ""
+        let selFaceIdx = state.selectedProjectionFaceIndex ?? -1
+        let selBodyIdx = state.selectedProjectionBodyIndex ?? -1
+        let offset = state.planeOffset
+        
+        if lastPlaneSelectionActive != active ||
+           lastPlaneSelectionModeType != modeType ||
+           lastSelectedProjectionPlane != selPlane ||
+           lastSelectedProjectionFaceIndex != selFaceIdx ||
+           lastSelectedProjectionBodyIndex != selBodyIdx ||
+           lastPlaneOffset != offset {
+            
+            lastPlaneSelectionActive = active
+            lastPlaneSelectionModeType = modeType
+            lastSelectedProjectionPlane = selPlane
+            lastSelectedProjectionFaceIndex = selFaceIdx
+            lastSelectedProjectionBodyIndex = selBodyIdx
+            lastPlaneOffset = offset
+            
+            let js = "setPlaneSelectionState(\(active ? "true" : "false"), '\(modeType)', '\(selPlane)', \(selFaceIdx), \(selBodyIdx), \(offset));"
+            webView.evaluateJavaScript(js, completionHandler: nil)
+        }
+        
+        if lastTriggerCameraAnimationToken != state.triggerCameraAnimationToken {
+            lastTriggerCameraAnimationToken = state.triggerCameraAnimationToken
+            let js = "animateCameraToPlane();"
+            webView.evaluateJavaScript(js, completionHandler: nil)
+        }
+    }
+
+    /// Recenters/optimally frames the 3D model when the Home button is pressed.
+    func updateHomeFrame() {
+        guard isWebViewReady, let webView = webView else { return }
+        if lastTriggerHomeFrameToken != state.triggerHomeFrameToken {
+            lastTriggerHomeFrameToken = state.triggerHomeFrameToken
+            webView.evaluateJavaScript("recenterCamera();", completionHandler: nil)
         }
     }
     
@@ -142,6 +254,7 @@ class Coordinator: NSObject, WKScriptMessageHandler {
         
         if lastLoadedModelPath != modelPath {
             lastLoadedModelPath = modelPath
+            lastSelectedFaces.removeAll() // Force selection update for the new model
             
             // Re-initialize body visibilities tracking
             lastBodyVisibilities.removeAll()
@@ -162,18 +275,22 @@ class Coordinator: NSObject, WKScriptMessageHandler {
     func updateSelection() {
         guard isWebViewReady, let webView = webView else { return }
         
-        let array = Array(state.selectedFaces3D).map { ["bodyIndex": $0.bodyIndex, "faceIndex": $0.faceIndex] }
+        let currentSelection = state.selectedFaces3D
+        if lastSelectedFaces == currentSelection {
+            return
+        }
+        lastSelectedFaces = currentSelection
+        
+        let array = Array(currentSelection).map { ["bodyIndex": $0.bodyIndex, "faceIndex": $0.faceIndex] }
         guard let jsonData = try? JSONSerialization.data(withJSONObject: array),
               let jsonStr = String(data: jsonData, encoding: .utf8) else {
             return
         }
         
-        if lastSelectedJson != jsonStr {
-            lastSelectedJson = jsonStr
-            let escapedStr = jsonStr.replacingOccurrences(of: "\"", with: "\\\"")
-            let js = "setSelectedFaces(\"\(escapedStr)\");"
-            webView.evaluateJavaScript(js, completionHandler: nil)
-        }
+        lastSelectedJson = jsonStr
+        let escapedStr = jsonStr.replacingOccurrences(of: "\"", with: "\\\"")
+        let js = "setSelectedFaces(\"\(escapedStr)\");"
+        webView.evaluateJavaScript(js, completionHandler: nil)
     }
     
     func updateBodyVisibilities() {
@@ -187,6 +304,16 @@ class Coordinator: NSObject, WKScriptMessageHandler {
                 let js = "setBodyVisibility(\(idx), \(visible ? "true" : "false"));"
                 webView.evaluateJavaScript(js, completionHandler: nil)
             }
+        }
+    }
+    
+    func updateOrthographicMode() {
+        guard isWebViewReady, let webView = webView else { return }
+        let ortho = state.threeDOrthographic
+        if lastThreeDOrthographic != ortho {
+            lastThreeDOrthographic = ortho
+            let js = "setOrthographicMode(\(ortho ? "true" : "false"));"
+            webView.evaluateJavaScript(js, completionHandler: nil)
         }
     }
 }

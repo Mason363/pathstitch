@@ -29,6 +29,9 @@
 			<key>QLSupportedContentTypes</key>
 			<array>
 				<string>com.chen.pathstitch.stch</string>
+				<string>com.autodesk.dxf</string>
+				<string>public.dxf</string>
+				<string>com.pathstitch.step</string>
 			</array>
 		</dict>
 		<key>NSExtensionPointIdentifier</key>

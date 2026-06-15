@@ -10,7 +10,9 @@ from typing import List, Tuple, Dict, Any
 import ezdxf
 
 from OCC.Core.BRepAdaptor import BRepAdaptor_Surface
-from OCC.Core.GeomAbs import GeomAbs_Plane, GeomAbs_Cylinder, GeomAbs_Cone
+from OCC.Core.GeomAdaptor import GeomAdaptor_Curve
+from OCC.Core.Geom2dAdaptor import Geom2dAdaptor_Curve
+from OCC.Core.GeomAbs import GeomAbs_Plane, GeomAbs_Cylinder, GeomAbs_Cone, GeomAbs_Line
 from OCC.Core.BRep import BRep_Tool
 from OCC.Core.TopExp import TopExp_Explorer
 from OCC.Core.TopAbs import TopAbs_EDGE
@@ -55,9 +57,15 @@ def unfold_planar_face(face) -> List[List[Tuple[float, float]]]:
         if not curve3d:
             continue
             
+        # Check if the curve is a straight line to optimize sampling density
+        try:
+            is_line = (GeomAdaptor_Curve(curve3d).GetType() == GeomAbs_Line)
+        except Exception:
+            is_line = False
+            
         # Discretize
         pts = []
-        samples = 30
+        samples = 1 if is_line else 30
         for i in range(samples + 1):
             t = u_start + (u_end - u_start) * (i / samples)
             p3d = curve3d.Value(t)
@@ -92,8 +100,14 @@ def unfold_cylindrical_face(face) -> List[List[Tuple[float, float]]]:
         if not curve2d:
             continue
             
+        # Check if the UV curve is a straight line to optimize sampling density
+        try:
+            is_line = (Geom2dAdaptor_Curve(curve2d).GetType() == GeomAbs_Line)
+        except Exception:
+            is_line = False
+            
         pts = []
-        samples = 30
+        samples = 1 if is_line else 30
         for i in range(samples + 1):
             t = u_start + (u_end - u_start) * (i / samples)
             p2d = curve2d.Value(t)
@@ -128,14 +142,29 @@ def unfold_conical_face(face) -> List[List[Tuple[float, float]]]:
         curve2d, u_start, u_end = BRep_Tool.CurveOnSurface(edge, face)
         if not curve2d:
             continue
-            
+
+        # The cone unrolling is a nonlinear polar transform (x = L*cos(theta),
+        # y = L*sin(theta) with theta = u*sin(alpha)), so a straight line in UV
+        # space is only a straight line in the unrolled plane when the angular
+        # coordinate u is constant (a radial generator). Edges where u varies
+        # (e.g. circular cross-sections, v = const) become arcs and must keep
+        # full discretization. Only collapse genuinely radial straight edges.
+        is_straight_output = False
+        try:
+            if Geom2dAdaptor_Curve(curve2d).GetType() == GeomAbs_Line:
+                u0 = curve2d.Value(u_start).X()
+                u1 = curve2d.Value(u_end).X()
+                is_straight_output = abs(u1 - u0) < 1e-9
+        except Exception:
+            is_straight_output = False
+
         pts = []
-        samples = 30
+        samples = 1 if is_straight_output else 30
         for i in range(samples + 1):
             t = u_start + (u_end - u_start) * (i / samples)
             p2d = curve2d.Value(t)
             u, v = p2d.X(), p2d.Y()
-            
+
             # L is distance from apex along generator line
             L = R / math.sin(alpha) + v
             # Theta is angle in the unrolled plane

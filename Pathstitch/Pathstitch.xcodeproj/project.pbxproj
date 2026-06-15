@@ -14,6 +14,7 @@
 		74FEA97E2FD2EDA10066B988 /* ZIPFoundation in Frameworks */ = {isa = PBXBuildFile; productRef = 340761E66F24C26A57C2A6F6 /* ZIPFoundation */; };
 		74FEA97F2FD2EDA10066B988 /* (null) in Frameworks */ = {isa = PBXBuildFile; };
 		74FEA9802FD2EDA10066B988 /* ZIPFoundation in Frameworks */ = {isa = PBXBuildFile; productRef = 340761E66F24C26A57C2A6F6 /* ZIPFoundation */; };
+		74FEA9A02FD2EDA10066B988 /* ZIPFoundation in Frameworks */ = {isa = PBXBuildFile; productRef = 340761E66F24C26A57C2A6F6 /* ZIPFoundation */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -109,6 +110,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				74FEA9A02FD2EDA10066B988 /* ZIPFoundation in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -215,6 +217,7 @@
 			);
 			name = DxfPreviewer;
 			packageProductDependencies = (
+				340761E66F24C26A57C2A6F6 /* ZIPFoundation */,
 			);
 			productName = DxfPreviewer;
 			productReference = 74B6C8012FD0B0DF0025AB94 /* DxfPreviewer.appex */;

@@ -11,17 +11,10 @@ struct WelcomeView: View {
             VStack(spacing: 20) {
                 // App Icon / Logo & Version
                 VStack(spacing: 8) {
-                    if let logo = NSImage(named: "Logo") {
-                        Image(nsImage: logo)
-                            .resizable()
-                            .aspectRatio(contentMode: .fit)
-                            .frame(width: 48, height: 48)
-                    } else {
-                        Image(nsImage: NSApp.applicationIconImage)
-                            .resizable()
-                            .aspectRatio(contentMode: .fit)
-                            .frame(width: 48, height: 48)
-                    }
+                    Image(nsImage: NSApp.applicationIconImage)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 48, height: 48)
                     
                     Text("Pathstitch")
                         .font(.system(size: 13, weight: .bold))

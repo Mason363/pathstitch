@@ -65,13 +65,14 @@ def _surface_kind(face) -> str:
     return "Other"
 
 
-def _uv_mapper(face, kind):
+def _uv_mapper(face, kind, surf=None):
     """Returns fn(u, v) -> (x, y), an isometry from the surface to the plane.
 
     Plane UV is already Cartesian; cylinder unrolls by arc length (R·u, v);
     cone unrolls into a circular sector around its apex.
     """
-    surf = BRepAdaptor_Surface(face)
+    if surf is None:
+        surf = BRepAdaptor_Surface(face)
     if kind == "Plane":
         return lambda u, v: (u, v)
     if kind == "Cylinder":
@@ -94,7 +95,7 @@ def _uv_mapper(face, kind):
     raise ValueError(f"Not developable: {kind}")
 
 
-def _sample_edge(edge, face, mapper) -> Optional[Dict[str, Any]]:
+def _sample_edge(edge, face, mapper, surf=None) -> Optional[Dict[str, Any]]:
     """Samples one edge of `face`: matched lists of 2D (unfolded) and 3D points."""
     try:
         curve2d, t0, t1 = BRep_Tool.CurveOnSurface(edge, face)
@@ -102,7 +103,8 @@ def _sample_edge(edge, face, mapper) -> Optional[Dict[str, Any]]:
         return None
     if curve2d is None:
         return None
-    surf = BRepAdaptor_Surface(face)
+    if surf is None:
+        surf = BRepAdaptor_Surface(face)
     pts2d: List[Tuple[float, float]] = []
     pts3d: List[Tuple[float, float, float]] = []
     for i in range(EDGE_SAMPLES + 1):
@@ -198,7 +200,7 @@ def _face_area(face) -> float:
     return g.Mass()
 
 
-def _outer_wire_polygon(face, mapper) -> List[Tuple[float, float]]:
+def _outer_wire_polygon(face, mapper, surf=None) -> List[Tuple[float, float]]:
     """Ordered 2D polygon of the face's outer wire (pragmatically chained)."""
     try:
         wire = breptools.OuterWire(face)
@@ -209,7 +211,7 @@ def _outer_wire_polygon(face, mapper) -> List[Tuple[float, float]]:
     while wexp.More():
         edge = wexp.Current()
         wexp.Next()
-        rec = _sample_edge(edge, face, mapper)
+        rec = _sample_edge(edge, face, mapper, surf=surf)
         if rec:
             chains.append(rec["pts2d"])
     poly: List[Tuple[float, float]] = []
@@ -255,7 +257,8 @@ def _build_records(body, wanted: Optional[set]) -> Tuple[Dict[int, Dict], Dict[i
         if kind == "Other":
             skipped.append({"face_index": f_idx, "type": kind})
             continue
-        mapper = _uv_mapper(face, kind)
+        surf = BRepAdaptor_Surface(face)
+        mapper = _uv_mapper(face, kind, surf=surf)
 
         edges = []
         eexp = TopExp_Explorer(face, TopAbs_EDGE)
@@ -263,7 +266,7 @@ def _build_records(body, wanted: Optional[set]) -> Tuple[Dict[int, Dict], Dict[i
             edge = topods.Edge(eexp.Current())
             eexp.Next()
             degenerated = BRep_Tool.Degenerated(edge)
-            rec = None if degenerated else _sample_edge(edge, face, mapper)
+            rec = None if degenerated else _sample_edge(edge, face, mapper, surf=surf)
             if rec is None:
                 continue
             eid = emap.Add(edge)
@@ -284,7 +287,7 @@ def _build_records(body, wanted: Optional[set]) -> Tuple[Dict[int, Dict], Dict[i
         records[f_idx] = {
             "kind": kind,
             "area": _face_area(face),
-            "polygon": _outer_wire_polygon(face, mapper),
+            "polygon": _outer_wire_polygon(face, mapper, surf=surf),
             "edges": edges,
         }
     return records, edge_to_faces, skipped

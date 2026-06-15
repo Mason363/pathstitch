@@ -1,9 +1,9 @@
 import QuickLookThumbnailing
-import ZIPFoundation
+import CoreGraphics
 import Cocoa
 
 class ThumbnailProvider: QLThumbnailProvider {
-    
+
     override func provideThumbnail(for request: QLFileThumbnailRequest, _ handler: @escaping (QLThumbnailReply?, Error?) -> Void) {
         let fileURL = request.fileURL
         let isAccessing = fileURL.startAccessingSecurityScopedResource()
@@ -12,50 +12,40 @@ class ThumbnailProvider: QLThumbnailProvider {
                 fileURL.stopAccessingSecurityScopedResource()
             }
         }
-        
-        guard let archive = Archive(url: fileURL, accessMode: .read),
-              let entry = archive["preview.png"] else {
+
+        // Render the file (.stch embedded preview, or freshly-framed DXF) to a
+        // black-on-white bitmap sized generously, then blit it aspect-fit into the
+        // thumbnail context so it stays crisp when downscaled to a Finder icon.
+        let renderSize = CGSize(width: 1200, height: 800)
+        // STEP files get the lightweight isometric point-cloud preview (MAS-63);
+        // everything else uses the DXF/.stch renderer.
+        let ext = fileURL.pathExtension.lowercased()
+        let image: CGImage?
+        if ext == "step" || ext == "stp" {
+            image = renderStepToImage(url: fileURL, size: renderSize)
+        } else {
+            image = renderFileToImage(url: fileURL, size: renderSize)
+        }
+        guard let image = image else {
             handler(nil, nil)
             return
         }
-        
-        var imgData = Data()
-        do {
-            _ = try archive.extract(entry, consumer: { chunk in
-                imgData.append(chunk)
-            })
-            
-            guard let image = NSImage(data: imgData) else {
-                handler(nil, nil)
-                return
-            }
-            
-            let reply = QLThumbnailReply(contextSize: request.maximumSize) { context in
-                let rect = CGRect(origin: .zero, size: request.maximumSize)
-                
-                let imgSize = image.size
-                let aspectWidth = rect.width / imgSize.width
-                let aspectHeight = rect.height / imgSize.height
-                let scale = min(aspectWidth, aspectHeight)
-                
-                let targetSize = CGSize(width: imgSize.width * scale, height: imgSize.height * scale)
-                let targetRect = CGRect(
-                    x: (rect.width - targetSize.width) / 2,
-                    y: (rect.height - targetSize.height) / 2,
-                    width: targetSize.width,
-                    height: targetSize.height
-                )
-                
-                if let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) {
-                    context.draw(cgImage, in: targetRect)
-                    return true
-                }
-                return false
-            }
-            
-            handler(reply, nil)
-        } catch {
-            handler(nil, error)
+
+        let reply = QLThumbnailReply(contextSize: request.maximumSize) { context in
+            let rect = CGRect(origin: .zero, size: request.maximumSize)
+            let imgSize = CGSize(width: image.width, height: image.height)
+            let scale = min(rect.width / imgSize.width, rect.height / imgSize.height)
+            let target = CGSize(width: imgSize.width * scale, height: imgSize.height * scale)
+            let targetRect = CGRect(
+                x: (rect.width - target.width) / 2,
+                y: (rect.height - target.height) / 2,
+                width: target.width,
+                height: target.height
+            )
+            context.draw(image, in: targetRect)
+            return true
         }
+
+        handler(reply, nil)
     }
 }

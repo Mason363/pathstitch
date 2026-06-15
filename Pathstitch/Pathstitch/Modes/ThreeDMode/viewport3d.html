@@ -37,8 +37,39 @@
 <body>
     <div id="canvas-container"></div>
     <div id="info-overlay">Hover face details</div>
+    <div id="floating-input-overlay" style="position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); display: none; background: rgba(24, 24, 27, 0.95); border: 1.5px solid #3b82f6; border-radius: 6px; padding: 6px 12px; z-index: 1000; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.6); align-items: center; gap: 6px; font-family: -apple-system, BlinkMacSystemFont, sans-serif;">
+        <span style="color: #a1a1aa; font-size: 13px; font-weight: 500;">Offset:</span>
+        <input type="number" id="floating-offset-val" step="0.5" style="background: #27272a; border: 1px solid #3f3f46; color: #f4f4f5; font-size: 13px; outline: none; width: 80px; text-align: center; border-radius: 4px; padding: 2px 4px;" value="0.0" />
+        <span style="color: #a1a1aa; font-size: 13px; font-weight: 500;">mm</span>
+    </div>
 
     <script>
+        window.onerror = function(message, source, lineno, colno, error) {
+            const errInfo = {
+                op: "consoleError",
+                message: message,
+                source: source,
+                lineno: lineno,
+                colno: colno,
+                error: error ? error.stack : ""
+            };
+            if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.pathstitch) {
+                window.webkit.messageHandlers.pathstitch.postMessage(JSON.stringify(errInfo));
+            }
+            const div = document.createElement('div');
+            div.style.position = 'absolute';
+            div.style.top = '0';
+            div.style.left = '0';
+            div.style.background = 'red';
+            div.style.color = 'white';
+            div.style.zIndex = '99999';
+            div.style.padding = '10px';
+            div.style.fontFamily = 'monospace';
+            div.innerText = "JS ERROR: " + message + " at " + source + ":" + lineno + ":" + colno + "\n" + (error ? error.stack : "");
+            document.body.appendChild(div);
+            return false;
+        };
+
         // Setup Three.js scene
         const container = document.getElementById('canvas-container');
         const infoOverlay = document.getElementById('info-overlay');
@@ -46,8 +77,13 @@
         const scene = new THREE.Scene();
         scene.background = new THREE.Color(0x121214);
         
-        const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 10000);
-        camera.position.set(200, 200, 200);
+        const cameraPerspective = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 10000);
+        cameraPerspective.position.set(200, 200, 200);
+        
+        const cameraOrthographic = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10000);
+        cameraOrthographic.position.set(200, 200, 200);
+        
+        let camera = cameraPerspective;
         
         const renderer = new THREE.WebGLRenderer({ antialias: true });
         renderer.setSize(window.innerWidth, window.innerHeight);
@@ -57,6 +93,12 @@
         const controls = new THREE.OrbitControls(camera, renderer.domElement);
         controls.enableDamping = true;
         controls.dampingFactor = 0.05;
+        controls.mouseButtons = {
+            LEFT: null,
+            MIDDLE: THREE.MOUSE.PAN,
+            RIGHT: THREE.MOUSE.ROTATE
+        };
+        controls.enableZoom = false;
         
         // Lighting
         const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
@@ -78,17 +120,224 @@
         const axesHelper = new THREE.AxesHelper(50);
         scene.add(axesHelper);
 
+        // Setup raycaster and mouse
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+
         // State variables
         let faceMeshes = [];
         let hoveredFace = null;
         let selectedFaces = []; // Array of {bodyIndex, faceIndex}
 
-        // Color constants (Plasticity CAD Palette)
+        // Plane Projection State variables
+        let isPlaneSelectionActive = false;
+        let planeSelectionModeType = "origin"; // "origin" or "face"
+        let selectedProjectionPlane = ""; // "XY", "XZ", "YZ", or "face"
+        let selectedProjectionFaceIndex = -1;
+        let selectedProjectionBodyIndex = -1;
+        let planeOffset = 0.0;
+        
+        let gizmoPlanesGroup = null; // Group for origin gizmo
+        let helperPlaneMesh = null; // Helper plane sliding visual
+        let helperAxisLine = null; // Dashed axis helper line
+        
+        let hoveredGizmoPlane = null;
+
+        let arrowGizmo = null;
+        let arrowMesh = null;
+        let hitboxMesh = null;
+        let borderLine = null;
+        let hoveredArrow = false;
+        let isDraggingArrow = false;
+        let dragStartOffset = 0;
+        let dragStartMouse = new THREE.Vector2();
+        let hasDragged = false;
+        
+        // Colors
         const COLOR_DEFAULT = 0xffffff; // Flat white
         const COLOR_HOVER = 0xe2e8f0;   // Light gray/blue
         const COLOR_SELECTED = 0x3b82f6; // Accent color
         const COLOR_EDGE = 0x1e1e20;     // Black/dark charcoal
         const COLOR_HIGHLIGHT_EDGE = 0x60a5fa;
+
+        const COLOR_GIZMO_DEFAULT = 0xf59e0b; // Translucent orange
+        const COLOR_GIZMO_HOVER = 0xd97706;   // Stronger orange
+        const COLOR_GIZMO_SELECTED = 0xef4444;// Red or strong selection color
+
+        // Setup plane projection helpers
+        function setupPlaneProjectionHelpers() {
+            if (gizmoPlanesGroup) return; // Already setup
+
+            // 1. Origin Gizmo Group
+            gizmoPlanesGroup = new THREE.Group();
+            gizmoPlanesGroup.visible = false;
+            scene.add(gizmoPlanesGroup);
+            
+            const size = 50.0;
+            
+            // XY Plane (translucent orange, normal along Z)
+            const xyGeom = new THREE.PlaneGeometry(size, size);
+            const xyMat = new THREE.MeshBasicMaterial({
+                color: COLOR_GIZMO_DEFAULT,
+                opacity: 0.4,
+                transparent: true,
+                side: THREE.DoubleSide,
+                depthWrite: false
+            });
+            const xyMesh = new THREE.Mesh(xyGeom, xyMat);
+            xyMesh.userData = { planeName: "XY" };
+            const xyEdges = new THREE.EdgesGeometry(xyGeom);
+            const xyLine = new THREE.LineSegments(xyEdges, new THREE.LineBasicMaterial({ color: 0xf59e0b, linewidth: 2 }));
+            xyMesh.add(xyLine);
+            gizmoPlanesGroup.add(xyMesh);
+            
+            // YZ Plane (normal along X)
+            const yzGeom = new THREE.PlaneGeometry(size, size);
+            const yzMat = new THREE.MeshBasicMaterial({
+                color: COLOR_GIZMO_DEFAULT,
+                opacity: 0.4,
+                transparent: true,
+                side: THREE.DoubleSide,
+                depthWrite: false
+            });
+            const yzMesh = new THREE.Mesh(yzGeom, yzMat);
+            yzMesh.rotation.y = Math.PI / 2;
+            yzMesh.userData = { planeName: "YZ" };
+            const yzEdges = new THREE.EdgesGeometry(yzGeom);
+            const yzLine = new THREE.LineSegments(yzEdges, new THREE.LineBasicMaterial({ color: 0xf59e0b, linewidth: 2 }));
+            yzMesh.add(yzLine);
+            gizmoPlanesGroup.add(yzMesh);
+            
+            // ZX Plane (normal along Y)
+            const zxGeom = new THREE.PlaneGeometry(size, size);
+            const zxMat = new THREE.MeshBasicMaterial({
+                color: COLOR_GIZMO_DEFAULT,
+                opacity: 0.4,
+                transparent: true,
+                side: THREE.DoubleSide,
+                depthWrite: false
+            });
+            const zxMesh = new THREE.Mesh(zxGeom, zxMat);
+            zxMesh.rotation.x = Math.PI / 2;
+            zxMesh.userData = { planeName: "XZ" }; // Tagged as XZ to align with python XZ
+            const zxEdges = new THREE.EdgesGeometry(zxGeom);
+            const zxLine = new THREE.LineSegments(zxEdges, new THREE.LineBasicMaterial({ color: 0xf59e0b, linewidth: 2 }));
+            zxMesh.add(zxLine);
+            gizmoPlanesGroup.add(zxMesh);
+            
+            // 2. Helper Plane (slides along normal)
+            const helperGeom = new THREE.PlaneGeometry(size * 1.5, size * 1.5);
+            const helperMat = new THREE.MeshBasicMaterial({
+                color: 0x3b82f6,
+                opacity: 0.3,
+                transparent: true,
+                side: THREE.DoubleSide,
+                depthWrite: false
+            });
+            helperPlaneMesh = new THREE.Mesh(helperGeom, helperMat);
+            const helperEdges = new THREE.EdgesGeometry(helperGeom);
+            const helperLine = new THREE.LineSegments(helperEdges, new THREE.LineBasicMaterial({ color: 0x3b82f6, linewidth: 2 }));
+            helperPlaneMesh.add(helperLine);
+            
+            // 2b. Standalone Arrow Gizmo (billboarded flat arrow shape)
+            arrowGizmo = new THREE.Group();
+            arrowGizmo.visible = false;
+            arrowGizmo.renderOrder = 9999;
+            scene.add(arrowGizmo);
+            
+            const arrowShape = new THREE.Shape();
+            // Pointing up (positive Y direction in local 2D space) - Total Height = 3.2
+            arrowShape.moveTo(-0.3, 0);
+            arrowShape.lineTo(0.3, 0);
+            arrowShape.lineTo(0.3, 2.0);
+            arrowShape.lineTo(1.0, 2.0);
+            arrowShape.lineTo(0, 3.2); // Tip of arrow pointing along normal
+            arrowShape.lineTo(-1.0, 2.0);
+            arrowShape.lineTo(-0.3, 2.0);
+            arrowShape.closePath();
+            
+            const shapeGeom = new THREE.ShapeGeometry(arrowShape);
+            shapeGeom.computeBoundingBox();
+            shapeGeom.computeBoundingSphere();
+            
+            const arrowColor = 0x3b82f6; // Vibrant blue
+            const arrowHoverColor = 0x60a5fa; // Lighter hover blue
+            const arrowBorderColor = 0xffffff; 
+            const arrowMeshMat = new THREE.MeshBasicMaterial({
+                color: arrowColor,
+                side: THREE.DoubleSide,
+                depthWrite: false,
+                depthTest: false,
+                transparent: true
+            });
+            arrowMesh = new THREE.Mesh(shapeGeom, arrowMeshMat);
+            arrowMesh.renderOrder = 9999;
+            arrowGizmo.add(arrowMesh);
+            
+            // Outline border
+            const borderPoints = [
+                new THREE.Vector3(-0.3, 0, 0.01),
+                new THREE.Vector3(0.3, 0, 0.01),
+                new THREE.Vector3(0.3, 2.0, 0.01),
+                new THREE.Vector3(1.0, 2.0, 0.01),
+                new THREE.Vector3(0, 3.2, 0.01),
+                new THREE.Vector3(-1.0, 2.0, 0.01),
+                new THREE.Vector3(-0.3, 2.0, 0.01)
+            ];
+            const borderGeom = new THREE.BufferGeometry().setFromPoints(borderPoints);
+            const borderMat = new THREE.LineBasicMaterial({
+                color: arrowBorderColor,
+                linewidth: 2,
+                depthWrite: false,
+                depthTest: false,
+                transparent: true
+            });
+            borderLine = new THREE.LineLoop(borderGeom, borderMat);
+            borderLine.renderOrder = 9999;
+            arrowGizmo.add(borderLine);
+            
+            // Invisible Hitbox for click/drag detection
+            const hitboxGeom = new THREE.CylinderGeometry(1.2, 1.2, 3.2, 8);
+            hitboxGeom.translate(0, 1.6, 0); // Center the cylinder along the arrow length
+            const hitboxMat = new THREE.MeshBasicMaterial({
+                colorWrite: false,
+                depthWrite: false,
+                side: THREE.DoubleSide
+            });
+            hitboxMesh = new THREE.Mesh(hitboxGeom, hitboxMat);
+            arrowGizmo.add(hitboxMesh);
+            
+            arrowGizmo.userData = {
+                mesh: arrowMesh,
+                border: borderLine,
+                hitbox: hitboxMesh,
+                defaultColor: arrowColor,
+                hoverColor: arrowHoverColor,
+                defaultBorder: arrowBorderColor,
+                hoverBorder: 0x1d4ed8
+            };
+            
+            helperPlaneMesh.visible = false;
+            scene.add(helperPlaneMesh);
+            
+            // 3. Helper Axis Line (dashed line along the normal direction)
+            const lineGeom = new THREE.BufferGeometry().setFromPoints([
+                new THREE.Vector3(0, -500, 0),
+                new THREE.Vector3(0, 500, 0)
+            ]);
+            const lineMat = new THREE.LineDashedMaterial({
+                color: 0xa1a1aa,
+                dashSize: 5,
+                gapSize: 5
+            });
+            helperAxisLine = new THREE.Line(lineGeom, lineMat);
+            helperAxisLine.computeLineDistances();
+            helperAxisLine.visible = false;
+            scene.add(helperAxisLine);
+        }
+
+        // Initialize helpers
+        setupPlaneProjectionHelpers();
 
         // Load 3D model JSON
         window.loadModel = function(modelJsonStr) {
@@ -101,6 +350,10 @@
                         mesh.material.forEach(m => m.dispose());
                     } else {
                         mesh.material.dispose();
+                    }
+                    if (mesh.userData.wireframe) {
+                        mesh.userData.wireframe.geometry.dispose();
+                        mesh.userData.wireframe.material.dispose();
                     }
                 });
             }
@@ -146,7 +399,9 @@
                         roughness: 0.5,
                         metalness: 0.1,
                         flatShading: false,
-                        side: THREE.DoubleSide
+                        side: THREE.DoubleSide,
+                        transparent: true,
+                        opacity: 1.0
                     });
 
                     const mesh = new THREE.Mesh(geometry, material);
@@ -159,7 +414,12 @@
                     
                     // Add wireframe edges for precise outlines
                     const edgesGeom = new THREE.EdgesGeometry(geometry, 20); // 20-deg angle threshold
-                    const lineMat = new THREE.LineBasicMaterial({ color: COLOR_EDGE, linewidth: 1 });
+                    const lineMat = new THREE.LineBasicMaterial({
+                        color: COLOR_EDGE,
+                        linewidth: 1,
+                        transparent: true,
+                        opacity: 1.0
+                    });
                     const wireframe = new THREE.LineSegments(edgesGeom, lineMat);
                     mesh.add(wireframe);
                     mesh.userData.wireframe = wireframe;
@@ -201,7 +461,20 @@
             window.modelGroup.position.y = 0;
             window.modelGroup.position.z = 0;
 
+            // Resize plane projection helpers based on model dimensions
+            const finalBox = new THREE.Box3().setFromObject(window.modelGroup);
+            const finalSize = finalBox.getSize(new THREE.Vector3());
+            const maxDim = Math.max(finalSize.x, finalSize.y, finalSize.z) || 50.0;
+            
+            if (gizmoPlanesGroup) {
+                const helperScale = Math.max(maxDim * 0.4, 20.0) / 50.0;
+                gizmoPlanesGroup.scale.set(helperScale, helperScale, helperScale);
+                helperPlaneMesh.scale.set(helperScale * 1.5, helperScale * 1.5, helperScale * 1.5);
+            }
+
             window.recenterCamera();
+            updateVisuals();
+            updateHelperPlanePosition();
         };
 
         window.recenterCamera = function() {
@@ -229,19 +502,358 @@
             });
         };
 
-        // Raycasting for Face Selection & Hover
-        const raycaster = new THREE.Raycaster();
-        const mouse = new THREE.Vector2();
+        window.setOrthographicMode = function(enabled) {
+            const aspect = window.innerWidth / window.innerHeight;
+            const dist = camera.position.distanceTo(controls.target) || 200.0;
+            const halfHeight = dist * Math.tan( (45 * Math.PI / 180) / 2 );
+            const halfWidth = halfHeight * aspect;
+            
+            if (enabled) {
+                // Copy position and orientation
+                cameraOrthographic.position.copy(camera.position);
+                cameraOrthographic.rotation.copy(camera.rotation);
+                cameraOrthographic.up.copy(camera.up);
+                
+                cameraOrthographic.left = -halfWidth;
+                cameraOrthographic.right = halfWidth;
+                cameraOrthographic.top = halfHeight;
+                cameraOrthographic.bottom = -halfHeight;
+                cameraOrthographic.updateProjectionMatrix();
+                
+                camera = cameraOrthographic;
+            } else {
+                // Copy position and orientation
+                cameraPerspective.position.copy(camera.position);
+                cameraPerspective.rotation.copy(camera.rotation);
+                cameraPerspective.up.copy(camera.up);
+                
+                cameraPerspective.aspect = aspect;
+                cameraPerspective.updateProjectionMatrix();
+                
+                camera = cameraPerspective;
+            }
+            
+            // Re-assign camera to orbit controls
+            controls.object = camera;
+            controls.update();
+        };
+        
+        function updateOrthographicFrustum() {
+            if (camera === cameraOrthographic) {
+                const aspect = window.innerWidth / window.innerHeight;
+                const dist = cameraOrthographic.position.distanceTo(controls.target) || 200.0;
+                const halfHeight = dist * Math.tan( (45 * Math.PI / 180) / 2 );
+                const halfWidth = halfHeight * aspect;
+                
+                cameraOrthographic.left = -halfWidth;
+                cameraOrthographic.right = halfWidth;
+                cameraOrthographic.top = halfHeight;
+                cameraOrthographic.bottom = -halfHeight;
+                cameraOrthographic.updateProjectionMatrix();
+            }
+        }
+
+        // Set plane selection state from Swift
+        window.setPlaneSelectionState = function(active, modeType, selPlane, selFaceIdx, selBodyIdx, offset) {
+            isPlaneSelectionActive = active;
+            planeSelectionModeType = modeType;
+            selectedProjectionPlane = selPlane;
+            selectedProjectionFaceIndex = selFaceIdx;
+            selectedProjectionBodyIndex = selBodyIdx;
+            planeOffset = offset;
+            
+            // Sync floating input
+            const overlay = document.getElementById('floating-input-overlay');
+            const input = document.getElementById('floating-offset-val');
+            if (active && selPlane) {
+                if (document.activeElement !== input) {
+                    input.value = offset.toFixed(2);
+                }
+            } else {
+                overlay.style.display = 'none';
+            }
+            
+            // Reset hovered plane
+            if (hoveredGizmoPlane) {
+                hoveredGizmoPlane.material.color.setHex(COLOR_GIZMO_DEFAULT);
+                hoveredGizmoPlane = null;
+            }
+            if (hoveredFace) {
+                hoveredFace = null;
+            }
+            
+            // Auto-report plane basis if programmatically entering with a selected face
+            if (active && modeType === "face" && selPlane === "face" && selFaceIdx !== -1 && selBodyIdx !== -1) {
+                const basis = getPlaneBasis("face");
+                if (basis && basis.normal && basis.origin) {
+                    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.pathstitch) {
+                        window.webkit.messageHandlers.pathstitch.postMessage(JSON.stringify({
+                            op: "selectProjectionFace",
+                            bodyIndex: selBodyIdx,
+                            faceIndex: selFaceIdx,
+                            normal: [basis.normal.x, basis.normal.y, basis.normal.z],
+                            origin: [basis.origin.x, basis.origin.y, basis.origin.z]
+                        }));
+                    }
+                }
+            }
+            
+            updateVisuals();
+            updateHelperPlanePosition();
+            updateArrowGizmo();
+        };
+
+        // Event listeners for floating input box
+        const floatInput = document.getElementById('floating-offset-val');
+        floatInput.addEventListener('input', () => {
+            const val = parseFloat(floatInput.value) || 0.0;
+            planeOffset = val;
+            updateHelperPlanePosition();
+            updateArrowGizmo();
+            if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.pathstitch) {
+                window.webkit.messageHandlers.pathstitch.postMessage(JSON.stringify({
+                    op: "updateOffset",
+                    offset: val
+                }));
+            }
+        });
+        floatInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.pathstitch) {
+                    window.webkit.messageHandlers.pathstitch.postMessage(JSON.stringify({
+                        op: "confirmProjection"
+                    }));
+                }
+            }
+        });
+
+        function getPlaneBasis(planeName) {
+            let origin = new THREE.Vector3(0, 0, 0);
+            let normal = new THREE.Vector3(0, 0, 1);
+            if (planeName === "XY") {
+                normal.set(0, 0, 1);
+            } else if (planeName === "XZ") {
+                normal.set(0, 1, 0); // Y axis in Three.js
+            } else if (planeName === "YZ") {
+                normal.set(1, 0, 0); // X axis in Three.js
+            } else if (planeName === "face") {
+                const mesh = faceMeshes.find(m => m.userData.bodyIndex === selectedProjectionBodyIndex && m.userData.faceIndex === selectedProjectionFaceIndex);
+                if (mesh) {
+                    const geom = mesh.geometry;
+                    if (!geom.boundingBox) {
+                        geom.computeBoundingBox();
+                    }
+                    const center = new THREE.Vector3();
+                    geom.boundingBox.getCenter(center);
+                    center.applyMatrix4(mesh.matrixWorld);
+                    
+                    const posAttr = geom.getAttribute('position');
+                    const indexAttr = geom.index;
+                    const normalVec = new THREE.Vector3(0, 0, 1);
+                    if (posAttr && posAttr.count >= 3) {
+                        const vA = new THREE.Vector3();
+                        const vB = new THREE.Vector3();
+                        const vC = new THREE.Vector3();
+                        if (indexAttr) {
+                            vA.fromBufferAttribute(posAttr, indexAttr.getX(0));
+                            vB.fromBufferAttribute(posAttr, indexAttr.getY(0));
+                            vC.fromBufferAttribute(posAttr, indexAttr.getZ(0));
+                        } else {
+                            vA.fromBufferAttribute(posAttr, 0);
+                            vB.fromBufferAttribute(posAttr, 1);
+                            vC.fromBufferAttribute(posAttr, 2);
+                        }
+                        const cb = new THREE.Vector3();
+                        const ab = new THREE.Vector3();
+                        cb.subVectors(vC, vB);
+                        ab.subVectors(vA, vB);
+                        cb.cross(ab);
+                        cb.normalize();
+                        normalVec.copy(cb);
+                    }
+                    const normalMatrix = new THREE.Matrix3().getNormalMatrix(mesh.matrixWorld);
+                    normalVec.applyMatrix3(normalMatrix).normalize();
+                    
+                    origin.copy(center);
+                    normal.copy(normalVec);
+                }
+            }
+            return { origin, normal };
+        }
+
+        function updateHelperPlanePosition() {
+            if (!isPlaneSelectionActive || !selectedProjectionPlane) {
+                helperPlaneMesh.visible = false;
+                helperAxisLine.visible = false;
+                return;
+            }
+            
+            const basis = getPlaneBasis(selectedProjectionPlane);
+            
+            // Move helper plane to origin + normal * offset
+            const pos = basis.origin.clone().add(basis.normal.clone().multiplyScalar(planeOffset));
+            helperPlaneMesh.position.copy(pos);
+            
+            // Align helper plane rotation to normal (default geometry faces Z axis)
+            helperPlaneMesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), basis.normal);
+            helperPlaneMesh.visible = true;
+            
+            // Draw axis line passing through plane base origin
+            helperAxisLine.position.copy(basis.origin);
+            helperAxisLine.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), basis.normal);
+            helperAxisLine.visible = true;
+        }
+
+        function updateArrowGizmo() {
+            if (!isPlaneSelectionActive || !selectedProjectionPlane || !arrowGizmo) {
+                if (arrowGizmo) arrowGizmo.visible = false;
+                return;
+            }
+            
+            const basis = getPlaneBasis(selectedProjectionPlane);
+            
+            // Position: on the normal line, at the offset
+            const pos = basis.origin.clone().add(basis.normal.clone().multiplyScalar(planeOffset));
+            arrowGizmo.position.copy(pos);
+            
+            // Direct billboarding around the normal axis:
+            // Y_local is the normal axis N.
+            const Y_local = basis.normal.clone().normalize();
+            
+            // View vector from arrow to camera
+            const D = new THREE.Vector3().subVectors(camera.position, pos).normalize();
+            
+            // X_local is perpendicular to Y_local and D
+            const X_local = new THREE.Vector3().crossVectors(Y_local, D);
+            if (X_local.lengthSq() < 0.0001) {
+                // Camera is looking directly down the normal axis, use any orthogonal vector
+                const temp = Math.abs(Y_local.y) < 0.9 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0);
+                X_local.crossVectors(Y_local, temp);
+            }
+            X_local.normalize();
+            
+            // Z_local completes the orthonormal basis
+            const Z_local = new THREE.Vector3().crossVectors(X_local, Y_local).normalize();
+            
+            // Build rotation matrix
+            const m = new THREE.Matrix4().makeBasis(X_local, Y_local, Z_local);
+            arrowGizmo.quaternion.setFromRotationMatrix(m);
+            
+            // Scale: constant screen size
+            const dist = camera.position.distanceTo(pos) || 200.0;
+            const scaleVal = dist * 0.012;
+            arrowGizmo.scale.set(scaleVal, scaleVal, scaleVal);
+            
+            arrowGizmo.visible = true;
+        }
 
         function onMouseMove(event) {
             mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
             mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
 
             raycaster.setFromCamera(mouse, camera);
+
+            if (isDraggingArrow) {
+                const basis = getPlaneBasis(selectedProjectionPlane);
+                const Ro = raycaster.ray.origin;
+                const Rd = raycaster.ray.direction;
+                const O = basis.origin;
+                const N = basis.normal;
+                
+                const W = new THREE.Vector3().subVectors(O, Ro);
+                const b = N.dot(Rd);
+                const d = N.dot(W);
+                const e = Rd.dot(W);
+                
+                const denom = 1.0 - b * b;
+                if (Math.abs(denom) > 0.001) {
+                    let t = (b * e - d) / denom;
+                    // Snap to 0.5 mm steps
+                    t = Math.round(t * 2) / 2;
+                    planeOffset = t;
+                    updateHelperPlanePosition();
+                    updateArrowGizmo();
+                    
+                    // Notify Swift
+                    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.pathstitch) {
+                        window.webkit.messageHandlers.pathstitch.postMessage(JSON.stringify({
+                            op: "updateOffset",
+                            offset: planeOffset
+                        }));
+                    }
+                }
+                
+                const moveDist = Math.hypot(event.clientX - dragStartMouse.x, event.clientY - dragStartMouse.y);
+                if (moveDist > 3) {
+                    hasDragged = true;
+                }
+                return;
+            }
+
+            // Check if arrow is hovered first (highest priority if visible)
+            if (isPlaneSelectionActive && selectedProjectionPlane && hitboxMesh) {
+                const intersects = raycaster.intersectObject(hitboxMesh);
+                if (intersects.length > 0) {
+                    if (!hoveredArrow) {
+                        hoveredArrow = true;
+                        arrowMesh.material.color.setHex(arrowGizmo.userData.hoverColor);
+                        borderLine.material.color.setHex(arrowGizmo.userData.hoverBorder);
+                        document.body.style.cursor = 'pointer';
+                    }
+                    if (hoveredFace) {
+                        hoveredFace = null;
+                        updateVisuals();
+                    }
+                    return;
+                } else {
+                    if (hoveredArrow) {
+                        hoveredArrow = false;
+                        arrowMesh.material.color.setHex(arrowGizmo.userData.defaultColor);
+                        borderLine.material.color.setHex(arrowGizmo.userData.defaultBorder);
+                        document.body.style.cursor = 'default';
+                    }
+                }
+            }
+
+            if (isPlaneSelectionActive && planeSelectionModeType === "origin") {
+                // Raycast against origin squares
+                const intersects = raycaster.intersectObjects(gizmoPlanesGroup.children);
+                if (intersects.length > 0) {
+                    const hitGizmo = intersects[0].object;
+                    if (hoveredGizmoPlane !== hitGizmo) {
+                        if (hoveredGizmoPlane) {
+                            hoveredGizmoPlane.material.color.setHex(hoveredGizmoPlane.userData.planeName === selectedProjectionPlane ? COLOR_GIZMO_SELECTED : COLOR_GIZMO_DEFAULT);
+                        }
+                        hoveredGizmoPlane = hitGizmo;
+                        hitGizmo.material.color.setHex(COLOR_GIZMO_HOVER);
+                    }
+                } else {
+                    if (hoveredGizmoPlane) {
+                        hoveredGizmoPlane.material.color.setHex(hoveredGizmoPlane.userData.planeName === selectedProjectionPlane ? COLOR_GIZMO_SELECTED : COLOR_GIZMO_DEFAULT);
+                        hoveredGizmoPlane = null;
+                    }
+                }
+                return;
+            }
+
+            // Normal or face selection mode
             const intersects = raycaster.intersectObjects(faceMeshes);
 
             if (intersects.length > 0) {
                 const hitMesh = intersects[0].object;
+                
+                // If in plane selection mode (face), only allow planar faces
+                if (isPlaneSelectionActive && planeSelectionModeType === "face") {
+                    if (hitMesh.userData.type !== "Plane") {
+                        if (hoveredFace !== null) {
+                            hoveredFace = null;
+                            updateVisuals();
+                            infoOverlay.style.display = 'none';
+                        }
+                        return;
+                    }
+                }
+                
                 if (hoveredFace !== hitMesh) {
                     hoveredFace = hitMesh;
                     updateVisuals();
@@ -259,8 +871,73 @@
             }
         }
 
+        function onMouseDown(event) {
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+            
+            raycaster.setFromCamera(mouse, camera);
+            
+            if (isPlaneSelectionActive && selectedProjectionPlane && hitboxMesh) {
+                const intersects = raycaster.intersectObject(hitboxMesh);
+                if (intersects.length > 0) {
+                    isDraggingArrow = true;
+                    dragStartOffset = planeOffset;
+                    dragStartMouse.set(event.clientX, event.clientY);
+                    hasDragged = false;
+                    controls.enabled = false; // Disable orbit controls
+                    event.stopPropagation();
+                    event.stopImmediatePropagation();
+                    return;
+                }
+            }
+        }
+
+        function onMouseUp(event) {
+            if (isDraggingArrow) {
+                isDraggingArrow = false;
+                controls.enabled = true; // Re-enable orbit controls
+                
+                if (!hasDragged) {
+                    // Show floating input box
+                    const overlay = document.getElementById('floating-input-overlay');
+                    const input = document.getElementById('floating-offset-val');
+                    overlay.style.display = 'flex';
+                    input.focus();
+                    input.select();
+                }
+                event.stopPropagation();
+                event.stopImmediatePropagation();
+            }
+        }
+
         function onClick(event) {
             raycaster.setFromCamera(mouse, camera);
+
+            // Handle Arrow clicks (we already handle this in onMouseUp, so ignore here)
+            if (isPlaneSelectionActive && selectedProjectionPlane && hitboxMesh) {
+                const intersects = raycaster.intersectObject(hitboxMesh);
+                if (intersects.length > 0) {
+                    event.stopPropagation();
+                    event.stopImmediatePropagation();
+                    return;
+                }
+            }
+
+            if (isPlaneSelectionActive && planeSelectionModeType === "origin") {
+                const intersects = raycaster.intersectObjects(gizmoPlanesGroup.children);
+                if (intersects.length > 0) {
+                    const planeName = intersects[0].object.userData.planeName;
+                    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.pathstitch) {
+                        window.webkit.messageHandlers.pathstitch.postMessage(JSON.stringify({
+                            op: "selectProjectionPlane",
+                            plane: planeName
+                        }));
+                    }
+                }
+                return;
+            }
+
+            // Normal or face mode clicks
             const intersects = raycaster.intersectObjects(faceMeshes);
 
             if (intersects.length > 0) {
@@ -268,7 +945,59 @@
                 const bodyIndex = clickedMesh.userData.bodyIndex;
                 const faceIndex = clickedMesh.userData.faceIndex;
 
-                // Send selection to Swift
+                if (isPlaneSelectionActive && planeSelectionModeType === "face") {
+                    // Only planar face selection is valid
+                    if (clickedMesh.userData.type !== "Plane") return;
+                    
+                    // Compute face normal and origin
+                    const geom = clickedMesh.geometry;
+                    if (!geom.boundingBox) {
+                        geom.computeBoundingBox();
+                    }
+                    const center = new THREE.Vector3();
+                    geom.boundingBox.getCenter(center);
+                    center.applyMatrix4(clickedMesh.matrixWorld);
+                    
+                    const posAttr = geom.getAttribute('position');
+                    const indexAttr = geom.index;
+                    const normalVec = new THREE.Vector3(0, 0, 1);
+                    if (posAttr && posAttr.count >= 3) {
+                        const vA = new THREE.Vector3();
+                        const vB = new THREE.Vector3();
+                        const vC = new THREE.Vector3();
+                        if (indexAttr) {
+                            vA.fromBufferAttribute(posAttr, indexAttr.getX(0));
+                            vB.fromBufferAttribute(posAttr, indexAttr.getY(0));
+                            vC.fromBufferAttribute(posAttr, indexAttr.getZ(0));
+                        } else {
+                            vA.fromBufferAttribute(posAttr, 0);
+                            vB.fromBufferAttribute(posAttr, 1);
+                            vC.fromBufferAttribute(posAttr, 2);
+                        }
+                        const cb = new THREE.Vector3();
+                        const ab = new THREE.Vector3();
+                        cb.subVectors(vC, vB);
+                        ab.subVectors(vA, vB);
+                        cb.cross(ab);
+                        cb.normalize();
+                        normalVec.copy(cb);
+                    }
+                    const normalMatrix = new THREE.Matrix3().getNormalMatrix(clickedMesh.matrixWorld);
+                    normalVec.applyMatrix3(normalMatrix).normalize();
+                    
+                    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.pathstitch) {
+                        window.webkit.messageHandlers.pathstitch.postMessage(JSON.stringify({
+                            op: "selectProjectionFace",
+                            bodyIndex: bodyIndex,
+                            faceIndex: faceIndex,
+                            normal: [normalVec.x, normalVec.y, normalVec.z],
+                            origin: [center.x, center.y, center.z]
+                        }));
+                    }
+                    return;
+                }
+
+                // Normal Face Selection
                 if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.pathstitch) {
                     window.webkit.messageHandlers.pathstitch.postMessage(JSON.stringify({
                         op: "selectFace",
@@ -278,6 +1007,8 @@
                     }));
                 }
             } else {
+                if (isPlaneSelectionActive) return; // Ignore background clicks in plane selection mode
+                
                 // Clicked background -> clear selection
                 if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.pathstitch) {
                     window.webkit.messageHandlers.pathstitch.postMessage(JSON.stringify({
@@ -289,30 +1020,230 @@
 
         // Apply colors based on selection/hover state
         function updateVisuals() {
+            // Update model meshes
             faceMeshes.forEach(mesh => {
                 const isSelected = selectedFaces.some(sf => sf.bodyIndex === mesh.userData.bodyIndex && sf.faceIndex === mesh.userData.faceIndex);
                 const isHovered = hoveredFace === mesh;
 
-                if (isSelected) {
-                    mesh.material.color.setHex(COLOR_SELECTED);
-                    mesh.userData.wireframe.material.color.setHex(COLOR_HIGHLIGHT_EDGE);
-                } else if (isHovered) {
-                    mesh.material.color.setHex(COLOR_HOVER);
-                    mesh.userData.wireframe.material.color.setHex(COLOR_HIGHLIGHT_EDGE);
+                // Adjust transparency and selection color based on plane mode
+                if (isPlaneSelectionActive) {
+                    if (planeSelectionModeType === "origin") {
+                        // Make bodies translucent and ignore selection highlights
+                        mesh.material.transparent = true;
+                        mesh.material.opacity = 0.25;
+                        mesh.material.color.setHex(COLOR_DEFAULT);
+                        mesh.userData.wireframe.material.transparent = true;
+                        mesh.userData.wireframe.material.opacity = 0.15;
+                        mesh.userData.wireframe.material.color.setHex(COLOR_EDGE);
+                    } else { // Mode: face
+                        // Make planar faces hoverable, selected face highlighted, others opaque
+                        const isProjFace = (selectedProjectionPlane === "face" && 
+                                           selectedProjectionBodyIndex === mesh.userData.bodyIndex && 
+                                           selectedProjectionFaceIndex === mesh.userData.faceIndex);
+                        mesh.material.transparent = false;
+                        mesh.material.opacity = 1.0;
+                        mesh.userData.wireframe.material.transparent = false;
+                        mesh.userData.wireframe.material.opacity = 1.0;
+                        
+                        if (isProjFace) {
+                            mesh.material.color.setHex(COLOR_SELECTED);
+                            mesh.userData.wireframe.material.color.setHex(COLOR_HIGHLIGHT_EDGE);
+                        } else if (isHovered && mesh.userData.type === "Plane") {
+                            mesh.material.color.setHex(COLOR_HOVER);
+                            mesh.userData.wireframe.material.color.setHex(COLOR_HIGHLIGHT_EDGE);
+                        } else {
+                            mesh.material.color.setHex(COLOR_DEFAULT);
+                            mesh.userData.wireframe.material.color.setHex(COLOR_EDGE);
+                        }
+                    }
                 } else {
-                    mesh.material.color.setHex(COLOR_DEFAULT);
-                    mesh.userData.wireframe.material.color.setHex(COLOR_EDGE);
+                    // Standard display mode
+                    mesh.material.transparent = false;
+                    mesh.material.opacity = 1.0;
+                    mesh.userData.wireframe.material.transparent = false;
+                    mesh.userData.wireframe.material.opacity = 1.0;
+                    
+                    if (isSelected) {
+                        mesh.material.color.setHex(COLOR_SELECTED);
+                        mesh.userData.wireframe.material.color.setHex(COLOR_HIGHLIGHT_EDGE);
+                    } else if (isHovered) {
+                        mesh.material.color.setHex(COLOR_HOVER);
+                        mesh.userData.wireframe.material.color.setHex(COLOR_HIGHLIGHT_EDGE);
+                    } else {
+                        mesh.material.color.setHex(COLOR_DEFAULT);
+                        mesh.userData.wireframe.material.color.setHex(COLOR_EDGE);
+                    }
                 }
             });
+
+            // Update gizmo visibility and colors
+            if (isPlaneSelectionActive && planeSelectionModeType === "origin") {
+                gizmoPlanesGroup.visible = true;
+                gizmoPlanesGroup.children.forEach(child => {
+                    const planeName = child.userData.planeName;
+                    const isSelected = (planeName === selectedProjectionPlane);
+                    const isHovered = (child === hoveredGizmoPlane);
+                    
+                    if (isSelected) {
+                        child.material.color.setHex(COLOR_GIZMO_SELECTED);
+                        child.material.opacity = 0.75;
+                    } else if (isHovered) {
+                        child.material.color.setHex(COLOR_GIZMO_HOVER);
+                        child.material.opacity = 0.6;
+                    } else {
+                        child.material.color.setHex(COLOR_GIZMO_DEFAULT);
+                        child.material.opacity = 0.4;
+                    }
+                });
+            } else {
+                if (gizmoPlanesGroup) {
+                    gizmoPlanesGroup.visible = false;
+                }
+            }
         }
 
-        window.addEventListener('mousemove', onMouseMove, false);
-        window.addEventListener('click', onClick, false);
+        // Camera transition animation
+        let cameraAnimStart = null;
+        const cameraAnimDuration = 800; // ms
+        let cameraAnimStartPos = null;
+        let cameraAnimStartTarget = null;
+        let cameraAnimEndPos = null;
+        let cameraAnimEndTarget = null;
+        
+        window.animateCameraToPlane = function() {
+            if (!selectedProjectionPlane) return;
+            
+            cameraAnimStart = null;
+            cameraAnimStartPos = camera.position.clone();
+            cameraAnimStartTarget = controls.target.clone();
+            
+            const basis = getPlaneBasis(selectedProjectionPlane);
+            
+            // Set the target coordinates (which is the base plane position shifted by offset)
+            cameraAnimEndTarget = basis.origin.clone().add(basis.normal.clone().multiplyScalar(planeOffset));
+            
+            // Position camera perpendicularly along the normal vector, keeping current zoom distance
+            const dist = camera.position.distanceTo(controls.target) || 200.0;
+            cameraAnimEndPos = cameraAnimEndTarget.clone().add(basis.normal.clone().multiplyScalar(dist));
+            
+            requestAnimationFrame(animateCameraStep);
+        };
+        
+        function animateCameraStep(timestamp) {
+            if (!cameraAnimStart) cameraAnimStart = timestamp;
+            const progress = Math.min((timestamp - cameraAnimStart) / cameraAnimDuration, 1.0);
+            
+            // easeInOutCubic
+            const t = progress < 0.5 ? 4 * progress * progress * progress : 1 - Math.pow(-2 * progress + 2, 3) / 2;
+            
+            camera.position.lerpVectors(cameraAnimStartPos, cameraAnimEndPos, t);
+            controls.target.lerpVectors(cameraAnimStartTarget, cameraAnimEndTarget, t);
+            controls.update();
+            
+            if (progress < 1.0) {
+                requestAnimationFrame(animateCameraStep);
+            } else {
+                // Send completion callback to Swift
+                if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.pathstitch) {
+                    window.webkit.messageHandlers.pathstitch.postMessage(JSON.stringify({
+                        op: "cameraAnimationComplete"
+                    }));
+                }
+            }
+        }
+
+        // Dynamic middle mouse button swap logic for pan/orbit (Fusion style)
+        window.addEventListener('pointerdown', (event) => {
+            if (event.button === 1) { // Middle button
+                if (event.shiftKey) {
+                    controls.mouseButtons.MIDDLE = THREE.MOUSE.ROTATE;
+                } else {
+                    controls.mouseButtons.MIDDLE = THREE.MOUSE.PAN;
+                }
+            }
+        }, true);
+
+        // Custom wheel event listener (Fusion 360 style: Trackpad & Mouse)
+        window.addEventListener('wheel', (event) => {
+            event.preventDefault();
+            
+            const isPinch = event.ctrlKey;
+            const isMouseWheel = event.deltaMode !== 0 || (event.deltaX === 0 && Math.abs(event.deltaY) >= 20);
+            
+            if (isPinch || isMouseWheel) {
+                // Zoom
+                const zoomFactor = 1.0 + (event.deltaY > 0 ? 0.08 : -0.08);
+                const dir = new THREE.Vector3().subVectors(camera.position, controls.target);
+                dir.multiplyScalar(zoomFactor);
+                
+                // Clamp zoom distance to prevent passing through target
+                const minDist = 1.0;
+                const maxDist = 5000.0;
+                const dist = dir.length();
+                if (dist > minDist && dist < maxDist) {
+                    camera.position.copy(controls.target).add(dir);
+                    controls.update();
+                }
+                return;
+            }
+            
+            // Trackpad two-finger scroll
+            if (event.shiftKey) {
+                // Orbit
+                const rotateSpeed = 0.003;
+                const theta = event.deltaX * rotateSpeed;
+                const phi = event.deltaY * rotateSpeed;
+                
+                const offset = new THREE.Vector3().subVectors(camera.position, controls.target);
+                offset.applyAxisAngle(new THREE.Vector3(0, 1, 0), theta);
+                
+                const right = new THREE.Vector3().crossVectors(new THREE.Vector3(0, 1, 0), offset).normalize();
+                if (right.lengthSq() > 0.001) {
+                    offset.applyAxisAngle(right, phi);
+                }
+                
+                camera.position.copy(controls.target).add(offset);
+                controls.update();
+                return;
+            }
+            
+            // Pan
+            const panSpeed = 0.0015 * camera.position.distanceTo(controls.target);
+            const viewDir = new THREE.Vector3().subVectors(controls.target, camera.position).normalize();
+            const right = new THREE.Vector3().crossVectors(viewDir, camera.up).normalize();
+            const up = new THREE.Vector3().crossVectors(right, viewDir).normalize();
+            
+            const pan = new THREE.Vector3()
+                .addScaledVector(right, event.deltaX * panSpeed)
+                .addScaledVector(up, -event.deltaY * panSpeed);
+                
+            camera.position.add(pan);
+            controls.target.add(pan);
+            controls.update();
+        }, { passive: false });
+
+        window.addEventListener('pointermove', onMouseMove, true);
+        window.addEventListener('pointerdown', onMouseDown, true);
+        window.addEventListener('pointerup', onMouseUp, true);
+        window.addEventListener('click', onClick, true);
 
         window.addEventListener('resize', onWindowResize, false);
         function onWindowResize() {
-            camera.aspect = window.innerWidth / window.innerHeight;
-            camera.updateProjectionMatrix();
+            const aspect = window.innerWidth / window.innerHeight;
+            
+            cameraPerspective.aspect = aspect;
+            cameraPerspective.updateProjectionMatrix();
+            
+            const dist = camera.position.distanceTo(controls.target) || 200.0;
+            const halfHeight = dist * Math.tan( (45 * Math.PI / 180) / 2 );
+            const halfWidth = halfHeight * aspect;
+            
+            cameraOrthographic.left = -halfWidth;
+            cameraOrthographic.right = halfWidth;
+            cameraOrthographic.top = halfHeight;
+            cameraOrthographic.bottom = -halfHeight;
+            cameraOrthographic.updateProjectionMatrix();
+            
             renderer.setSize(window.innerWidth, window.innerHeight);
         }
 
@@ -320,6 +1251,8 @@
         function animate() {
             requestAnimationFrame(animate);
             controls.update();
+            updateOrthographicFrustum();
+            updateArrowGizmo();
             renderer.render(scene, camera);
         }
         animate();

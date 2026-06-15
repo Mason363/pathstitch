@@ -15,7 +15,7 @@ import ezdxf
 from OCC.Core.STEPControl import STEPControl_Reader
 from OCC.Core.IFSelect import IFSelect_RetDone
 from OCC.Core.TopExp import TopExp_Explorer
-from OCC.Core.TopAbs import TopAbs_SOLID, TopAbs_SHELL, TopAbs_FACE
+from OCC.Core.TopAbs import TopAbs_SOLID, TopAbs_SHELL, TopAbs_FACE, TopAbs_EDGE
 from OCC.Core.BRepMesh import BRepMesh_IncrementalMesh
 from OCC.Core.BRep import BRep_Tool
 from OCC.Core.TopLoc import TopLoc_Location
@@ -469,7 +469,10 @@ def op_project_edges(args: Dict[str, Any]) -> Dict[str, Any]:
     body_idx = args.get("body_index", 0)
     plane_type = args.get("plane_type", "XY") # "XY", "XZ", "YZ", or "face"
     face_idx = args.get("face_index")
+    face_body_idx = args.get("face_body_index", body_idx)
     existing_dxf = args.get("existing_dxf")
+    offset = float(args.get("offset", 0.0))
+    visible_bodies_indices = args.get("visible_bodies")
     
     if not input_path or not output_path:
         return {"status": "error", "message": "Missing input or output path."}
@@ -478,11 +481,20 @@ def op_project_edges(args: Dict[str, Any]) -> Dict[str, Any]:
         shape = load_step_shape(input_path)
         bodies = get_solid_bodies(shape)
         
-        if body_idx < 0 or body_idx >= len(bodies):
-            return {"status": "error", "message": f"Body index {body_idx} out of range."}
+        target_bodies = []
+        if visible_bodies_indices is not None:
+            for idx in visible_bodies_indices:
+                if 0 <= idx < len(bodies):
+                    target_bodies.append(bodies[idx])
+        else:
+            if 0 <= body_idx < len(bodies):
+                target_bodies.append(bodies[body_idx])
+            else:
+                target_bodies = bodies
+                
+        if not target_bodies:
+            return {"status": "error", "message": "No solid bodies found to project."}
             
-        body = bodies[body_idx]
-        
         origin = (0.0, 0.0, 0.0)
         normal = (0.0, 0.0, 1.0)
         u_axis = (1.0, 0.0, 0.0)
@@ -498,56 +510,146 @@ def op_project_edges(args: Dict[str, Any]) -> Dict[str, Any]:
             u_axis = (0.0, 1.0, 0.0)
             v_axis = (0.0, 0.0, 1.0)
         elif plane_type == "face" and face_idx is not None:
-            face_exp = TopExp_Explorer(body, TopAbs_FACE)
-            f_idx = 0
-            target_face = None
-            while face_exp.More():
-                face = face_exp.Current()
-                face_exp.Next()
-                if f_idx == face_idx:
-                    target_face = face
-                    break
-                f_idx += 1
-            if target_face is None:
-                return {"status": "error", "message": f"Face index {face_idx} not found."}
-            basis = get_face_plane_basis(target_face)
-            if basis:
-                origin, normal, u_axis, v_axis = basis
+            if 0 <= face_body_idx < len(bodies):
+                body = bodies[face_body_idx]
+                face_exp = TopExp_Explorer(body, TopAbs_FACE)
+                f_idx = 0
+                target_face = None
+                while face_exp.More():
+                    face = face_exp.Current()
+                    face_exp.Next()
+                    if f_idx == face_idx:
+                        target_face = face
+                        break
+                    f_idx += 1
+                if target_face is None:
+                    return {"status": "error", "message": f"Face index {face_idx} not found on body {face_body_idx}."}
+                basis = get_face_plane_basis(target_face)
+                if basis:
+                    origin, normal, u_axis, v_axis = basis
+            else:
+                return {"status": "error", "message": f"Body index {face_body_idx} out of range for face selection."}
                 
-        from OCC.Core.TopExp import TopExp_Explorer
-        from OCC.Core.TopAbs import TopAbs_EDGE
-        edge_exp = TopExp_Explorer(body, TopAbs_EDGE)
-        polylines = []
-        seen_edges = set()
+        # Shift origin along normal by offset
+        origin = (
+            origin[0] + normal[0] * offset,
+            origin[1] + normal[1] * offset,
+            origin[2] + normal[2] * offset
+        )
         
-        while edge_exp.More():
-            edge = edge_exp.Current()
-            edge_exp.Next()
-            h = edge.this
-            if h in seen_edges:
-                continue
-            seen_edges.add(h)
-            
+        from OCC.Core.gp import gp_Ax2, gp_Pnt, gp_Dir, gp_Pln
+        from OCC.Core.BRepAlgoAPI import BRepAlgoAPI_Section
+        
+        proj_origin = gp_Pnt(origin[0], origin[1], origin[2])
+        proj_normal = gp_Dir(normal[0], normal[1], normal[2])
+        proj_u = gp_Dir(u_axis[0], u_axis[1], u_axis[2])
+        
+        # Build projection plane Pln for intersection section
+        proj_pln = gp_Pln(proj_origin, proj_normal)
+        
+        section_edges = []
+        for body in target_bodies:
             try:
-                pts3d = discretize_edge(edge)
-                pts2d = []
-                for pt in pts3d:
-                    dx = pt[0] - origin[0]
-                    dy = pt[1] - origin[1]
-                    dz = pt[2] - origin[2]
-                    u = dx * u_axis[0] + dy * u_axis[1] + dz * u_axis[2]
-                    v = dx * v_axis[0] + dy * v_axis[1] + dz * v_axis[2]
-                    pts2d.append((u, v))
-                if len(pts2d) >= 2:
-                    polylines.append(pts2d)
+                sec = BRepAlgoAPI_Section(body, proj_pln)
+                sec.Build()
+                if sec.IsDone():
+                    sec_shape = sec.Shape()
+                    edge_exp = TopExp_Explorer(sec_shape, TopAbs_EDGE)
+                    while edge_exp.More():
+                        edge = edge_exp.Current()
+                        section_edges.append(edge)
+                        edge_exp.Next()
             except Exception:
                 pass
                 
+        polylines = []
+        seen_projections = set()
+        
+        if section_edges:
+            # Intersection Mode: project 3D section curves onto local u, v axes
+            for edge in section_edges:
+                try:
+                    pts3d = discretize_edge(edge)
+                    pts2d = []
+                    for pt in pts3d:
+                        dx = pt[0] - origin[0]
+                        dy = pt[1] - origin[1]
+                        dz = pt[2] - origin[2]
+                        u = dx * u_axis[0] + dy * u_axis[1] + dz * u_axis[2]
+                        v = dx * v_axis[0] + dy * v_axis[1] + dz * v_axis[2]
+                        pts2d.append((u, v))
+                        
+                    if len(pts2d) < 2:
+                        continue
+                    xs = [p[0] for p in pts2d]
+                    ys = [p[1] for p in pts2d]
+                    if (max(xs) - min(xs)) < 1e-6 and (max(ys) - min(ys)) < 1e-6:
+                        continue
+                    key_fwd = tuple((round(p[0], 4), round(p[1], 4)) for p in pts2d)
+                    key = min(key_fwd, key_fwd[::-1])
+                    if key in seen_projections:
+                        continue
+                    seen_projections.add(key)
+                    polylines.append(pts2d)
+                except Exception:
+                    pass
+                    
+        if not polylines:
+            # Silhouette/HLR Mode: Project visible outlines/boundaries
+            from OCC.Core.HLRAlgo import HLRAlgo_Projector
+            from OCC.Core.HLRBRep import HLRBRep_Algo, HLRBRep_HLRToShape
+            
+            proj_axes = gp_Ax2(proj_origin, proj_normal, proj_u)
+            projector = HLRAlgo_Projector(proj_axes)
+            
+            hlr = HLRBRep_Algo()
+            for body in target_bodies:
+                hlr.Add(body)
+            hlr.Projector(projector)
+            hlr.Update()
+            hlr.Hide()
+            
+            hlr_to_shape = HLRBRep_HLRToShape(hlr)
+            
+            compounds = []
+            v_comp = hlr_to_shape.VCompound()
+            out_comp = hlr_to_shape.OutLineVCompound()
+            
+            if v_comp is not None:
+                compounds.append(v_comp)
+            if out_comp is not None:
+                compounds.append(out_comp)
+                
+            for comp in compounds:
+                edge_exp = TopExp_Explorer(comp, TopAbs_EDGE)
+                while edge_exp.More():
+                    edge = edge_exp.Current()
+                    edge_exp.Next()
+                    
+                    try:
+                        pts3d = discretize_edge(edge)
+                        pts2d = []
+                        for pt in pts3d:
+                            pts2d.append((pt[0], pt[1]))
+                        if len(pts2d) < 2:
+                            continue
+                        xs = [p[0] for p in pts2d]
+                        ys = [p[1] for p in pts2d]
+                        if (max(xs) - min(xs)) < 1e-6 and (max(ys) - min(ys)) < 1e-6:
+                            continue
+                        key_fwd = tuple((round(p[0], 4), round(p[1], 4)) for p in pts2d)
+                        key = min(key_fwd, key_fwd[::-1])
+                        if key in seen_projections:
+                            continue
+                        seen_projections.add(key)
+                        polylines.append(pts2d)
+                    except Exception:
+                        pass
+                        
         if not polylines:
             return {"status": "error", "message": "No projectable edges found."}
             
         min_x = min(pt[0] for poly in polylines for pt in poly)
-        max_x = max(pt[0] for poly in polylines for pt in poly)
         min_y = min(pt[1] for poly in polylines for pt in poly)
         
         if existing_dxf and os.path.exists(existing_dxf):
@@ -589,12 +691,17 @@ def op_project_edges(args: Dict[str, Any]) -> Dict[str, Any]:
         import traceback
         return {"status": "error", "message": f"Projection failed: {str(e)}\n{traceback.format_exc()}"}
 
+# Imported at the bottom: net_unfold imports step_ops helpers lazily inside its
+# op, so this ordering avoids a circular import.
+from pathstitch_core.net_unfold import op_unfold_connected
+
 # Module-level dispatch table, shared by the CLI (`main`) and the persistent
 # worker (`pathstitch_core.worker`).
 OPERATIONS = {
     "list_bodies": op_list_bodies,
     "unfold_face": op_unfold_face,
     "unfold_faces": op_unfold_faces,
+    "unfold_connected": op_unfold_connected,
     "project_edges": op_project_edges,
 }
 

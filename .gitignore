@@ -1,34 +1,47 @@
-# macOS
+# ===================== macOS =====================
 .DS_Store
 .AppleDouble
 .LSOverride
+Icon?
 
-# Xcode build output
+# ===================== Xcode build output =====================
+build/
 Pathstitch/build/
 DerivedData/
 *.xcuserstate
 xcuserdata/
 *.xcuserdata/
-# Fix typo from original file
-local_manifest.plist 2>/dev/null || true 
-# (Keeping your original plist line intact)
 xcschememanagement.plist
+*.xcscmblueprint
+*.xccheckout
+*.moved-aside
 
-# Python
+# ===================== Distribution artifacts =====================
+*.dmg
+*.app
+*.xcarchive
+dist/
+release/
+
+# ===================== Python =====================
 __pycache__/
 *.py[cod]
 *.pyo
 .env
-.venv
+.venv/
+env/
+*.egg-info/
 
-# Scratch / temp files
+# ===================== Logs / scratch / temp =====================
+*.log
 scratch_*.txt
 
-# Project Specific Ignores
+# ===================== Dev-only / not shipped =====================
 .antigravity/
-Bug:\ Feature\ Screenshots/
+Bug*Screenshots/
 TestFiles/
 AGENTS.md
 Issues.md
-App\ Icon\ Template.ai
-App\ Icon\ Template.psd
+unfold.md
+*.ai
+*.psd

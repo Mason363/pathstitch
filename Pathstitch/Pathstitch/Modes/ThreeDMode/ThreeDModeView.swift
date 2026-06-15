@@ -69,9 +69,29 @@ struct SelectedFaceRowView: View {
     }
 }
 
+/// Caption + control on one line — keeps the right panel reading like a
+/// settings form instead of a stack of anonymous pickers.
+struct SettingRow<Content: View>: View {
+    let label: String
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(label)
+                .font(PlasticityFont.label)
+                .foregroundColor(Color.text_secondary)
+                .frame(width: 52, alignment: .leading)
+            content
+        }
+    }
+}
+
 struct ThreeDModeView: View {
     @Bindable var state: AppState
     @State private var selectedPlane: String = "XY"
+    @State private var netLayout: String = "connected"
+    @State private var netMode: String = "radial"
+    @State private var netDecoration: String = "none"
     
     var body: some View {
         HStack(spacing: 0) {
@@ -161,10 +181,33 @@ struct ThreeDModeView: View {
                 selectedFaces3D: state.selectedFaces3D,
                 stepJsonContent: state.stepJsonContent,
                 bodies3D: state.bodies3D,
+                isPlaneSelectionActive: state.isPlaneSelectionActive,
+                planeSelectionModeType: state.planeSelectionModeType,
+                selectedProjectionPlane: state.selectedProjectionPlane,
+                selectedProjectionFaceIndex: state.selectedProjectionFaceIndex,
+                selectedProjectionBodyIndex: state.selectedProjectionBodyIndex,
+                planeOffset: state.planeOffset,
+                threeDOrthographic: state.threeDOrthographic,
+                triggerCameraAnimationToken: state.triggerCameraAnimationToken,
+                triggerHomeFrameToken: state.triggerHomeFrameToken,
                 state: state
             )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Color.bg_base)
+                .overlay(alignment: .topTrailing) {
+                    Button(action: { state.frameHome3D() }) {
+                        Image(systemName: "house")
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(Color.text_primary)
+                            .frame(width: 30, height: 30)
+                            .background(Color.bg_panel.opacity(0.9))
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.border_subtle, lineWidth: 1))
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                    .help("Home — frame the model with optimal framing")
+                    .padding(12)
+                }
             
             // Right Panel: Selection & Processing (240px wide)
             VStack(alignment: .leading, spacing: 0) {
@@ -199,54 +242,167 @@ struct ThreeDModeView: View {
                             Divider().background(Color.border_subtle)
                         }
                         
-                        // Section 2: Actions
+                        // Section 2: Unfolding (one section, one mental model:
+                        // pick how pieces come out, then unfold)
                         VStack(alignment: .leading, spacing: 10) {
-                            Text("UNFOLD CONTROLS")
+                            Text("UNFOLD")
                                 .font(PlasticityFont.header)
                                 .foregroundColor(Color.text_secondary)
                                 .tracking(0.5)
-                            
-                            Button("Unfold Selected Face") {
-                                if let first = state.selectedFaces3D.first {
-                                    state.unfoldFace(bodyIndex: first.bodyIndex, faceIndex: first.faceIndex)
+
+                            SettingRow(label: "Layout") {
+                                Picker("Layout", selection: $netLayout) {
+                                    Text("Connected Net").tag("connected")
+                                    Text("Separate Pieces").tag("separate")
+                                }
+                                .pickerStyle(DefaultPickerStyle())
+                                .labelsHidden()
+                                .help("Connected Net keeps faces joined at fold lines; Separate Pieces flattens each face on its own.")
+                            }
+
+                            if netLayout == "connected" {
+                                SettingRow(label: "Unroll") {
+                                    Picker("Unroll Mode", selection: $netMode) {
+                                        Text("Radial").tag("radial")
+                                        Text("Strip").tag("strip")
+                                        Text("Spanning Tree").tag("spanning")
+                                    }
+                                    .pickerStyle(DefaultPickerStyle())
+                                    .labelsHidden()
+                                    .help("How faces unroll around the anchor: outward rings, long strips, or the most stable fold edges.")
+                                }
+
+                                SettingRow(label: "Seams") {
+                                    Picker("Seam Decoration", selection: $netDecoration) {
+                                        Text("Plain").tag("none")
+                                        Text("Glue Tabs").tag("tabs")
+                                        Text("Sew Holes").tag("holes")
+                                    }
+                                    .pickerStyle(DefaultPickerStyle())
+                                    .labelsHidden()
+                                    .help("Added along every mated seam pair. Sizes come from the Add Holes / Glue Tab tool settings.")
                                 }
                             }
-                            .buttonStyle(PlasticityButtonStyle(isEnabled: state.selectedFaces3D.count == 1))
-                            .disabled(state.selectedFaces3D.count != 1)
-                            .help("Unfolds a single selected face and opens it in 2D Editor.")
-                            
-                            Button("Unfold All Selected") {
-                                state.unfoldAllSelected()
+
+                            Button("Unfold Selected") {
+                                if netLayout == "connected" {
+                                    state.unfoldConnected(wholeBody: false, mode: netMode, decoration: netDecoration)
+                                } else {
+                                    state.unfoldAllSelected()
+                                }
                             }
                             .buttonStyle(PlasticityButtonStyle(isEnabled: !state.selectedFaces3D.isEmpty))
                             .disabled(state.selectedFaces3D.isEmpty)
-                            .help("Unfolds all selected faces and places them side-by-side in 2D Editor.")
+                            .help(netLayout == "connected"
+                                  ? "Unfolds the selected faces as one connected net — shared edges become dashed fold lines, cuts become seams."
+                                  : "Flattens each selected face and places them side-by-side in the 2D editor.")
+
+                            if netLayout == "connected" {
+                                Button("Unfold Entire Body") {
+                                    state.unfoldConnected(wholeBody: true, mode: netMode, decoration: netDecoration)
+                                }
+                                .buttonStyle(PlasticityButtonStyle(isEnabled: !state.bodies3D.isEmpty))
+                                .disabled(state.bodies3D.isEmpty)
+                                .help("Unfolds every face of every body into connected nets.")
+                            }
+
+                            if state.selectedFaces3D.isEmpty {
+                                Text("Select faces in the list or viewport (⇧-click for multiple).")
+                                    .font(PlasticityFont.label)
+                                    .foregroundColor(Color.text_muted)
+                            }
                         }
-                        
+
                         Divider().background(Color.border_subtle)
-                        
+
                         // Section 3: Sketch Projection
                         VStack(alignment: .leading, spacing: 10) {
                             Text("PROJECTION SKETCH")
                                 .font(PlasticityFont.header)
                                 .foregroundColor(Color.text_secondary)
                                 .tracking(0.5)
-                            
-                            Picker("Projection Plane", selection: $selectedPlane) {
-                                Text("XY Plane").tag("XY")
-                                Text("XZ Plane").tag("XZ")
-                                Text("YZ Plane").tag("YZ")
-                                Text("Parallel to Face").tag("face")
+
+                            if !state.isPlaneSelectionActive {
+                                Button("Add Plane") {
+                                    state.startPlaneSelection()
+                                }
+                                .buttonStyle(PlasticityButtonStyle(isEnabled: true))
+                                .help("Enter Plane Selection Mode to define a projection plane.")
+                            } else {
+                                Picker("Define Plane By", selection: $state.planeSelectionModeType) {
+                                    Text("Origin Planes").tag("origin")
+                                    Text("Shape Face").tag("face")
+                                }
+                                .pickerStyle(SegmentedPickerStyle())
+                                .labelsHidden()
+                                .onChange(of: state.planeSelectionModeType) { oldValue, newValue in
+                                    // Reset selected plane and offset when switching modes
+                                    state.selectedProjectionPlane = nil
+                                    state.selectedProjectionFaceIndex = nil
+                                    state.selectedProjectionBodyIndex = nil
+                                    state.planeOffset = 0.0
+                                }
+                                
+                                if state.planeSelectionModeType == "origin" {
+                                    Text("Click an origin plane square (XY, YZ, ZX) in the 3D viewport.")
+                                        .font(PlasticityFont.label)
+                                        .foregroundColor(Color.text_muted)
+                                    
+                                    if let plane = state.selectedProjectionPlane {
+                                        Text("Selected: \(plane) Plane")
+                                            .font(PlasticityFont.body)
+                                            .foregroundColor(Color.accent)
+                                    } else {
+                                        Text("Selected: None")
+                                            .font(PlasticityFont.body)
+                                            .foregroundColor(Color.text_muted)
+                                    }
+                                } else {
+                                    Text("Click a flat face of the 3D model in the viewport.")
+                                        .font(PlasticityFont.label)
+                                        .foregroundColor(Color.text_muted)
+                                    
+                                    if let faceIdx = state.selectedProjectionFaceIndex, let bodyIdx = state.selectedProjectionBodyIndex {
+                                        Text("Selected Face: B\(bodyIdx + 1) : F\(faceIdx)")
+                                            .font(PlasticityFont.body)
+                                            .foregroundColor(Color.accent)
+                                    } else {
+                                        Text("Selected: None")
+                                            .font(PlasticityFont.body)
+                                            .foregroundColor(Color.text_muted)
+                                    }
+                                }
+                                
+                                if state.selectedProjectionPlane != nil {
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        Text("Offset (mm)")
+                                            .font(PlasticityFont.label)
+                                            .foregroundColor(Color.text_secondary)
+                                        
+                                        TextField("", value: $state.planeOffset, format: .number)
+                                            .textFieldStyle(RoundedBorderTextFieldStyle())
+                                            .labelsHidden()
+                                    }
+                                    .padding(.top, 4)
+                                    
+                                    Button("Confirm Projection") {
+                                        state.confirmPlaneProjection()
+                                    }
+                                    .buttonStyle(PlasticityButtonStyle(isEnabled: true))
+                                    .help("Lock this plane position and project 3D silhouettes onto it.")
+                                }
+                                
+                                Button("Cancel") {
+                                    state.cancelPlaneSelection()
+                                }
+                                .buttonStyle(PlainButtonStyle())
+                                .foregroundColor(Color.text_secondary)
+                                .font(PlasticityFont.body)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 4)
+                                .background(Color.bg_input.opacity(0.5))
+                                .cornerRadius(4)
                             }
-                            .pickerStyle(DefaultPickerStyle())
-                            .labelsHidden()
-                            
-                            Button("Project to 2D Sketch") {
-                                state.projectToSketch(planeType: selectedPlane)
-                            }
-                            .buttonStyle(PlasticityButtonStyle(isEnabled: selectedPlane != "face" || state.selectedFaces3D.count == 1))
-                            .disabled(selectedPlane == "face" && state.selectedFaces3D.count != 1)
-                            .help("Projects all body lines onto the selected axis plane or parallel to the selected face.")
                         }
                     }
                     .padding(14)

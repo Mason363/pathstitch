@@ -102,6 +102,25 @@
 				</array>
 			</dict>
 		</dict>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+				<string>public.content</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>STEP 3D Model</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.pathstitch.step</string>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>step</string>
+					<string>stp</string>
+				</array>
+			</dict>
+		</dict>
 	</array>
 </dict>
 </plist>

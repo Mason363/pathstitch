@@ -215,7 +215,31 @@ def test_dxf_ops():
     y_coords = [c[1] for c in centers]
     min_y, max_y = min(y_coords), max(y_coords)
     assert abs(max_y - min_y) > 10.0, f"Expected items to stack vertically (diff in Y > 10), got Y coords: {y_coords}"
-    print("2D compact layout verified successfully!")
+    # 10. Test chain_select with intermediate vertices (rect + line)
+    print("Testing chain_select with polyline vertices...")
+    chain_test_dxf = "TestFiles/test_chain.dxf"
+    if os.path.exists(chain_test_dxf):
+        os.remove(chain_test_dxf)
+    doc_chain = ezdxf.new(dxfversion="R2010")
+    msp_chain = doc_chain.modelspace()
+    # Add a rectangle (closed polyline) with corners at (0,0), (10,0), (10,10), (0,10)
+    rect = msp_chain.add_lwpolyline([(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)], dxfattribs={"closed": True})
+    # Add a line connecting to the corner (10, 10) of the rectangle, ending at (20, 10)
+    line = msp_chain.add_line((10.0, 10.0), (20.0, 10.0))
+    doc_chain.saveas(chain_test_dxf)
+    
+    # Run chain_select with seed rect.dxf.handle
+    res = run_cli("chain_select", {
+        "input": chain_test_dxf,
+        "seed_handle": rect.dxf.handle,
+        "tolerance": 0.1
+    })
+    assert res["status"] == "ok", f"chain_select failed: {res}"
+    handles = res["data"]["handles"]
+    print(f"Chain select returned handles: {handles}")
+    assert rect.dxf.handle in handles, "Rectangle should be in chain"
+    assert line.dxf.handle in handles, "Touching line should be in chain"
+    print("Chain selection with intermediate vertices verified successfully!")
 
     print("ALL TESTS PASSED SUCCESSFULLY!")
 

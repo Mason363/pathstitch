@@ -10,7 +10,16 @@ struct ModeButton: View {
     
     var body: some View {
         Button(action: {
-            state.activeMode = mode
+            // Batch is its own workspace/window (MAS-75): open a separate document
+            // window rather than switching this one. 2D/3D stay in-place (they're
+            // the same document).
+            if mode == .batch {
+                if state.activeMode != .batch {
+                    WindowManager.shared.openBatchWorkspace()
+                }
+            } else {
+                state.activeMode = mode
+            }
         }) {
             Image(systemName: systemName)
                 .font(.system(size: 14))
@@ -36,18 +45,49 @@ struct ModeButton: View {
     }
 }
 
+/// An "⌐" corner whose elbow is rounded (fillet) or cut (chamfer) — a real,
+/// unambiguous glyph for the Fillet/Chamfer tools (MAS-62).
+struct CornerGlyph: Shape {
+    var rounded: Bool
+    func path(in rect: CGRect) -> Path {
+        var p = Path()
+        let pad = rect.width * 0.2
+        let k = rect.width * 0.42  // fillet radius / chamfer setback
+        let x0 = rect.minX + pad, y0 = rect.minY + pad
+        let x1 = rect.maxX - pad, y1 = rect.maxY - pad
+        p.move(to: CGPoint(x: x0, y: y0))
+        p.addLine(to: CGPoint(x: x0, y: y1 - k))
+        if rounded {
+            p.addArc(center: CGPoint(x: x0 + k, y: y1 - k), radius: k,
+                     startAngle: .degrees(180), endAngle: .degrees(90), clockwise: true)
+        } else {
+            p.addLine(to: CGPoint(x: x0 + k, y: y1))
+        }
+        p.addLine(to: CGPoint(x: x1, y: y1))
+        return p
+    }
+}
+
 struct ToolButton: View {
     let tool: TwoDTool
     var state: AppState
     @State private var isHovered = false
-    
+
     var body: some View {
         Button(action: {
             state.currentTool = tool
             state.activeMeasureStart = nil
         }) {
-            Image(systemName: tool.icon)
-                .font(.system(size: 14))
+            Group {
+                if tool == .fillet || tool == .chamfer {
+                    CornerGlyph(rounded: tool == .fillet)
+                        .stroke(style: StrokeStyle(lineWidth: 1.8, lineCap: .round, lineJoin: .round))
+                        .frame(width: 18, height: 18)
+                } else {
+                    Image(systemName: tool.icon)
+                        .font(.system(size: 14))
+                }
+            }
                 .frame(width: 24, height: 24)
                 .padding(10)
                 .contentShape(Rectangle())
@@ -104,6 +144,50 @@ struct ShapeToolButton: View {
     }
 }
 
+/// One entry in the "more tools" overflow grid (MAS-66).
+struct ExtraTool: Identifiable {
+    let id = UUID()
+    let title: String
+    let icon: String
+    let enabled: Bool
+    let action: () -> Void
+}
+
+/// Lays the extra tools out in the smallest near-square grid that fits them
+/// (e.g. 12 tools → 4×3, not 1×12), as described in MAS-66.
+struct MoreToolsGrid: View {
+    let tools: [ExtraTool]
+
+    private var cols: Int {
+        let n = tools.count
+        if n <= 1 { return 1 }
+        var c = 1
+        while c * c < n { c += 1 }   // smallest c with c*c >= n == ceil(sqrt(n))
+        return c
+    }
+
+    var body: some View {
+        let columns = Array(repeating: GridItem(.fixed(60), spacing: 8), count: cols)
+        LazyVGrid(columns: columns, spacing: 8) {
+            ForEach(tools) { tool in
+                Button(action: tool.action) {
+                    VStack(spacing: 4) {
+                        Image(systemName: tool.icon).font(.system(size: 16))
+                        Text(tool.title).font(.system(size: 9)).lineLimit(1)
+                    }
+                    .frame(width: 56, height: 50)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(PlainButtonStyle())
+                .background(Color.bg_input.opacity(0.4))
+                .cornerRadius(6)
+                .foregroundColor(tool.enabled ? Color.text_primary : Color.text_muted)
+                .disabled(!tool.enabled)
+            }
+        }
+    }
+}
+
 struct ToolbarHoverButton: View {
     let systemName: String
     let help: String
@@ -136,27 +220,40 @@ struct ToolbarHoverButton: View {
 
 struct ContentView: View {
     @State var state: AppState
+    /// Live keybind registry — drives the hidden hotkey buttons (MAS-72).
+    private let keybinds = KeybindStore.shared
+    /// Persisted, user-rearrangeable toolbar layout (MAS-99).
+    private let layout = ToolbarLayout.shared
+    /// Focus on the fillet radius field; Esc clears it so single-key shortcuts
+    /// work again (MAS-91).
+    @FocusState private var isFilletFieldFocused: Bool
+    @AppStorage(SettingsKeys.theme) private var themeRaw = AppTheme.dark.rawValue
     @State private var showExportDialog = false
     // Debounced processing flag: only becomes true if work runs longer than a
     // short delay, so fast worker ops (~ms) never flash a loading overlay.
     @State private var showSlowLoader = false
     @State private var isShapesHovered = false
+    @State private var showShapes = false
+    @State private var isMoreToolsHovered = false
+    @State private var showMoreTools = false
     @State private var offsetMode = "curve" // "curve" or "bbox"
     @State private var customLayerName: String = ""
     @State private var selectedExistingLayer: String = ""
-    @State private var exportFormat: String = "dxf" // "dxf", "svg", "pdf", "png"
-    
+    @State private var rotationAngle: Double = 90.0
     @State private var leftSidebarTopHeight: CGFloat = 350
+    // Active-tool option panels open by default ("full and open on the get-go", MAS-60).
     @State private var isSelectionExpanded = true
-    @State private var isHolesSewingExpanded = false
-    @State private var isPaperFoldingExpanded = false
-    @State private var isPatterningExpanded = false
-    @State private var isTextPlacingExpanded = false
+    @State private var isHolesSewingExpanded = true
+    @State private var isPaperFoldingExpanded = true
+    @State private var isPatterningExpanded = true
+    @State private var isTextPlacingExpanded = true
     @State private var isReferenceImageExpanded = false
     @State private var isLayersExpanded = false
     @State private var isImportSettingsExpanded = false
     @State private var isExportSettingsExpanded = false
-    @State private var isShapesExpanded = false
+    
+    @State private var renamingItemId: String? = nil
+    @State private var renamingText: String = ""
     
     @State private var gridCols: Int = 3
     @State private var gridRows: Int = 3
@@ -169,8 +266,6 @@ struct ContentView: View {
     @State private var textHeight: Double = 5.0
     @State private var textInsertX: Double = 0.0
     @State private var textInsertY: Double = 0.0
-    
-    @State private var exportSelectedOnly = false
     
     var body: some View {
         VStack(spacing: 0) {
@@ -192,9 +287,21 @@ struct ContentView: View {
         .background(Color.bg_base)
         .background(WindowAccessor(state: state).frame(width: 0, height: 0).opacity(0))
         .font(PlasticityFont.body)
-        .preferredColorScheme(.dark)
+        .preferredColorScheme((AppTheme(rawValue: themeRaw) ?? .dark).colorScheme)
         // Bind hotkeys
         .background(hotkeyBindings)
+        // Command search palette (MAS-53)
+        .overlay {
+            if state.showSearchPalette {
+                ZStack(alignment: .top) {
+                    Color.black.opacity(0.18)
+                        .ignoresSafeArea()
+                        .onTapGesture { state.showSearchPalette = false }
+                    SearchPalette(state: state)
+                        .padding(.top, 96)
+                }
+            }
+        }
         // Only reveal the loading overlay if work outlasts a short delay, so the
         // now-fast worker ops never flash a loader (§7).
         .task(id: state.isProcessing) {
@@ -205,13 +312,41 @@ struct ContentView: View {
                 showSlowLoader = false
             }
         }
+        .onChange(of: state.openDocsToken) { _ in WindowManager.shared.showDocumentationWindow() }
         .onChange(of: state.selectedHandles) { _ in state.updateLivePreview() }
-        .onChange(of: state.currentTool) { _ in state.updateLivePreview() }
+        // Esc unfocuses the fillet radius field so keyboard shortcuts work (MAS-91).
+        .onChange(of: state.escapePressedToken) { _ in isFilletFieldFocused = false }
+        // Selecting a converted-line group loads its style/settings into the
+        // editor so the panel reflects what's actually applied (MAS-58).
+        .onChange(of: state.selectedConvertedGroupId) { gid in
+            if let gid = gid, let g = state.convertedLineGroups[gid] {
+                state.convertLineStyle = g.style
+                state.convertLineSettings[g.style] = g.settings
+            }
+        }
+        .onChange(of: state.currentTool) { _ in
+            state.updateLivePreview()
+            // Entering a corner tool starts a confirm/cancel session and (with a
+            // selection) applies it to all the shape's corners at once; leaving
+            // confirms the session and clears the active target (MAS-62).
+            if state.currentTool.isCornerTool {
+                state.beginCornerToolSession()
+                if !state.selectedHandles.isEmpty {
+                    state.activateCornerToolForSelection()
+                }
+            } else {
+                state.confirmCornerToolSession()
+                state.filletSelectedHandle = nil
+            }
+        }
+        .onChange(of: state.filletContinuity) { _ in state.refreshActiveCornerShape() }
         .onChange(of: state.offsetDistance) { _ in state.updateLivePreview() }
         .onChange(of: state.offsetSide) { _ in state.updateLivePreview() }
         .onChange(of: state.holeOffsetDistance) { _ in state.updateLivePreview() }
         .onChange(of: state.holeDiameter) { _ in state.updateLivePreview() }
         .onChange(of: state.holeSpacing) { _ in state.updateLivePreview() }
+        .onChange(of: state.holeDistribution) { _ in state.updateLivePreview() }
+        .onChange(of: state.holeCount) { _ in state.updateLivePreview() }
         .onChange(of: state.holePattern) { _ in state.updateLivePreview() }
         .onChange(of: state.holeCornerBehavior) { _ in state.updateLivePreview() }
         .onChange(of: state.holeSide) { _ in state.updateLivePreview() }
@@ -224,47 +359,28 @@ struct ContentView: View {
     
     @ViewBuilder
     private var hotkeyBindings: some View {
+        // All app-specific hotkeys are now data-driven from the user-customizable
+        // keybind registry (MAS-72). Each command renders one hidden Button whose
+        // shortcut is read live from the store, so rebinds in Preferences take
+        // effect immediately.
         ZStack {
-            Button("") { state.currentTool = .select }.keyboardShortcut("v", modifiers: [])
-            Button("") { state.chainSelectionEnabled.toggle() }.keyboardShortcut("a", modifiers: [])
-            Button("") { state.currentTool = .pan }.keyboardShortcut("h", modifiers: [])
-            Button("") { state.currentTool = .offset }.keyboardShortcut("o", modifiers: [])
-            Button("") { state.currentTool = .addHoles }.keyboardShortcut("s", modifiers: [])
-            Button("") { state.currentTool = .cleanup }.keyboardShortcut("j", modifiers: [])
-            Button("") { state.currentTool = .measure }.keyboardShortcut("m", modifiers: [])
-            Button("") {
-                state.escapePressedToken += 1
-            }.keyboardShortcut(.escape, modifiers: [])
-            Button("") { state.undo() }.keyboardShortcut("z", modifiers: [.command])
-            Button("") { state.redo() }.keyboardShortcut("z", modifiers: [.command, .shift])
-            Button("") {
-                if state.selectedMeasurement != nil {
-                    state.deleteSelectedMeasurement()
-                } else {
-                    state.deleteSelectedEntities()
+            ForEach(AppCommands.all) { command in
+                let combo = keybinds.combo(for: command.id)
+                if let key = combo.keyEquivalent, !combo.key.isEmpty {
+                    Button("") { command.action(state) }
+                        .keyboardShortcut(key, modifiers: combo.modifiers)
                 }
-            }.keyboardShortcut(.delete, modifiers: [])
+            }
+            // Universal cancel + forward-delete are fixed (not rebindable).
+            Button("") { state.escapePressedToken += 1 }
+                .keyboardShortcut(.escape, modifiers: [])
             Button("") {
-                if state.selectedMeasurement != nil {
-                    state.deleteSelectedMeasurement()
-                } else {
-                    state.deleteSelectedEntities()
-                }
+                if state.selectedMeasurement != nil { state.deleteSelectedMeasurement() }
+                else { state.deleteSelectedEntities() }
             }.keyboardShortcut(.deleteForward, modifiers: [])
         }
         .frame(width: 0, height: 0)
         .opacity(0)
-    }
-    
-    private func runExportPanel(format: String) {
-        let savePanel = NSSavePanel()
-        savePanel.title = "Export Drawing"
-        savePanel.nameFieldStringValue = "drawing.\(format)"
-        savePanel.allowedContentTypes = [UTType(filenameExtension: format)].compactMap { $0 }
-        
-        if savePanel.runModal() == .OK, let url = savePanel.url {
-            state.exportFile(to: url, format: format, selectedOnly: exportSelectedOnly)
-        }
     }
     
     private func importFile() {
@@ -457,6 +573,76 @@ extension ContentView {
                         }
                         .padding(.vertical, 4)
                         
+                        if state.selectedHandles.count == 1,
+                           let handle = state.selectedHandles.first,
+                           let wMeasure = state.measurements.first(where: { $0.entityHandle == handle && $0.dimensionType == "width" }),
+                           let hMeasure = state.measurements.first(where: { $0.entityHandle == handle && $0.dimensionType == "height" }) {
+                            
+                            VStack(alignment: .leading, spacing: 6) {
+                                Divider().background(Color.border_subtle).padding(.vertical, 4)
+                                
+                                Text("RECTANGLE DIMENSIONS")
+                                    .font(PlasticityFont.label)
+                                    .fontWeight(.bold)
+                                    .foregroundColor(Color.accent)
+                                
+                                HStack {
+                                    Text("Width (mm)")
+                                        .font(PlasticityFont.label)
+                                        .foregroundColor(Color.text_secondary)
+                                    Spacer()
+                                    TextField("Width", value: Binding<Double>(
+                                        get: { wMeasure.distanceMm },
+                                        set: { state.updateRectangleDimensions(handle: handle, width: $0, height: nil, filletRadius: nil) }
+                                    ), format: .number)
+                                    .textFieldStyle(PlainTextFieldStyle())
+                                    .padding(4)
+                                    .frame(width: 80)
+                                    .background(Color.bg_input)
+                                    .cornerRadius(4)
+                                    .foregroundColor(Color.text_primary)
+                                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+                                }
+                                
+                                HStack {
+                                    Text("Height (mm)")
+                                        .font(PlasticityFont.label)
+                                        .foregroundColor(Color.text_secondary)
+                                    Spacer()
+                                    TextField("Height", value: Binding<Double>(
+                                        get: { hMeasure.distanceMm },
+                                        set: { state.updateRectangleDimensions(handle: handle, width: nil, height: $0, filletRadius: nil) }
+                                    ), format: .number)
+                                    .textFieldStyle(PlainTextFieldStyle())
+                                    .padding(4)
+                                    .frame(width: 80)
+                                    .background(Color.bg_input)
+                                    .cornerRadius(4)
+                                    .foregroundColor(Color.text_primary)
+                                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+                                }
+                                
+                                HStack {
+                                    Text("Corner Fillet (mm)")
+                                        .font(PlasticityFont.label)
+                                        .foregroundColor(Color.text_secondary)
+                                    Spacer()
+                                    TextField("Fillet", value: Binding<Double>(
+                                        get: { wMeasure.filletRadius },
+                                        set: { state.updateRectangleDimensions(handle: handle, width: nil, height: nil, filletRadius: $0) }
+                                    ), format: .number)
+                                    .textFieldStyle(PlainTextFieldStyle())
+                                    .padding(4)
+                                    .frame(width: 80)
+                                    .background(Color.bg_input)
+                                    .cornerRadius(4)
+                                    .foregroundColor(Color.text_primary)
+                                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+                                }
+                            }
+                            .padding(.bottom, 6)
+                        }
+                        
                         VStack(alignment: .leading, spacing: 6) {
                             Text("ASSIGN TO LAYER")
                                 .font(PlasticityFont.label)
@@ -496,6 +682,57 @@ extension ContentView {
                                 .buttonStyle(BorderedButtonStyle())
                                 .disabled(customLayerName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                                 .help("Assign selected entities to the specified layer name")
+                            }
+                        }
+                        
+                        VStack(alignment: .leading, spacing: 6) {
+                            Divider().background(Color.border_subtle).padding(.vertical, 4)
+                            
+                            Text("ROTATE SELECTION")
+                                .font(PlasticityFont.label)
+                                .fontWeight(.bold)
+                                .foregroundColor(Color.accent)
+                            
+                            HStack {
+                                Text("Angle (degrees)")
+                                    .font(PlasticityFont.label)
+                                    .foregroundColor(Color.text_secondary)
+                                Spacer()
+                                TextField("Angle", value: $rotationAngle, format: .number)
+                                    .textFieldStyle(PlainTextFieldStyle())
+                                    .padding(4)
+                                    .frame(width: 80)
+                                    .background(Color.bg_input)
+                                    .cornerRadius(4)
+                                    .foregroundColor(Color.text_primary)
+                                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+                            }
+                            
+                            HStack(spacing: 8) {
+                                Button("Rotate") {
+                                    if let center = state.selectionCenterModel {
+                                        state.rotateSelected(angleDegrees: rotationAngle, center: [Double(center.x), Double(center.y)])
+                                    }
+                                }
+                                .buttonStyle(BorderedButtonStyle())
+                                .disabled(state.selectionCenterModel == nil)
+                                .help("Rotate selected entities by the specified angle around their center")
+                                
+                                Button("+90°") {
+                                    if let center = state.selectionCenterModel {
+                                        state.rotateSelected(angleDegrees: 90.0, center: [Double(center.x), Double(center.y)])
+                                    }
+                                }
+                                .buttonStyle(BorderedButtonStyle())
+                                .disabled(state.selectionCenterModel == nil)
+                                
+                                Button("-90°") {
+                                    if let center = state.selectionCenterModel {
+                                        state.rotateSelected(angleDegrees: -90.0, center: [Double(center.x), Double(center.y)])
+                                    }
+                                }
+                                .buttonStyle(BorderedButtonStyle())
+                                .disabled(state.selectionCenterModel == nil)
                             }
                         }
                     }
@@ -861,21 +1098,53 @@ extension ContentView {
                         }
                         
                         HStack {
-                            Text("Hole Spacing (mm)")
+                            Text("Distribution")
                                 .font(PlasticityFont.label)
                                 .foregroundColor(Color.text_primary)
                             Spacer()
-                            TextField("Spacing", value: $state.holeSpacing, format: .number)
-                                .textFieldStyle(PlainTextFieldStyle())
-                                .padding(4)
-                                .frame(width: 80)
-                                .background(Color.bg_input)
-                                .cornerRadius(4)
-                                .foregroundColor(Color.text_primary)
-                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                                .help("Distance between consecutive sewing holes in millimeters")
+                            Picker("", selection: $state.holeDistribution) {
+                                Text("Fill").tag("spacing")
+                                Text("Count").tag("count")
+                            }
+                            .pickerStyle(SegmentedPickerStyle())
+                            .frame(width: 120)
+                            .help("Fill the path at a fixed spacing, or place an exact number of evenly-spaced holes")
                         }
-                        
+
+                        if state.holeDistribution == "count" {
+                            HStack {
+                                Text("Hole Count")
+                                    .font(PlasticityFont.label)
+                                    .foregroundColor(Color.text_primary)
+                                Spacer()
+                                TextField("Count", value: $state.holeCount, format: .number)
+                                    .textFieldStyle(PlainTextFieldStyle())
+                                    .padding(4)
+                                    .frame(width: 80)
+                                    .background(Color.bg_input)
+                                    .cornerRadius(4)
+                                    .foregroundColor(Color.text_primary)
+                                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+                                    .help("Exact number of evenly-spaced holes per contour")
+                            }
+                        } else {
+                            HStack {
+                                Text("Hole Spacing (mm)")
+                                    .font(PlasticityFont.label)
+                                    .foregroundColor(Color.text_primary)
+                                Spacer()
+                                TextField("Spacing", value: $state.holeSpacing, format: .number)
+                                    .textFieldStyle(PlainTextFieldStyle())
+                                    .padding(4)
+                                    .frame(width: 80)
+                                    .background(Color.bg_input)
+                                    .cornerRadius(4)
+                                    .foregroundColor(Color.text_primary)
+                                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+                                    .help("Distance between consecutive sewing holes in millimeters")
+                            }
+                        }
+
                         HStack {
                             Text("Pattern Style")
                                 .font(PlasticityFont.label)
@@ -1037,32 +1306,101 @@ extension ContentView {
         }
     }
 
+    /// Binds the radius field to the active corner's value, applying live so the
+    /// preview updates as you type (MAS-91). Reads back the active corner so the
+    /// field always shows what you're editing.
+    private var filletFieldValue: Binding<Double> {
+        Binding(
+            get: {
+                if let h = state.filletSelectedHandle, let idx = state.activeCornerIndex,
+                   let c = state.parametricShapes[h]?.corners.first(where: { $0.index == idx }) {
+                    return c.value
+                }
+                return state.filletToolRadius
+            },
+            set: { newVal in
+                state.filletToolRadius = newVal
+                state.setActiveCornerValue(newVal)
+            }
+        )
+    }
+
     @ViewBuilder
+    private var filletSection: some View {
+        let isChamfer = state.currentTool == .chamfer
+        let activeCorners = state.filletSelectedHandle.flatMap { state.parametricShapes[$0]?.corners.count } ?? 0
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                CornerGlyph(rounded: !isChamfer)
+                    .stroke(style: StrokeStyle(lineWidth: 1.6, lineCap: .round, lineJoin: .round))
+                    .foregroundColor(Color.accent)
+                    .frame(width: 14, height: 14)
+                Text(isChamfer ? "CHAMFER" : "FILLET")
+                    .font(PlasticityFont.header)
+                    .foregroundColor(Color.text_primary)
+                    .tracking(0.5)
+            }
+
+            if !isChamfer {
+                Text("Continuity")
+                    .font(PlasticityFont.label)
+                    .foregroundColor(Color.text_secondary)
+                Picker("", selection: $state.filletContinuity) {
+                    Text("G1").tag("G1")
+                    Text("G2").tag("G2")
+                }
+                .pickerStyle(SegmentedPickerStyle())
+                .help("G1 — true circular arc. G2 — curvature-continuous blend (smoother).")
+            }
+
+            Text(isChamfer ? "Setback (mm) — active corner" : "Radius (mm) — active corner")
+                .font(PlasticityFont.label)
+                .foregroundColor(Color.text_secondary)
+            // Edits ONLY the active (last-selected) corner — fillets are individual
+            // (MAS-91). Esc unfocuses so single-key shortcuts work again.
+            TextField("Value", value: filletFieldValue, format: .number)
+                .textFieldStyle(PlainTextFieldStyle())
+                .focused($isFilletFieldFocused)
+                .padding(6)
+                .background(Color.bg_input)
+                .cornerRadius(4)
+                .foregroundColor(Color.text_primary)
+                .font(PlasticityFont.body)
+                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+                .onSubmit { state.setActiveCornerValue(state.filletToolRadius) }
+
+            Text(activeCorners == 0
+                 ? "Select a shape (or click its corners) to \(isChamfer ? "chamfer" : "fillet")."
+                 : "\(activeCorners) corner\(activeCorners == 1 ? "" : "s") — each is individual. Drag the corner arrow or edit the active corner's value.")
+                .font(PlasticityFont.label)
+                .foregroundColor(Color.text_muted)
+        }
+    }
+
     private var paperFoldingSection: some View {
-        if state.currentTool == .select {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Image(systemName: "scissors")
-                        .foregroundColor(Color.accent)
-                    Text("PAPER FOLDING")
-                        .font(PlasticityFont.header)
-                        .foregroundColor(Color.text_primary)
-                        .tracking(0.5)
-                    Spacer()
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundColor(Color.text_secondary)
-                        .rotationEffect(isPaperFoldingExpanded ? .degrees(90) : .zero)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Image(systemName: "scissors")
+                    .foregroundColor(Color.accent)
+                Text("PAPER FOLDING")
+                    .font(PlasticityFont.header)
+                    .foregroundColor(Color.text_primary)
+                    .tracking(0.5)
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundColor(Color.text_secondary)
+                    .rotationEffect(isPaperFoldingExpanded ? .degrees(90) : .zero)
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                withAnimation(.easeOut(duration: 0.15)) {
+                    isPaperFoldingExpanded.toggle()
                 }
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    withAnimation(.easeOut(duration: 0.15)) {
-                        isPaperFoldingExpanded.toggle()
-                    }
-                }
-                .help("Toggle Paper Folding (crease pattern / glue tabs) settings panel")
-                
-                if isPaperFoldingExpanded {
+            }
+            .help("Toggle Paper Folding (crease pattern / glue tabs) settings panel")
+            
+            if isPaperFoldingExpanded {
                     VStack(alignment: .leading, spacing: 10) {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("CREASE PATTERN")
@@ -1179,35 +1517,33 @@ extension ContentView {
             .background(Color.bg_input.opacity(0.4))
             .cornerRadius(4)
             .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_subtle, lineWidth: 1))
-        }
     }
 
     @ViewBuilder
     private var patterningSection: some View {
-        if state.currentTool == .select {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Image(systemName: "square.grid.3x3")
-                        .foregroundColor(Color.accent)
-                    Text("PATTERNING")
-                        .font(PlasticityFont.header)
-                        .foregroundColor(Color.text_primary)
-                        .tracking(0.5)
-                    Spacer()
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundColor(Color.text_secondary)
-                        .rotationEffect(isPatterningExpanded ? .degrees(90) : .zero)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Image(systemName: "square.grid.3x3")
+                    .foregroundColor(Color.accent)
+                Text("PATTERNING")
+                    .font(PlasticityFont.header)
+                    .foregroundColor(Color.text_primary)
+                    .tracking(0.5)
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundColor(Color.text_secondary)
+                    .rotationEffect(isPatterningExpanded ? .degrees(90) : .zero)
+            }
+            .contentShape(Rectangle())
+            .onTapGesture {
+                withAnimation(.easeOut(duration: 0.15)) {
+                    isPatterningExpanded.toggle()
                 }
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    withAnimation(.easeOut(duration: 0.15)) {
-                        isPatterningExpanded.toggle()
-                    }
-                }
-                .help("Toggle Patterning (grid / path duplicate) settings panel")
-                
-                if isPatterningExpanded {
+            }
+            .help("Toggle Patterning (grid / path duplicate) settings panel")
+            
+            if isPatterningExpanded {
                     VStack(alignment: .leading, spacing: 10) {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("GRID PATTERN")
@@ -1326,7 +1662,6 @@ extension ContentView {
             .background(Color.bg_input.opacity(0.4))
             .cornerRadius(4)
             .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_subtle, lineWidth: 1))
-        }
     }
 
     @ViewBuilder
@@ -1610,54 +1945,221 @@ extension ContentView {
     @ViewBuilder
     private var layersSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
+            // Header with action buttons
+            HStack(spacing: 8) {
                 Image(systemName: "square.3.layers.3d")
                     .foregroundColor(Color.accent)
                 Text("LAYERS")
                     .font(PlasticityFont.header)
                     .foregroundColor(Color.text_primary)
                     .tracking(0.5)
+                
                 Spacer()
+                
+                // Add Layer Button
+                Button(action: {
+                    let num = state.layers.count + 1
+                    state.addLayer(name: "Layer \(num)")
+                }) {
+                    Image(systemName: "plus")
+                        .font(.system(size: 11, weight: .bold))
+                }
+                .buttonStyle(PlainButtonStyle())
+                .help("Add a new layer")
+                
+                // Add Folder Button
+                Button(action: {
+                    let num = state.layerFolders.count + 1
+                    state.addFolder(name: "Folder \(num)")
+                }) {
+                    Image(systemName: "folder.badge.plus")
+                        .font(.system(size: 11))
+                }
+                .buttonStyle(PlainButtonStyle())
+                .help("Add a new folder")
             }
             .padding(.bottom, 4)
             
-            VStack(alignment: .leading, spacing: 6) {
-                if state.layers.isEmpty {
+            // List of hierarchical items
+            VStack(alignment: .leading, spacing: 5) {
+                let items = state.getFlattenedLayerItems()
+                if items.isEmpty {
                     Text("No layers")
                         .font(PlasticityFont.body)
                         .foregroundColor(Color.text_muted)
                         .padding(.vertical, 4)
                 } else {
-                    ForEach($state.layers) { $layer in
-                        HStack(spacing: 8) {
-                            Button(action: {
-                                layer.visible.toggle()
-                            }) {
-                                Image(systemName: layer.visible ? "eye" : "eye.slash")
-                                    .font(.system(size: 11))
-                                    .foregroundColor(layer.visible ? Color.text_primary : Color.text_muted)
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 5) {
+                            ForEach(items) { item in
+                                HStack(spacing: 6) {
+                                    // Indentation
+                                    Spacer().frame(width: CGFloat(item.depth * 14))
+                                    
+                                    if item.isFolder {
+                                        // Folder expand/collapse chevron
+                                        Button(action: {
+                                            if state.expandedFolderIds.contains(item.id) {
+                                                state.expandedFolderIds.remove(item.id)
+                                            } else {
+                                                state.expandedFolderIds.insert(item.id)
+                                            }
+                                        }) {
+                                            Image(systemName: state.expandedFolderIds.contains(item.id) ? "chevron.down" : "chevron.right")
+                                                .font(.system(size: 8, weight: .black))
+                                                .foregroundColor(Color.text_secondary)
+                                                .frame(width: 12, height: 12)
+                                        }
+                                        .buttonStyle(PlainButtonStyle())
+                                        
+                                        Image(systemName: state.expandedFolderIds.contains(item.id) ? "folder.fill" : "folder")
+                                            .font(.system(size: 10))
+                                            .foregroundColor(Color.accent)
+                                    } else {
+                                        // Layer visibility toggle
+                                        Button(action: {
+                                            if let idx = state.layers.firstIndex(where: { $0.id == item.id }) {
+                                                state.layers[idx].visible.toggle()
+                                            }
+                                        }) {
+                                            Image(systemName: item.visible ? "eye" : "eye.slash")
+                                                .font(.system(size: 10))
+                                                .foregroundColor(item.visible ? Color.text_primary : Color.text_muted)
+                                                .frame(width: 12, height: 12)
+                                        }
+                                        .buttonStyle(PlainButtonStyle())
+                                        
+                                        // Premium color dot overlaying borderless color picker
+                                        ZStack {
+                                            Circle()
+                                                .fill(item.color ?? Color.clear)
+                                                .frame(width: 10, height: 10)
+                                            ColorPicker("", selection: Binding(
+                                                get: { item.color ?? Color.clear },
+                                                set: { state.colorLayer(id: item.id, newColorHex: $0.toHex()) }
+                                            ))
+                                            .labelsHidden()
+                                            .opacity(0.015)
+                                            .frame(width: 10, height: 10)
+                                        }
+                                        .frame(width: 12, height: 12)
+                                    }
+                                    
+                                    // Renamable Name text field / label
+                                    if renamingItemId == item.id {
+                                        TextField("", text: $renamingText, onCommit: {
+                                            if item.isFolder {
+                                                state.renameFolder(id: item.id, newName: renamingText)
+                                            } else {
+                                                state.renameLayer(id: item.id, newName: renamingText)
+                                            }
+                                            renamingItemId = nil
+                                        })
+                                        .textFieldStyle(PlainTextFieldStyle())
+                                        .font(PlasticityFont.body)
+                                        .foregroundColor(Color.text_primary)
+                                        .background(Color.bg_input)
+                                        .frame(maxWidth: .infinity)
+                                    } else {
+                                        Text(item.name)
+                                            .font(PlasticityFont.body)
+                                            .foregroundColor((item.isFolder || item.visible) ? Color.text_primary : Color.text_muted)
+                                            .gesture(
+                                                TapGesture(count: 2).onEnded {
+                                                    renamingItemId = item.id
+                                                    renamingText = item.name
+                                                }
+                                            )
+                                        
+                                        Spacer()
+                                    }
+                                    
+                                    // Context actions menu for ordering and grouping
+                                    Menu {
+                                        Button("Rename") {
+                                            renamingItemId = item.id
+                                            renamingText = item.name
+                                        }
+                                        
+                                        Divider()
+                                        
+                                        Button("Move Up") {
+                                            state.moveUp(id: item.id, isFolder: item.isFolder)
+                                        }
+                                        Button("Move Down") {
+                                            state.moveDown(id: item.id, isFolder: item.isFolder)
+                                        }
+                                        
+                                        Divider()
+                                        
+                                        // Change group folder sub-menu
+                                        Menu("Move to Folder") {
+                                            Button("Root Level") {
+                                                if item.isFolder {
+                                                    state.moveFolder(id: item.id, toFolderId: nil)
+                                                } else {
+                                                    state.moveLayer(id: item.id, toFolderId: nil)
+                                                }
+                                            }
+                                            ForEach(state.layerFolders.filter { $0.id != item.id }) { folder in
+                                                Button(folder.name) {
+                                                    if item.isFolder {
+                                                        state.moveFolder(id: item.id, toFolderId: folder.id)
+                                                    } else {
+                                                        state.moveLayer(id: item.id, toFolderId: folder.id)
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        
+                                        Divider()
+                                        
+                                        Button("Delete", role: .destructive) {
+                                            if item.isFolder {
+                                                state.deleteFolder(id: item.id)
+                                            } else {
+                                                state.deleteLayer(id: item.id)
+                                            }
+                                        }
+                                    } label: {
+                                        Image(systemName: "ellipsis")
+                                            .font(.system(size: 9))
+                                            .foregroundColor(Color.text_secondary)
+                                            .frame(width: 14, height: 14)
+                                    }
+                                    .menuStyle(BorderlessButtonMenuStyle())
+                                    .menuIndicator(.hidden)
+                                    .frame(width: 16)
+                                }
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 4)
+                                .background(!item.isFolder && state.activeLayerIds.contains(item.id) ? Color.accent.opacity(0.12) : Color.clear)
+                                .cornerRadius(3)
+                                .contentShape(Rectangle())
+                                .simultaneousGesture(
+                                    TapGesture(count: 1).onEnded {
+                                        if !item.isFolder {
+                                            state.activeLayerId = item.id
+                                        }
+                                    }
+                                )
+                                .onDrag {
+                                    NSItemProvider(object: item.id as NSString)
+                                }
+                                .onDrop(of: [.text], delegate: LayerDropDelegate(item: item, state: state))
                             }
-                            .buttonStyle(PlainButtonStyle())
-                            
-                            Circle()
-                                .fill(layer.color)
-                                .frame(width: 8, height: 8)
-                            
-                            Text(layer.name)
-                                .font(PlasticityFont.body)
-                                .foregroundColor(layer.visible ? Color.text_primary : Color.text_muted)
-                            
-                            Spacer()
                         }
-                        .padding(.vertical, 3)
                     }
+                    .frame(maxHeight: .infinity)
+                    // Animate drag-to-reorder reflow so rows glide into place
+                    // rather than teleporting (MAS-60).
+                    .animation(.spring(response: 0.3, dampingFraction: 0.82),
+                               value: state.layers.map { $0.id } + state.layerFolders.map { $0.id })
                 }
             }
         }
-        .padding(8)
-        .background(Color.bg_input.opacity(0.4))
-        .cornerRadius(4)
-        .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_subtle, lineWidth: 1))
+        // Full-panel with a margin, not a boxed sub-panel (MAS-60).
+        .padding(.horizontal, 2)
     }
 
     @ViewBuilder
@@ -1706,16 +2208,187 @@ extension ContentView {
                 textPlacingSection
             } else if state.currentTool == .sketchLine || state.currentTool == .sketchCircle {
                 activeToolDetailsSection
-            } else if state.currentTool == .select {
+            } else if state.currentTool == .fillet || state.currentTool == .chamfer {
+                filletSection
+            } else if state.currentTool == .paperFolding {
                 paperFoldingSection
+            } else if state.currentTool == .patterning {
                 patterningSection
+            } else if state.currentTool == .move {
+                moveSection
+            } else if state.currentTool == .convertLines {
+                convertLinesSection
+            } else if state.currentTool == .mirror {
+                mirrorSection
+            } else if state.currentTool == .select {
+                selectionSection
+                dimensionEditorSection
+                // Editing an existing converted-line group inline (MAS-58).
+                if state.selectedConvertedGroupId != nil {
+                    convertLinesSection
+                }
             }
+        }
+    }
+
+    /// CONVERT LINES tool options + inline editor for a selected converted group
+    /// (MAS-58). Picks the style and per-style parameters, then applies.
+    private var convertLinesSection: some View {
+        let editingGroup = state.selectedConvertedGroupId
+        let style = state.convertLineStyle
+        let keys = AppState.convertLineParamKeys[style] ?? []
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Image(systemName: "scribble").foregroundColor(Color.accent)
+                Text("CONVERT LINES")
+                    .font(PlasticityFont.header)
+                    .foregroundColor(Color.text_primary).tracking(0.5)
+                Spacer()
+            }
+            Picker("Style", selection: Binding(
+                get: { state.convertLineStyle },
+                set: { newStyle in
+                    state.convertLineStyle = newStyle
+                    if let gid = editingGroup { state.reconvertGroup(gid, style: newStyle, settings: state.convertLineSettings[newStyle]) }
+                }
+            )) {
+                ForEach(AppState.convertLineStyles, id: \.self) { s in
+                    Text(s.capitalized).tag(s)
+                }
+            }
+            .pickerStyle(.menu)
+
+            ForEach(keys, id: \.self) { key in
+                HStack {
+                    Text(convertParamLabel(key))
+                        .font(PlasticityFont.label)
+                        .foregroundColor(Color.text_secondary)
+                    Spacer()
+                    TextField("", value: convertParamBinding(key), format: .number)
+                        .textFieldStyle(PlainTextFieldStyle())
+                        .padding(4)
+                        .frame(width: 60)
+                        .background(Color.bg_input)
+                        .cornerRadius(4)
+                        .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+                }
+            }
+
+            if let gid = editingGroup {
+                Button("Update Lines") {
+                    state.reconvertGroup(gid, style: style, settings: state.convertLineSettings[style])
+                }
+                .buttonStyle(PlasticityButtonStyle(isEnabled: true))
+            } else {
+                Button("Convert Selection") {
+                    state.convertSelectedLines(style: style, settings: state.convertLineSettings[style] ?? [:])
+                }
+                .buttonStyle(PlasticityButtonStyle(isEnabled: state.selectionHasConvertibleLines))
+                .disabled(!state.selectionHasConvertibleLines)
+                .help("Replace the selected straight lines with the chosen style")
+            }
+        }
+    }
+
+    private func convertParamBinding(_ key: String) -> Binding<Double> {
+        Binding(
+            get: { state.convertLineSettings[state.convertLineStyle]?[key] ?? 0 },
+            set: { state.convertLineSettings[state.convertLineStyle, default: [:]][key] = $0 }
+        )
+    }
+
+    private func convertParamLabel(_ key: String) -> String {
+        switch key {
+        case "dash_length": return "Dash Length (mm)"
+        case "gap": return "Gap (mm)"
+        case "spacing": return "Spacing (mm)"
+        case "dot_radius": return "Dot Radius (mm)"
+        case "wavelength": return "Wavelength (mm)"
+        case "amplitude": return "Amplitude (mm)"
+        case "samples_per_wave": return "Samples / Wave"
+        case "tilt": return "Tilt (°)"
+        case "size": return "Size (mm)"
+        default: return key.capitalized
+        }
+    }
+
+    /// MOVE tool options (MAS-80): create-copy, point-to-point, scaling.
+    private var moveSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Image(systemName: "arrow.up.and.down.and.arrow.left.and.right").foregroundColor(Color.accent)
+                Text("MOVE")
+                    .font(PlasticityFont.header)
+                    .foregroundColor(Color.text_primary).tracking(0.5)
+                Spacer()
+            }
+            Text("Drag the gizmo to move/rotate. Use the options below for precise moves.")
+                .font(PlasticityFont.label)
+                .foregroundColor(Color.text_secondary)
+
+            Toggle("Create copy (move duplicates)", isOn: $state.moveCreateCopy)
+                .font(PlasticityFont.label)
+
+            Divider().background(Color.border_subtle)
+
+            Text("POINT TO POINT")
+                .font(PlasticityFont.label).fontWeight(.bold).foregroundColor(Color.accent)
+            Button(state.moveP2PActive ? (state.moveP2PFrom == nil ? "Click source point…" : "Click destination…") : "Start Point-to-Point") {
+                state.moveP2PActive.toggle()
+                state.moveP2PFrom = nil
+            }
+            .buttonStyle(PlasticityButtonStyle(isEnabled: !state.selectedHandles.isEmpty))
+            .disabled(state.selectedHandles.isEmpty)
+
+            Divider().background(Color.border_subtle)
+
+            Text("SCALE")
+                .font(PlasticityFont.label).fontWeight(.bold).foregroundColor(Color.accent)
+            Toggle("From center (off = corner)", isOn: $state.moveScaleFromCenter)
+                .font(PlasticityFont.label)
+            HStack {
+                Text("Factor").font(PlasticityFont.label).foregroundColor(Color.text_secondary)
+                Spacer()
+                TextField("", value: $state.moveScaleFactor, format: .number)
+                    .textFieldStyle(PlainTextFieldStyle())
+                    .padding(4).frame(width: 60)
+                    .background(Color.bg_input).cornerRadius(4)
+                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+            }
+            Button("Apply Scale") { state.scaleSelected(factor: state.moveScaleFactor) }
+                .buttonStyle(PlasticityButtonStyle(isEnabled: !state.selectedHandles.isEmpty && state.moveScaleFactor > 0))
+                .disabled(state.selectedHandles.isEmpty || state.moveScaleFactor <= 0)
+        }
+    }
+
+    /// MIRROR tool options (MAS-55).
+    private var mirrorSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Image(systemName: "flip.horizontal").foregroundColor(Color.accent)
+                Text("MIRROR")
+                    .font(PlasticityFont.header)
+                    .foregroundColor(Color.text_primary).tracking(0.5)
+                Spacer()
+            }
+            Toggle("Mirror (flip) copy", isOn: $state.mirrorFlip)
+                .font(PlasticityFont.label)
+            Toggle("Keep live link", isOn: $state.mirrorKeepLink)
+                .font(PlasticityFont.label)
+            Text(state.mirrorStageHint)
+                .font(PlasticityFont.label)
+                .foregroundColor(Color.text_secondary)
+            if state.mirrorAxisStart != nil {
+                Button("Confirm Mirror") { state.confirmMirror() }
+                    .buttonStyle(PlasticityButtonStyle(isEnabled: true))
+            }
+            Button("Reset") { state.resetMirrorTool() }
+                .buttonStyle(PlasticityButtonStyle(isEnabled: true))
         }
     }
 }
 
 extension ContentView {
-    @ViewBuilder
     private var leftToolbar: some View {
         VStack(spacing: 4) {
             ScrollView(showsIndicators: false) {
@@ -1732,25 +2405,27 @@ extension ContentView {
                         .padding(.vertical, 4)
                     
                     if state.activeMode == .twoD {
-                        // Show 2D tools only when in 2D mode
-                        let mainTools: [TwoDTool] = [.select, .pan, .offset, .addHoles, .cleanup, .measure]
-                        ForEach(mainTools, id: \.self) { tool in
-                            ToolButton(tool: tool, state: state)
+                        // Main tools, ordered by the persisted layout. Each one is
+                        // Command-draggable to reorder or move into another group
+                        // (MAS-99); a plain click still just activates it.
+                        ForEach(layout.items(in: .main)) { def in
+                            OrganizableToolButton(def: def, state: state, layout: layout)
                         }
-                        
-                        Divider()
-                            .background(Color.border_subtle)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 2)
-                        
-                        let isShapeActive = state.currentTool == .sketchLine || state.currentTool == .sketchCircle || state.currentTool == .sketchRectangle || state.currentTool == .sketchText
+
+                        // Shapes — opens a flyout grid of sketch tools (MAS-93). The
+                        // icon is also a drop target: ⌘-dragging a shape tool onto it
+                        // moves the tool into Shapes (MAS-99).
+                        let isShapeActive = layout.items(in: .shapes).contains { def in
+                            if case .tool(let t) = def.kind { return t == state.currentTool }
+                            return false
+                        }
                         Button(action: {
-                            isShapesExpanded.toggle()
+                            showShapes.toggle()
                         }) {
                             HStack(spacing: 0) {
                                 Image(systemName: "triangle")
                                     .font(.system(size: 14))
-                                Image(systemName: isShapesExpanded ? "chevron.down" : "chevron.right")
+                                Image(systemName: "chevron.right")
                                     .font(.system(size: 8))
                                     .padding(.leading, 2)
                             }
@@ -1761,24 +2436,47 @@ extension ContentView {
                         .buttonStyle(PlainButtonStyle())
                         .background(isShapeActive ? Color.bg_selected.opacity(0.6) : (isShapesHovered ? Color.accent.opacity(0.08) : Color.clear))
                         .foregroundColor(isShapeActive ? Color.accent : (isShapesHovered ? Color.accent_hover : Color.text_secondary))
-                        .help("Shapes Sketching")
+                        .help("Shapes Sketching  (⌘-drop a shape tool here)")
                         .onHover { hover in
                             isShapesHovered = hover
                         }
-                        
-                        if isShapesExpanded || isShapeActive {
-                            VStack(spacing: 2) {
-                                let shapeTools: [TwoDTool] = [.sketchLine, .sketchCircle, .sketchRectangle, .sketchText]
-                                ForEach(shapeTools, id: \.self) { tool in
-                                    ShapeToolButton(tool: tool, state: state)
-                                }
+                        .onDrop(of: [UTType.text], isTargeted: $isShapesHovered) { providers in
+                            handleToolbarDrop(providers) { id in
+                                if layout.canPlace(id, in: .shapes) { layout.move(id, to: .shapes) }
                             }
-                            .padding(.vertical, 4)
-                            .background(Color.bg_panel.opacity(0.5))
-                            .cornerRadius(4)
+                        }
+                        .popover(isPresented: $showShapes, arrowEdge: .trailing) {
+                            OrganizableToolGrid(state: state, layout: layout, container: .shapes,
+                                                onActivate: { showShapes = false })
+                                .padding(10)
+                        }
+
+                        // "More tools" overflow (MAS-66). ⌘-dropping a tool onto the
+                        // ••• icon moves it into the More-tools group (MAS-99).
+                        Button(action: { showMoreTools.toggle() }) {
+                            Image(systemName: "ellipsis")
+                                .font(.system(size: 14))
+                                .frame(width: 24, height: 24)
+                                .padding(10)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(PlainButtonStyle())
+                        .background(isMoreToolsHovered ? Color.accent.opacity(0.08) : Color.clear)
+                        .foregroundColor(isMoreToolsHovered ? Color.accent_hover : Color.text_secondary)
+                        .help("More tools  (⌘-drop a tool here)")
+                        .onHover { isMoreToolsHovered = $0 }
+                        .onDrop(of: [UTType.text], isTargeted: $isMoreToolsHovered) { providers in
+                            handleToolbarDrop(providers) { id in
+                                if layout.canPlace(id, in: .extra) { layout.move(id, to: .extra) }
+                            }
+                        }
+                        .popover(isPresented: $showMoreTools, arrowEdge: .trailing) {
+                            OrganizableToolGrid(state: state, layout: layout, container: .extra,
+                                                onActivate: { showMoreTools = false })
+                                .padding(10)
                         }
                     }
-                    
+
                     Spacer()
                 }
             }
@@ -1787,29 +2485,9 @@ extension ContentView {
         .background(Color.bg_panel)
         .border(Color.border_subtle, width: 1)
     }
-
     @ViewBuilder
     private var twoDEditorView: some View {
         HStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 0) {
-                VSplitView(
-                    top: ScrollView {
-                        activeToolOptions
-                            .padding(14)
-                    },
-                    bottom: ScrollView {
-                        layersSection
-                            .padding(14)
-                    },
-                    topHeight: $leftSidebarTopHeight,
-                    minTopHeight: 100,
-                    minBottomHeight: 100
-                )
-            }
-            .frame(width: 240)
-            .background(Color.bg_panel)
-            .border(width: 1, edges: [.trailing], color: Color.border_subtle)
-            
             VStack(spacing: 0) {
                 if let editingItem = state.activeEditingBatchItem {
                     HStack {
@@ -1878,57 +2556,7 @@ extension ContentView {
                     .border(width: 1, edges: [.bottom], color: Color.border_subtle)
                 }
                 
-                // Top Toolbar (always visible in 2D mode)
-                HStack(spacing: 16) {
-                    Button(action: {
-                        state.canvasScale = 1.0
-                        state.canvasOffset = .zero
-                    }) {
-                        Image(systemName: "house.fill")
-                            .foregroundColor(Color.text_primary)
-                            .padding(4)
-                    }
-                    .buttonStyle(PlainButtonStyle())
-                    .help("Recenter View")
 
-                    Button(action: { state.snapEnabled.toggle() }) {
-                        Image(systemName: state.snapEnabled ? "dot.scope" : "scope")
-                            .foregroundColor(state.snapEnabled ? Color.accent : Color.text_secondary)
-                            .padding(4)
-                    }
-                    .buttonStyle(PlainButtonStyle())
-                    .help(state.snapEnabled ? "Snapping: On (placement snaps to points & 90°)" : "Snapping: Off")
-
-                    Button(action: { state.chainSelectionEnabled.toggle() }) {
-                        Image(systemName: state.chainSelectionEnabled ? "link.circle.fill" : "link.circle")
-                            .foregroundColor(state.chainSelectionEnabled ? Color.accent : Color.text_secondary)
-                            .padding(4)
-                    }
-                    .buttonStyle(PlainButtonStyle())
-                    .help(state.chainSelectionEnabled ? "Chain Selection: On" : "Chain Selection: Off")
-
-                    Button(action: { state.gridVisible.toggle() }) {
-                        Image(systemName: state.gridVisible ? "grid" : "grid.circle")
-                            .foregroundColor(state.gridVisible ? Color.accent : Color.text_secondary)
-                            .padding(4)
-                    }
-                    .buttonStyle(PlainButtonStyle())
-                    .help(state.gridVisible ? "Grid: Visible" : "Grid: Hidden")
-
-                    Button(action: { state.isLogTrayExpanded.toggle() }) {
-                        Image(systemName: state.isLogTrayExpanded ? "terminal.fill" : "terminal")
-                            .foregroundColor(state.isLogTrayExpanded ? Color.accent : Color.text_secondary)
-                            .padding(4)
-                    }
-                    .buttonStyle(PlainButtonStyle())
-                    .help(state.isLogTrayExpanded ? "Log Tray: Expanded" : "Log Tray: Collapsed")
-
-                    Spacer()
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 6)
-                .background(Color.bg_panel)
-                .border(width: 1, edges: [.bottom], color: Color.border_subtle)
                 
                 // Main 2D Viewport
                 ZStack {
@@ -2019,85 +2647,25 @@ extension ContentView {
             }
             .frame(maxWidth: .infinity)
             
-            // Right Panel (240px wide)
+            // Right Panel (240px wide, resizable unified sidebar)
             VStack(alignment: .leading, spacing: 0) {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 12) {
-                        selectionSection
-                        dimensionEditorSection
-                        referenceImageSection
-                        importSettingsSection
-                    }
-                    .padding(14)
-                }
-                
-                // Bottom-anchored Export Settings (Always visible)
-                Divider().background(Color.border_subtle)
-                
-                VStack(alignment: .leading, spacing: 8) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack {
-                            Image(systemName: "square.and.arrow.up")
-                                .foregroundColor(Color.accent)
-                            Text("EXPORT SETTINGS")
-                                .font(PlasticityFont.header)
-                                .foregroundColor(Color.text_primary)
-                                .tracking(0.5)
-                            Spacer()
-                            Image(systemName: "chevron.right")
-                                .font(.system(size: 9, weight: .bold))
-                                .foregroundColor(Color.text_secondary)
-                                .rotationEffect(isExportSettingsExpanded ? .degrees(90) : .zero)
-                        }
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            withAnimation(.easeOut(duration: 0.15)) {
-                                isExportSettingsExpanded.toggle()
-                            }
-                        }
-                        .help("Toggle Export Settings panel")
-                        
-                        if isExportSettingsExpanded {
-                            VStack(alignment: .leading, spacing: 6) {
-                                Picker("", selection: $exportFormat) {
-                                    Text("AutoCAD DXF (.dxf)").tag("dxf")
-                                    Text("Scalable Vector Graphics (.svg)").tag("svg")
-                                    Text("Document PDF (.pdf)").tag("pdf")
-                                    Text("Raster Image (.png)").tag("png")
-                                }
-                                .pickerStyle(DefaultPickerStyle())
-                                .labelsHidden()
-                                .help("Select format: AutoCAD DXF, SVG, PDF document, or PNG raster image")
-                                
-                                Toggle("Export Selected Only", isOn: $exportSelectedOnly)
-                                    .font(PlasticityFont.label)
-                                    .foregroundColor(Color.text_primary)
-                                    .toggleStyle(.checkbox)
-                                    .help("Export only currently selected canvas entities instead of the whole drawing")
-
-                                Toggle("Export Measurement Lines", isOn: $state.exportMeasurementLines)
-                                    .font(PlasticityFont.label)
-                                    .foregroundColor(Color.text_primary)
-                                    .toggleStyle(.checkbox)
-                                    .help("Include measurement/ruler lines as dashed construction lines (no dimension text). Saved with the project.")
-                            }
-                            .padding(.top, 4)
-                        }
-                    }
-                    
-                    Button("Export...") {
-                        runExportPanel(format: exportFormat)
-                    }
-                    .buttonStyle(PlasticityButtonStyle(isEnabled: state.currentFilePath != nil))
-                    .disabled(state.currentFilePath == nil)
-                    .help("Export the drawing file to disk with the selected format and options")
-                }
-                .padding(12)
-                .background(Color.bg_panel)
+                VSplitView(
+                    top: ScrollView {
+                        activeToolOptions
+                            .padding(14)
+                    },
+                    bottom: ScrollView {
+                        layersSection
+                            .padding(14)
+                    },
+                    topHeight: $leftSidebarTopHeight,
+                    minTopHeight: 100,
+                    minBottomHeight: 100
+                )
             }
             .frame(width: 240)
             .background(Color.bg_panel)
-            .border(Color.border_subtle, width: 1)
+            .border(width: 1, edges: [.leading], color: Color.border_subtle)
         }
     }
 
@@ -2189,6 +2757,8 @@ extension ContentView {
         .frame(maxWidth: .infinity)
     }
 
+
+
     @ViewBuilder
     private var logAndStatusBarView: some View {
         VStack(spacing: 0) {
@@ -2236,51 +2806,6 @@ extension ContentView {
                 .background(Color.bg_panel)
                 .border(Color.border_subtle, width: 1)
             }
-            
-            HStack {
-                Button(action: {
-                    state.isLogTrayExpanded.toggle()
-                }) {
-                    HStack(spacing: 6) {
-                        Image(systemName: state.isLogTrayExpanded ? "chevron.down" : "chevron.up")
-                            .font(.system(size: 10))
-                        Text("LOGS (\(state.logEntries.count))")
-                            .font(PlasticityFont.label)
-                    }
-                    .foregroundColor(Color.text_secondary)
-                }
-                .buttonStyle(PlainButtonStyle())
-                
-                Spacer()
-                
-                Text("MODE: \(state.activeMode == .twoD ? "2D DXF EDITOR" : "3D STEP IMPORTER")")
-                    .font(PlasticityFont.label)
-                    .foregroundColor(Color.accent)
-
-                Spacer()
-
-                if let selectedMeasure = state.selectedMeasurement {
-                    Text("MEASUREMENT | Length: \(String(format: "%.2f mm", selectedMeasure.distanceMm))")
-                        .font(PlasticityFont.label)
-                        .foregroundColor(Color.text_secondary)
-                } else if state.selectedHandles.count == 1,
-                          let handle = state.selectedHandles.first,
-                          let entity = state.entities.first(where: { $0.handle == handle }) {
-                    Text(entity.geometryDetails)
-                        .font(PlasticityFont.label)
-                        .foregroundColor(Color.text_secondary)
-                } else if state.selectedHandles.count > 1 {
-                    Text("SELECTED: \(state.selectedHandles.count) ENTITIES")
-                        .font(PlasticityFont.label)
-                        .foregroundColor(Color.text_secondary)
-                } else {
-                    Spacer().frame(width: 0)
-                }
-            }
-            .frame(height: 24)
-            .padding(.horizontal, 12)
-            .background(Color.bg_panel)
-            .border(Color.border_subtle, width: 1)
         }
     }
 }
@@ -2350,5 +2875,35 @@ struct VSplitView<Top: View, Bottom: View>: View {
                     .frame(maxHeight: .infinity)
             }
         }
+    }
+}
+
+class DragNSView: NSView {
+    override func mouseDown(with event: NSEvent) {
+        window?.performDrag(with: event)
+    }
+}
+
+struct WindowDragView: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        DragNSView()
+    }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}
+
+struct LayerDropDelegate: DropDelegate {
+    let item: AppState.LayerHierarchicalItem
+    let state: AppState
+    
+    func performDrop(info: DropInfo) -> Bool {
+        guard let provider = info.itemProviders(for: [.text]).first else { return false }
+        provider.loadItem(forTypeIdentifier: UTType.text.identifier, options: nil) { data, error in
+            guard let data = data as? Data,
+                  let sourceId = String(data: data, encoding: .utf8) else { return }
+            DispatchQueue.main.async {
+                state.reorderLayerOrFolder(sourceId: sourceId, targetId: item.id)
+            }
+        }
+        return true
     }
 }
