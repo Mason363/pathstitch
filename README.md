@@ -2,7 +2,7 @@
 
 **Pathstitch** is a native macOS CAD/CAM application for leathercraft, pattern making, and sewing. It pairs a SwiftUI front‑end with a Python geometry engine to give you precise 2D vector sketching, parametric editing, automatic stitch‑hole generation, and 3D‑to‑2D unfolding — all in one app.
 
-> ⚠️ **Status: developer preview.** Pathstitch builds and runs great on a properly set‑up dev machine, but it is **not yet a self‑contained app you can hand to someone else** — it shells out to a Python backend that currently lives at a fixed path. See **[Distribution status](#distribution-status-read-before-shipping)** before trying to ship a `.dmg`.
+> **Distribution:** the release `.app` is **self‑contained** — it bundles its own Python backend, so it runs on any **Apple‑Silicon Mac (macOS 14+)** with nothing else installed. Build one with [`scripts/package_app.sh`](scripts/package_app.sh) → a ready‑to‑share `.dmg`. It is ad‑hoc signed (no Apple Developer ID), so users [bypass Gatekeeper once](#installing-a-non-notarized-app).
 
 ---
 
@@ -102,88 +102,46 @@ pythonocc-core   # STEP import + 3D (OpenCASCADE bindings)
 
 ---
 
-## Distribution status (read before shipping)
+## How distribution works
 
-Pathstitch is **not yet a drop‑in app** for people who haven't set up the dev environment. Two things in
-`PythonBridge.swift` are hardcoded to this machine:
+The release app no longer depends on your conda env or repo path. At launch, `PythonBridge` looks for a
+bundled interpreter at `Pathstitch.app/Contents/Resources/pyenv/bin/python3.11` and a bundled copy of
+`pathstitch_core` next to it; if present (a packaged build) it uses those, otherwise it falls back to the
+developer conda env + repo (a build run straight from Xcode). So:
 
-```swift
-private let pythonPath  = "/opt/homebrew/Caskroom/miniconda/base/envs/pathstitch/bin/python"
-private let projectPath = "/Users/chen/Documents/Assets/Pathstitch"
-```
+- **From Xcode** → uses your local env (set the two fallback paths once, as in [Build & run](#build--run-from-source)).
+- **From a packaged `.dmg`** → uses the bundled env. Fully self‑contained.
 
-On any machine that doesn't have that exact interpreter and repo path, the worker never starts and every
-geometry action spins on “Processing…” forever (tracked as **MAS‑100**).
-
-**To make a `.dmg` that truly works for anyone**, the Python side has to travel inside the app bundle:
-
-1. Freeze the worker with **PyInstaller** (or `py2app`) into a self‑contained binary that includes `ezdxf`,
-   `shapely`, `numpy`, `matplotlib`, and `pythonocc-core`. *(OpenCASCADE is large — expect a few hundred MB.)*
-2. Copy that frozen backend into `Pathstitch.app/Contents/Resources/`.
-3. Change `PythonBridge` to launch the bundled binary resolved from `Bundle.main`, with no absolute paths.
-4. Add a request **timeout** so a missing/failed worker shows an error instead of hanging.
-
-Until that's done, the `.dmg` steps below are still 100% correct — they'll just produce an app that only
-runs on a machine configured like the dev box. They're documented so the pipeline is ready the moment the
-backend is bundled.
+**Platform:** the bundled env is **Apple‑Silicon (arm64)**, so the `.dmg` targets **Apple‑Silicon Macs**.
+For Intel you'd repackage on an Intel Mac (or build a universal env).
 
 ---
 
-## Building a `.dmg`
-
-### 1. Build a Release `.app`
+## Building a `.dmg` (one command)
 
 ```bash
-cd Pathstitch
-xcodebuild -project Pathstitch.xcodeproj -scheme Pathstitch \
-  -configuration Release -derivedDataPath build clean build
-# Result: build/Build/Products/Release/Pathstitch.app
+bash scripts/package_app.sh
+# → dist/Pathstitch-1.0.dmg   (~400 MB, self-contained, ad-hoc signed)
 ```
 
-*(Or in Xcode: Product ▸ Archive ▸ Distribute App ▸ Copy App.)*
+The script: builds the Release `.app`, copies a **trimmed** Python env (≈2.8 GB → ≈1.1 GB; OpenCASCADE
+stays, dev‑only LLVM/Qt/VTK/headers are dropped) and `pathstitch_core` into `Contents/Resources/`, ad‑hoc
+signs the bundle, and produces a **drag‑to‑install** `.dmg` (the app + an `Applications` symlink, so users
+drag one onto the other). Override the env location with `CONDA_ENV=/path/to/env bash scripts/package_app.sh`.
 
-### 2. Sign it (so it at least launches locally)
+### Prefer a prettier window? (`create-dmg`)
 
-A self‑built app is unsigned. An **ad‑hoc** signature lets it run on your own Mac:
+The `hdiutil` image the script makes is functional (app + Applications). For the classic window with a
+background arrow, install `brew install create-dmg` and run it against `dist/Pathstitch.app`:
 
 ```bash
-codesign --force --deep --sign - build/Build/Products/Release/Pathstitch.app
+create-dmg --volname "Pathstitch" --window-size 540 380 \
+  --icon "Pathstitch.app" 140 190 --app-drop-link 400 190 \
+  --hide-extension "Pathstitch.app" "Pathstitch-1.0.dmg" "dist/Pathstitch.app"
 ```
 
-For real distribution you need a paid **Apple Developer ID** signature + **notarization**
-(`xcrun notarytool`). Without that, recipients must follow the [Gatekeeper steps below](#installing-a-non-notarized-app).
-
-### 3a. Make the `.dmg` — easy way (`create-dmg`)
-
-```bash
-brew install create-dmg
-
-create-dmg \
-  --volname "Pathstitch" \
-  --window-size 540 380 \
-  --icon "Pathstitch.app" 140 190 \
-  --app-drop-link 400 190 \
-  --hide-extension "Pathstitch.app" \
-  "Pathstitch-1.0.dmg" \
-  "build/Build/Products/Release/Pathstitch.app"
-```
-
-This produces the classic **drag‑to‑install** window: the app icon on the left, an arrow, and the
-**Applications** folder on the right. Dragging the icon onto Applications installs it.
-
-### 3b. Make the `.dmg` — no extra tools (`hdiutil`)
-
-```bash
-STAGE=$(mktemp -d)
-cp -R "build/Build/Products/Release/Pathstitch.app" "$STAGE/"
-ln -s /Applications "$STAGE/Applications"          # the drag target
-hdiutil create -volname "Pathstitch" -srcfolder "$STAGE" \
-  -ov -format UDZO "Pathstitch-1.0.dmg"
-rm -rf "$STAGE"
-```
-
-You get the same drag‑and‑drop layout (app + Applications symlink) without the custom background graphic.
-For most personal projects this is plenty.
+> **Real notarization:** for a no‑warning install you'd need a paid **Apple Developer ID** signature +
+> `xcrun notarytool`. Without it the app is ad‑hoc signed and users do the one‑time Gatekeeper bypass below.
 
 ---
 

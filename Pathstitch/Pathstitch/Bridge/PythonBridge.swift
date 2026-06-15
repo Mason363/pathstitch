@@ -35,8 +35,27 @@ enum PythonBridgeError: Error, LocalizedError {
 actor PythonBridge {
     static let shared = PythonBridge()
 
-    private let pythonPath = "/opt/homebrew/Caskroom/miniconda/base/envs/pathstitch/bin/python"
-    private let projectPath = "/Users/chen/Documents/Assets/Pathstitch"
+    /// Resolved once. A distributed `.app` ships a self-contained Python env and a
+    /// copy of `pathstitch_core` under `Contents/Resources/`, so it runs on any Mac
+    /// with no conda/repo on disk. When running from Xcode (no bundled env) we fall
+    /// back to the developer's conda env + repo checkout.
+    private static let resolved: (python: String, projectPath: String) = {
+        let fm = FileManager.default
+        if let res = Bundle.main.resourceURL {
+            let py = res.appendingPathComponent("pyenv/bin/python3.11").path
+            var isDir: ObjCBool = false
+            let coreOK = fm.fileExists(atPath: res.appendingPathComponent("pathstitch_core").path,
+                                       isDirectory: &isDir) && isDir.boolValue
+            if fm.isExecutableFile(atPath: py) && coreOK {
+                return (py, res.path)
+            }
+        }
+        // Developer fallback (running from Xcode against the working tree).
+        return ("/opt/homebrew/Caskroom/miniconda/base/envs/pathstitch/bin/python",
+                "/Users/chen/Documents/Assets/Pathstitch")
+    }()
+    private var pythonPath: String { Self.resolved.python }
+    private var projectPath: String { Self.resolved.projectPath }
     private let requestTimeoutNanos: UInt64 = 60_000_000_000 // 60s
 
     // Live worker state.
@@ -115,6 +134,10 @@ actor PythonBridge {
         var env = ProcessInfo.processInfo.environment
         env["PYTHONPATH"] = projectPath
         env["PYTHONUNBUFFERED"] = "1"
+        // A stray PYTHONHOME in the user's shell would override the bundled env's
+        // prefix and break a distributed build; the interpreter finds its own
+        // stdlib relative to the executable, so drop it.
+        env["PYTHONHOME"] = nil
         proc.environment = env
 
         let inPipe = Pipe()
