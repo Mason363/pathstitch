@@ -4301,13 +4301,99 @@ def _trim_circular(msp, ent, point):
     return new_handles
 
 
+def _project_t(p, a, b):
+    """Clamped projection of point p onto segment a→b: (t in [0,1], distance)."""
+    rx, ry = b[0] - a[0], b[1] - a[1]
+    rr = rx * rx + ry * ry
+    if rr < 1e-12:
+        return 0.0, math.hypot(p[0] - a[0], p[1] - a[1])
+    t = max(0.0, min(1.0, ((p[0] - a[0]) * rx + (p[1] - a[1]) * ry) / rr))
+    return t, math.hypot(p[0] - (a[0] + rx * t), p[1] - (a[1] + ry * t))
+
+
+def _whole_trim_polyline(msp, ent, pts, closed, point):
+    """Trim a whole polyline as one curve (curves-as-curves): remove the entire
+    portion under the cursor bounded by where *other* geometry crosses it — not
+    just the clicked flattened edge. Used for pen curves so a cut removes the
+    whole part separated by a line. Returns the surviving fragment handles."""
+    layer = ent.dxf.layer
+    m = len(pts)
+    edges = list(zip(pts, pts[1:]))
+    if closed and m > 2:
+        edges.append((pts[-1], pts[0]))
+    E = len(edges)
+    if E == 0:
+        return None
+
+    # Click position along the whole polyline, as edge_index + t.
+    ci, ct, bestd = 0, 0.0, None
+    for i, (a, b) in enumerate(edges):
+        t, d = _project_t(point, a, b)
+        if bestd is None or d < bestd:
+            ci, ct, bestd = i, t, d
+    click_pos = ci + ct
+
+    # Every crossing with other geometry, as a position along the polyline.
+    cuts = []
+    for i, (a, b) in enumerate(edges):
+        for t in _trim_intersection_params(a, b, msp, ent.dxf.handle):
+            cuts.append(round(i + t, 9))
+    cuts = sorted(set(cuts))
+
+    def at(pos):
+        e = int(math.floor(pos)) % E if closed else max(0, min(E - 1, int(math.floor(pos))))
+        a, b = edges[e]
+        t = pos - math.floor(pos)
+        if not closed and pos >= E:
+            return (pts[-1][0], pts[-1][1])
+        return (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
+
+    def subpath(lo, hi):
+        out = [at(lo)]
+        k = int(math.floor(lo)) + 1
+        while k < hi - 1e-9:
+            if k > lo + 1e-9:
+                out.append((pts[k % m][0], pts[k % m][1]))
+            k += 1
+        out.append(at(hi))
+        return out
+
+    msp.delete_entity(ent)
+    if not cuts:
+        return []   # a free curve with no crossings is removed whole
+
+    new_handles = []
+    if closed and m > 2:
+        below = [c for c in cuts if c <= click_pos]
+        above = [c for c in cuts if c > click_pos]
+        lower = below[-1] if below else cuts[-1]
+        upper = above[0] if above else cuts[0]
+        # Survivor: from `upper` forward around the loop to `lower` (one open path).
+        end = lower if lower > upper else lower + E
+        h = _emit_path(msp, subpath(upper, end), layer)
+        if h:
+            new_handles.append(h)
+    else:
+        below = [c for c in cuts if c <= click_pos]
+        above = [c for c in cuts if c >= click_pos]
+        lower = below[-1] if below else 0.0
+        upper = above[0] if above else float(E)
+        for lo, hi in ((0.0, lower), (upper, float(E))):
+            if hi - lo > 1e-9:
+                h = _emit_path(msp, subpath(lo, hi), layer)
+                if h:
+                    new_handles.append(h)
+    return new_handles
+
+
 def op_trim_segment(args: Dict[str, Any]) -> Dict[str, Any]:
     """Fusion-style trim (MAS-98). Cuts the target entity's clicked edge at every
     intersection with other geometry and removes only the sub-segment under the
     cursor. Works on a LINE or any polyline edge: an end piece shortens, an interior
     piece splits, a closed shape opens, and a fully-bounded-free piece deletes that
-    span. args: input, output, handle, seg_index (edge of a polyline; 0 for a line),
-    point [x, y]."""
+    span. With `whole` set (a pen curve), the entire portion bounded by crossings
+    is removed instead. args: input, output, handle, seg_index, point [x, y],
+    whole (bool)."""
     input_path = args.get("input")
     output_path = args.get("output")
     handle = args.get("handle")
@@ -4336,6 +4422,13 @@ def op_trim_segment(args: Dict[str, Any]) -> Dict[str, Any]:
         if host is None:
             return {"status": "error", "message": "Trim works on lines, arcs, circles and polylines."}
         pts, closed = host
+        # Pen curves trim as one whole curve: drop the entire portion bounded by
+        # crossings, not just the clicked flattened edge (curves-as-curves).
+        if bool(args.get("whole", False)) and len(pts) >= 2:
+            new_handles = _whole_trim_polyline(msp, ent, pts, closed, point)
+            if new_handles is not None:
+                doc.saveas(output_path)
+                return {"status": "ok", "data": {"new_handles": new_handles}}
         m = len(pts)
         if m < 2:
             return {"status": "error", "message": "Nothing to trim."}

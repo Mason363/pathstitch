@@ -119,10 +119,27 @@ rearrangeable toolbar.
 - **Batch mode** — operate over many files at once.
 
 **Workspace**
-- **Command palette** — `⌘K` to find any tool or action.
+- **Command palette** — `S` or `⌘K` to find any tool or action.
 - **Keybinds & themes** — customizable shortcuts, light/dark.
 - **Toolbar** — zoned, rearrangeable, resizable panels with collapsible options.
 - **Recent projects** — welcome screen with reveal/remove.
+
+### Keyboard shortcuts
+
+Single‑key, Fusion/Photoshop‑style defaults (all rebindable in Preferences → Shortcuts).
+
+| Key | Tool | Key | Tool | Key | Action |
+|-----|------|-----|------|-----|--------|
+| `V` | Select | `L` | Line | `S` / `⌘K` | Search |
+| `M` | Move | `C` | Circle | `⌘Z` / `⌘⇧Z` | Undo / Redo |
+| `H` | Pan | `R` | Rectangle | `⌘D` | Duplicate |
+| `O` | Offset | `P` | Pen | `⌫` | Delete |
+| `T` | Trim | `D` | Dimension | `⌘⇧H` / `⌘⇧J` | Flip H / V |
+| `F` | Fillet | `I` | Measure | `N` | Toggle snapping |
+| `B` | Chamfer | `E` | Convert Lines | `A` | Toggle chain‑select |
+| `G` | Add Holes | `J` | Join / Cleanup | `⇧G` | Toggle grid |
+
+Tools without a default key (Scale, Polygon, Text, Mirror, Patterning, Paper Folding) are reachable from the toolbar or the search palette, and can be bound in Preferences.
 
 ### Coming soon
 

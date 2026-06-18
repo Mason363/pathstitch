@@ -103,7 +103,7 @@ struct ToolButton: View {
             Color.accent : 
             (isHovered ? Color.accent_hover : Color.text_secondary)
         )
-        .help(tool.rawValue)
+        .help(tool.tooltip)
         .onHover { hover in
             isHovered = hover
         }
@@ -137,7 +137,7 @@ struct ShapeToolButton: View {
             Color.accent : 
             (isHovered ? Color.accent_hover : Color.text_muted)
         )
-        .help(tool.rawValue)
+        .help(tool.tooltip)
         .onHover { hover in
             isHovered = hover
         }
@@ -2733,10 +2733,10 @@ extension ContentView {
                                 .font(.system(size: 14))
                                 .frame(width: 24, height: 24)
                                 .padding(10)
-                                .overlay(alignment: .bottomTrailing) {
+                                .overlay(alignment: .trailing) {
                                     Image(systemName: "chevron.right")
                                         .font(.system(size: 7, weight: .bold))
-                                        .padding(5)
+                                        .padding(.trailing, 2)
                                         .opacity(0.7)
                                 }
                                 .contentShape(Rectangle())

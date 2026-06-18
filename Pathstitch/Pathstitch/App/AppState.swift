@@ -33,28 +33,30 @@ struct BatchItem: Identifiable, Hashable, Equatable {
 }
 
 enum TwoDTool: String, CaseIterable {
-    case select = "Select (V)"
-    case move = "Move (W)"
-    case pan = "Pan (H)"
-    case offset = "Offset (O)"
-    case addHoles = "Add Holes (D)"
-    case cleanup = "Join/Cleanup (J)"
-    case measure = "Measure (M)"
-    case dimension = "Dimension (D)"
+    // Raw values are clean display names; the live keybind is appended in
+    // `tooltip` so hints never drift from the actual shortcut.
+    case select = "Select"
+    case move = "Move"
+    case pan = "Pan"
+    case offset = "Offset"
+    case addHoles = "Add Holes"
+    case cleanup = "Join/Cleanup"
+    case measure = "Measure"
+    case dimension = "Dimension"
     case scale = "Scale"
-    case sketchLine = "Line (L)"
-    case sketchCircle = "Circle (C)"
-    case sketchRectangle = "Rectangle (R)"
-    case sketchText = "Text (T)"
+    case sketchLine = "Line"
+    case sketchCircle = "Circle"
+    case sketchRectangle = "Rectangle"
+    case sketchText = "Text"
     case sketchPolygon = "Polygon"
     case pen = "Pen"
-    case fillet = "Fillet (K)"
-    case chamfer = "Chamfer (B)"
-    case convertLines = "Convert Lines (E)"
-    case mirror = "Mirror (I)"
+    case fillet = "Fillet"
+    case chamfer = "Chamfer"
+    case convertLines = "Convert Lines"
+    case mirror = "Mirror"
     case trim = "Trim"
-    case paperFolding = "Paper Folding (F)"
-    case patterning = "Patterning (P)"
+    case paperFolding = "Paper Folding"
+    case patterning = "Patterning"
 
     /// SF Symbol fallback. The Fillet/Chamfer tools draw a custom corner glyph in
     /// the toolbar (see ToolButton), since SF Symbols has no true fillet/chamfer.
@@ -86,6 +88,42 @@ enum TwoDTool: String, CaseIterable {
     }
 
     var isCornerTool: Bool { self == .fillet || self == .chamfer }
+
+    /// The keybind command id that activates this tool, so tooltips can show the
+    /// live shortcut (it stays correct even after the user rebinds it).
+    var commandId: String {
+        switch self {
+        case .select: return "tool.select"
+        case .move: return "tool.move"
+        case .pan: return "tool.pan"
+        case .offset: return "tool.offset"
+        case .addHoles: return "tool.addHoles"
+        case .cleanup: return "tool.cleanup"
+        case .measure: return "tool.measure"
+        case .dimension: return "tool.dimension"
+        case .scale: return "tool.scale"
+        case .sketchLine: return "tool.line"
+        case .sketchCircle: return "tool.circle"
+        case .sketchRectangle: return "tool.rectangle"
+        case .sketchText: return "tool.text"
+        case .sketchPolygon: return "tool.polygon"
+        case .pen: return "tool.pen"
+        case .fillet: return "tool.fillet"
+        case .chamfer: return "tool.chamfer"
+        case .convertLines: return "tool.convertLines"
+        case .mirror: return "tool.mirror"
+        case .trim: return "tool.trim"
+        case .paperFolding: return "tool.paperFolding"
+        case .patterning: return "tool.patterning"
+        }
+    }
+
+    /// Display name plus the live keybind glyph (e.g. "Trim  (T)"). Used for
+    /// toolbar tooltips so the hint always matches the current binding.
+    @MainActor var tooltip: String {
+        let combo = KeybindStore.shared.combo(for: commandId)
+        return combo.key.isEmpty ? rawValue : "\(rawValue)  (\(combo.displayString))"
+    }
 }
 
 struct MeasurementLine: Identifiable, Codable, Hashable {
@@ -3243,6 +3281,9 @@ class AppState {
     /// selects which edge of a polyline (0 for a line).
     func trimSegment(handle: String, segIndex: Int = 0, at point: CGPoint) {
         guard let url = currentFilePath else { return }
+        // Pen curves trim as one whole curve: a cut removes the entire portion
+        // separated by a line, not just one flattened edge (curves-as-curves).
+        let whole = penPaths[handle] != nil
         saveToHistory()
         isProcessing = true
         Task {
@@ -3257,11 +3298,15 @@ class AppState {
                         "output": activeDxfURL.path,
                         "handle": handle,
                         "seg_index": segIndex,
-                        "point": [Double(point.x), Double(point.y)]
+                        "point": [Double(point.x), Double(point.y)],
+                        "whole": whole
                     ]
                 )
                 await MainActor.run {
                     self.currentFilePath = activeDxfURL
+                    // A trimmed pen curve is no longer its original parametric
+                    // path — drop the model so the fragments are plain polylines.
+                    if whole { self.penPaths[handle] = nil }
                     self.selectedHandles.removeAll()
                     self.reloadDXF()
                 }

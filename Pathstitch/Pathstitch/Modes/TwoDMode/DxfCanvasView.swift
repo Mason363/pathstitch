@@ -1553,6 +1553,13 @@ struct DxfCanvasView: View {
             return nil
         }
 
+        // Pen curves preview the whole portion a click removes (curves-as-curves).
+        if let b = bestSeg, state.penPaths[b.handle] != nil,
+           let ent = state.entities.first(where: { $0.handle == b.handle }),
+           let kill = wholeCurveKillPath(ent: ent, clickModel: modelPt), kill.count >= 2 {
+            return (b.handle, b.segIndex, kill)
+        }
+
         guard let b = bestSeg else { return nil }
         let rx = Double(b.b.x - b.a.x), ry = Double(b.b.y - b.a.y)
         let rr = rx*rx + ry*ry
@@ -1650,6 +1657,98 @@ struct DxfCanvasView: View {
         for a in normd where dedup.isEmpty || abs(a - dedup.last!) > 1e-6 { dedup.append(a) }
         if dedup.count >= 2, (dedup[0] + 2 * .pi - dedup.last!) < 1e-6 { dedup.removeLast() }
         return dedup
+    }
+
+    /// Clamped projection of `p` onto segment a→b: (t in [0,1], distance).
+    private func projectT(_ p: CGPoint, _ a: CGPoint, _ b: CGPoint) -> (Double, Double) {
+        let rx = Double(b.x - a.x), ry = Double(b.y - a.y)
+        let rr = rx*rx + ry*ry
+        if rr < 1e-12 { return (0.0, hypot(Double(p.x - a.x), Double(p.y - a.y))) }
+        let t = max(0.0, min(1.0, (Double(p.x - a.x)*rx + Double(p.y - a.y)*ry) / rr))
+        return (t, hypot(Double(p.x) - (Double(a.x) + rx*t), Double(p.y) - (Double(a.y) + ry*t)))
+    }
+
+    /// Sorted interior crossing params of edge a→b against every other entity.
+    private func edgeCutParams(_ a: CGPoint, _ b: CGPoint, exclude: String) -> [Double] {
+        let rx = Double(b.x - a.x), ry = Double(b.y - a.y)
+        var cuts: [Double] = []
+        for ent in state.entities where ent.handle != exclude {
+            for seg in trimEdges(of: ent) {
+                if let t = segIntersectParam(a, b, seg.0, seg.1) { cuts.append(t) }
+            }
+            let tt = ent.type.uppercased()
+            if tt == "CIRCLE", let c = ent.center, let r = ent.radius, c.count >= 2 {
+                cuts.append(contentsOf: circleIntersectParams(a, b, cx: c[0], cy: c[1], r: r))
+            } else if tt == "ARC", let c = ent.center, let r = ent.radius, c.count >= 2,
+                      let sa = ent.start_angle, let ea = ent.end_angle {
+                for t in circleIntersectParams(a, b, cx: c[0], cy: c[1], r: r) {
+                    let ix = Double(a.x) + rx*t, iy = Double(a.y) + ry*t
+                    if angleInArc(atan2(iy - c[1], ix - c[0]), sa, ea) { cuts.append(t) }
+                }
+            }
+        }
+        return cuts.filter { $0 > 1e-6 && $0 < 1 - 1e-6 }.sorted()
+    }
+
+    /// Model-space polyline tracing the whole portion a trim click removes from a
+    /// pen curve — mirrors the Python whole-curve trim (curves-as-curves).
+    private func wholeCurveKillPath(ent: DXFEntity, clickModel: CGPoint) -> [CGPoint]? {
+        let pts = ent.editableVertices.map { CGPoint(x: $0[0], y: $0[1]) }
+        guard pts.count >= 2 else { return nil }
+        let n = pts.count
+        let closed = (ent.closed ?? false) && n > 2
+        var edges: [(CGPoint, CGPoint)] = []
+        for i in 0..<(n - 1) { edges.append((pts[i], pts[i + 1])) }
+        if closed { edges.append((pts[n - 1], pts[0])) }
+        let E = edges.count
+        guard E > 0 else { return nil }
+
+        var ci = 0, ct = 0.0, bestd = Double.greatestFiniteMagnitude
+        for (i, e) in edges.enumerated() {
+            let (t, d) = projectT(clickModel, e.0, e.1)
+            if d < bestd { bestd = d; ci = i; ct = t }
+        }
+        let clickPos = Double(ci) + ct
+
+        var cuts: [Double] = []
+        for (i, e) in edges.enumerated() {
+            for t in edgeCutParams(e.0, e.1, exclude: ent.handle) { cuts.append(Double(i) + t) }
+        }
+        cuts = Array(Set(cuts.map { ($0 * 1e9).rounded() / 1e9 })).sorted()
+
+        func at(_ pos: Double) -> CGPoint {
+            if !closed && pos >= Double(E) { return pts[n - 1] }
+            var e = Int(floor(pos))
+            e = closed ? ((e % E) + E) % E : max(0, min(E - 1, e))
+            let t = pos - floor(pos)
+            let (a, b) = edges[e]
+            return CGPoint(x: Double(a.x) + (Double(b.x) - Double(a.x)) * t,
+                           y: Double(a.y) + (Double(b.y) - Double(a.y)) * t)
+        }
+        func subpath(_ lo: Double, _ hi: Double) -> [CGPoint] {
+            var out = [at(lo)]
+            var k = Int(floor(lo)) + 1
+            while Double(k) < hi - 1e-9 {
+                if Double(k) > lo + 1e-9 { out.append(pts[((k % n) + n) % n]) }
+                k += 1
+            }
+            out.append(at(hi))
+            return out
+        }
+
+        if cuts.isEmpty { return closed ? pts + [pts[0]] : pts }   // whole curve removed
+        if closed {
+            let below = cuts.filter { $0 <= clickPos }
+            let above = cuts.filter { $0 > clickPos }
+            let lower = below.last ?? (cuts.last! - Double(E))
+            let upper = above.first ?? (cuts.first! + Double(E))
+            return subpath(lower, upper)
+        }
+        let below = cuts.filter { $0 <= clickPos }
+        let above = cuts.filter { $0 >= clickPos }
+        let lower = below.last ?? 0.0
+        let upper = above.first ?? Double(E)
+        return subpath(lower, upper)
     }
 
     /// Model-space polyline tracing the span a trim click would remove from a
