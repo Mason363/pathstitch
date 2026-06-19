@@ -2463,19 +2463,23 @@ class AppState {
                 errorMessage = "Failed to copy input DXF file: \(error.localizedDescription)"
                 logAction("Load File Error", details: "Failed to copy input DXF file: \(error.localizedDescription)")
             }
-        } else if ext == "step" || ext == "stp" {
-            let targetURL = tempDir.appendingPathComponent("active.step")
-            try? FileManager.default.removeItem(at: targetURL)
+        } else if ext == "step" || ext == "stp" || ext == "obj" || ext == "stl" {
+            // Clean up any old active step/obj/stl files
+            for oldExt in ["step", "stp", "obj", "stl"] {
+                let oldURL = tempDir.appendingPathComponent("active.\(oldExt)")
+                try? FileManager.default.removeItem(at: oldURL)
+            }
+            let targetURL = tempDir.appendingPathComponent("active.\(ext)")
             do {
                 try FileManager.default.copyItem(at: url, to: targetURL)
                 currentStepFilePath = targetURL
                 activeMode = .threeD
                 reloadSTEP()
                 hasUnsavedChanges = false
-                logAction("Load STEP", details: "Loaded STEP file: \(url.lastPathComponent)")
+                logAction("Load 3D Model", details: "Loaded 3D model: \(url.lastPathComponent)")
             } catch {
-                errorMessage = "Failed to copy input STEP file: \(error.localizedDescription)"
-                logAction("Load STEP Error", details: "Failed to copy: \(error.localizedDescription)")
+                errorMessage = "Failed to copy input 3D model file: \(error.localizedDescription)"
+                logAction("Load 3D Model Error", details: "Failed to copy: \(error.localizedDescription)")
             }
         } else if ext == "svg" {
             let tempSVGURL = tempDir.appendingPathComponent("temp_import.svg")
@@ -2537,60 +2541,70 @@ class AppState {
 
         let tempDir = sessionTempDirectory
         try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        let activeURL = tempDir.appendingPathComponent("active.step")
-
-        // MAS-125: if this workspace already holds a 3D model, append the dropped
-        // model rather than replacing it — the viewport distributes bodies side by
-        // side. Otherwise load fresh. Appending needs the existing STEP on disk;
-        // if only mesh JSON survived (e.g. from a reopened .stch) we load fresh.
+        
+        let ext = url.pathExtension.lowercased()
         let appending = currentStepFilePath != nil
-            && FileManager.default.fileExists(atPath: activeURL.path)
+            && FileManager.default.fileExists(atPath: currentStepFilePath!.path)
             && !bodies3D.isEmpty
 
         do {
-            let incomingURL = tempDir.appendingPathComponent("incoming_\(UUID().uuidString).step")
+            let incomingURL = tempDir.appendingPathComponent("incoming_\(UUID().uuidString).\(ext)")
             try? FileManager.default.removeItem(at: incomingURL)
             try FileManager.default.copyItem(at: url, to: incomingURL)
 
-            if appending {
+            if appending, let existingURL = currentStepFilePath {
                 activeMode = .threeD
                 isProcessing = true
+                
+                // Combining step/stl/obj files will output a normalized .step file
+                let combinedURL = tempDir.appendingPathComponent("active.step")
+                
                 Task {
                     do {
                         _ = try await PythonBridge.shared.run(
                             module: "step_ops",
                             op: "combine_steps",
-                            args: ["input": activeURL.path,
+                            args: ["input": existingURL.path,
                                    "incoming": incomingURL.path,
-                                   "output": activeURL.path]
+                                   "output": combinedURL.path]
                         )
                         await MainActor.run {
-                            self.currentStepFilePath = activeURL
+                            if existingURL != combinedURL {
+                                try? FileManager.default.removeItem(at: existingURL)
+                            }
+                            self.currentStepFilePath = combinedURL
                             self.selectedFaces3D.removeAll()
                             self.reloadSTEP()   // re-lists all bodies; viewport redistributes
-                            self.logAction("Append STEP", details: "Appended 3D model into workspace: \(url.lastPathComponent)")
+                            self.logAction("Append 3D Model", details: "Appended 3D model into workspace: \(url.lastPathComponent)")
                         }
                     } catch {
                         await MainActor.run {
-                            self.errorMessage = "Failed to append STEP file: \(error.localizedDescription)"
+                            self.errorMessage = "Failed to append 3D model file: \(error.localizedDescription)"
                             self.isProcessing = false
                         }
                     }
                     try? FileManager.default.removeItem(at: incomingURL)
                 }
             } else {
-                try? FileManager.default.removeItem(at: activeURL)
+                // Wipe any old active step/obj/stl files
+                for oldExt in ["step", "stp", "obj", "stl"] {
+                    let oldURL = tempDir.appendingPathComponent("active.\(oldExt)")
+                    try? FileManager.default.removeItem(at: oldURL)
+                }
+                
+                let activeURL = tempDir.appendingPathComponent("active.\(ext)")
                 try FileManager.default.copyItem(at: incomingURL, to: activeURL)
                 try? FileManager.default.removeItem(at: incomingURL)
+                
                 currentStepFilePath = activeURL
                 selectedFaces3D.removeAll()
                 activeMode = .threeD
                 reloadSTEP()   // sets hasUnsavedChanges = true on success
-                logAction("Import STEP", details: "Loaded 3D model into workspace: \(url.lastPathComponent)")
+                logAction("Import 3D Model", details: "Loaded 3D model into workspace: \(url.lastPathComponent)")
             }
         } catch {
-            errorMessage = "Failed to import STEP file: \(error.localizedDescription)"
-            logAction("Import STEP Error", details: "Failed to copy STEP into workspace: \(error.localizedDescription)")
+            errorMessage = "Failed to import 3D model: \(error.localizedDescription)"
+            logAction("Import 3D Model Error", details: "Failed to copy 3D model into workspace: \(error.localizedDescription)")
         }
     }
 
@@ -2606,7 +2620,7 @@ class AppState {
         // workspace and switch it to 3D — 2D and 3D share one window (MAS-107).
         // Everything else (DXF/SVG/PDF/images) merges onto the current 2D canvas.
         let projectExts: Set<String> = ["stch"]
-        let stepExts: Set<String> = ["step", "stp"]
+        let stepExts: Set<String> = ["step", "stp", "obj", "stl"]
         let imageExts: Set<String> = ["png", "jpg", "jpeg", "bmp", "tiff", "gif", "webp", "avif", "heic"]
         
         let openInNewWindow = urls.filter { projectExts.contains($0.pathExtension.lowercased()) }

@@ -394,6 +394,8 @@ struct ContentView: View {
             UTType(filenameExtension: "dxf"),
             UTType(filenameExtension: "step"),
             UTType(filenameExtension: "stp"),
+            UTType(filenameExtension: "obj"),
+            UTType(filenameExtension: "stl"),
             UTType(filenameExtension: "svg"),
             UTType(filenameExtension: "stch"),
             UTType.image

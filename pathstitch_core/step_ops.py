@@ -25,17 +25,94 @@ from OCC.Core.BRepGProp import brepgprop
 from pathstitch_core.surface_unfold import get_surface_type, unfold_face_geometry, save_polylines_to_dxf, triangulate_face, parameterize_mesh
 
 def load_step_shape(file_path: str):
-    """Loads a STEP file and returns its consolidated shape."""
+    """Loads a STEP, STL, or OBJ file and returns its consolidated shape."""
     if not os.path.exists(file_path):
-        raise FileNotFoundError(f"STEP file not found: {file_path}")
+        raise FileNotFoundError(f"3D file not found: {file_path}")
         
-    reader = STEPControl_Reader()
-    status = reader.ReadFile(file_path)
-    if status != IFSelect_RetDone:
-        raise ValueError(f"STEP control reader failed to read. Status code: {status}")
+    ext = os.path.splitext(file_path)[1].lower()
+    
+    if ext == ".stl":
+        from OCC.Core.StlAPI import StlAPI_Reader
+        from OCC.Core.TopoDS import TopoDS_Shape
+        reader = StlAPI_Reader()
+        shape = TopoDS_Shape()
+        success = reader.Read(shape, file_path)
+        if not success or shape.IsNull():
+            raise ValueError(f"Failed to read STL file: {file_path}")
+        return shape
         
-    reader.TransferRoots()
-    return reader.OneShape()
+    elif ext == ".obj":
+        from OCC.Core.gp import gp_Pnt
+        from OCC.Core.BRepBuilderAPI import BRepBuilderAPI_MakePolygon, BRepBuilderAPI_MakeFace
+        from OCC.Core.TopoDS import TopoDS_Compound
+        from OCC.Core.BRep import BRep_Builder
+        
+        vertices = []
+        builder = BRep_Builder()
+        compound = TopoDS_Compound()
+        builder.MakeCompound(compound)
+        
+        has_faces = False
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split()
+                if not parts:
+                    continue
+                cmd = parts[0].lower()
+                if cmd == "v":
+                    if len(parts) >= 4:
+                        try:
+                            x = float(parts[1])
+                            y = float(parts[2])
+                            z = float(parts[3])
+                            vertices.append(gp_Pnt(x, y, z))
+                        except ValueError:
+                            pass
+                elif cmd == "f":
+                    face_vertices = []
+                    for p in parts[1:]:
+                        v_idx_str = p.split("/")[0]
+                        try:
+                            v_idx = int(v_idx_str)
+                            if v_idx > 0:
+                                v_idx = v_idx - 1
+                            elif v_idx < 0:
+                                v_idx = len(vertices) + v_idx
+                            if 0 <= v_idx < len(vertices):
+                                face_vertices.append(vertices[v_idx])
+                        except ValueError:
+                            pass
+                    if len(face_vertices) >= 3:
+                        try:
+                            poly = BRepBuilderAPI_MakePolygon()
+                            for v in face_vertices:
+                                poly.Add(v)
+                            poly.Close()
+                            face_maker = BRepBuilderAPI_MakeFace(poly.Wire())
+                            if not face_maker.IsDone():
+                                continue
+                            face = face_maker.Face()
+                            if not face.IsNull():
+                                builder.Add(compound, face)
+                                has_faces = True
+                        except Exception:
+                            pass
+        if not has_faces:
+            raise ValueError(f"No valid faces could be parsed from OBJ file: {file_path}")
+        return compound
+        
+    else:
+        # Default to STEP
+        reader = STEPControl_Reader()
+        status = reader.ReadFile(file_path)
+        if status != IFSelect_RetDone:
+            raise ValueError(f"STEP control reader failed to read. Status code: {status}")
+            
+        reader.TransferRoots()
+        return reader.OneShape()
 
 def get_solid_bodies(shape) -> List[Any]:
     """Isolates and returns all solid bodies (or shells as fallback)."""
@@ -157,7 +234,7 @@ def op_list_bodies(args: Dict[str, Any]) -> Dict[str, Any]:
             # Now build the edges list for this body
             edges_list = []
             from OCC.Core.BRepAdaptor import BRepAdaptor_Curve
-            for e_idx in range(1, emap.Extent() + 1):
+            for e_idx in range(1, emap.Size() + 1):
                 edge = topods.Edge(emap.FindKey(e_idx))
                 try:
                     adaptor = BRepAdaptor_Curve(edge)

@@ -319,7 +319,7 @@ struct WelcomeDropZone: View {
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundColor(state.isDraggingOver ? .accent : .text_primary)
                 
-                Text("Supports .stch, .dxf, .step, .stl, .svg, .pdf, images")
+                Text("Supports .stch, .dxf, .step, .stl, .obj, .svg, .pdf, images")
                     .font(.system(size: 10))
                     .foregroundColor(.text_secondary)
             }
