@@ -194,6 +194,10 @@ struct ThreeDModeView: View {
                 selectedBodyIndex: state.selectedBodyIndex,
                 bodyOffsetsJSON: state.bodyOffsetsJSON,
                 bodyMoveStateToken: state.bodyMoveStateToken,
+                forcedSeams3D: state.forcedSeams3D,
+                forbiddenSeams3D: state.forbiddenSeams3D,
+                seamControlMode: state.seamControlMode,
+                distortionDataJSON: state.distortionDataJSON,
                 state: state
             )
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -267,6 +271,18 @@ struct ThreeDModeView: View {
                                 .help("Connected Net keeps faces joined at fold lines; Separate Pieces flattens each face on its own.")
                             }
 
+                            SettingRow(label: "Distort") {
+                                Picker("Distortion Mode", selection: $state.distortionMode) {
+                                    Text("Conformal").tag("conformal")
+                                    Text("Equal-Area").tag("equal-area")
+                                    Text("Equidistant").tag("equidistant")
+                                    Text("Balanced").tag("balanced")
+                                }
+                                .pickerStyle(DefaultPickerStyle())
+                                .labelsHidden()
+                                .help("The parameterization energy mode used to flatten curved surfaces.")
+                            }
+
                             if netLayout == "connected" {
                                 SettingRow(label: "Unroll") {
                                     Picker("Unroll Mode", selection: $netMode) {
@@ -288,6 +304,35 @@ struct ThreeDModeView: View {
                                     .pickerStyle(DefaultPickerStyle())
                                     .labelsHidden()
                                     .help("Added along every mated seam pair. Sizes come from the Add Holes / Glue Tab tool settings.")
+                                }
+
+                                SettingRow(label: "Control") {
+                                    Picker("Seam Control", selection: $state.seamControlMode) {
+                                        Text("Auto").tag("auto")
+                                        Text("Manual (Cuts)").tag("manual")
+                                        Text("Hybrid (Folds)").tag("hybrid")
+                                    }
+                                    .pickerStyle(DefaultPickerStyle())
+                                    .labelsHidden()
+                                    .help("Auto uses curvature-weighted spanning tree. Manual lets you pick cuts. Hybrid lets you force creases.")
+                                }
+
+                                if state.seamControlMode == "manual" && !state.forcedSeams3D.isEmpty {
+                                    Button("Clear Manual Cuts") {
+                                        state.forcedSeams3D.removeAll()
+                                    }
+                                    .buttonStyle(PlainButtonStyle())
+                                    .font(PlasticityFont.label)
+                                    .foregroundColor(Color.accent)
+                                    .padding(.top, 2)
+                                } else if state.seamControlMode == "hybrid" && !state.forbiddenSeams3D.isEmpty {
+                                    Button("Clear Forced Folds") {
+                                        state.forbiddenSeams3D.removeAll()
+                                    }
+                                    .buttonStyle(PlainButtonStyle())
+                                    .font(PlasticityFont.label)
+                                    .foregroundColor(Color.accent)
+                                    .padding(.top, 2)
                                 }
                             }
 

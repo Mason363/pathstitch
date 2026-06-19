@@ -1427,8 +1427,87 @@ class AppState {
     
     // 3D Canvas State
     var stepJsonContent: String?
-    var selectedFaces3D: Set<SelectedFace> = []
+    var selectedFaces3D: Set<SelectedFace> = [] {
+        didSet {
+            triggerDistortionUpdate()
+        }
+    }
     var bodies3D: [Body3D] = []
+
+    // Phase 2 & 3: Seam Control & Distortion Heatmap
+    var distortionMode: String = "conformal" {
+        didSet {
+            triggerDistortionUpdate()
+        }
+    }
+    var seamControlMode: String = "auto" // "auto", "manual", "hybrid"
+    var forcedSeams3D: Set<SelectedEdge> = []
+    var forbiddenSeams3D: Set<SelectedEdge> = []
+    var distortionDataJSON: String = ""
+    private var distortionTask: Task<Void, Never>?
+
+    func triggerDistortionUpdate() {
+        distortionTask?.cancel()
+        
+        guard let face = selectedFaces3D.first, selectedFaces3D.count == 1,
+              let stepUrl = currentStepFilePath else {
+            distortionDataJSON = ""
+            return
+        }
+        
+        let bodyIdx = face.bodyIndex
+        let faceIdx = face.faceIndex
+        let mode = distortionMode
+        let inputPath = stepUrl.path
+        
+        distortionTask = Task {
+            do {
+                let result = try await PythonBridge.shared.run(
+                    module: "step_ops",
+                    op: "face_distortion",
+                    args: [
+                        "input": inputPath,
+                        "body_index": bodyIdx,
+                        "face_index": faceIdx,
+                        "distortion_mode": mode
+                    ]
+                )
+                
+                if Task.isCancelled { return }
+                
+                guard let status = result["status"] as? String, status == "ok",
+                      let distortion = result["distortion"] as? [Double] else {
+                    await MainActor.run {
+                        self.distortionDataJSON = ""
+                    }
+                    return
+                }
+                
+                let dict: [String: Any] = [
+                    "body_index": bodyIdx,
+                    "face_index": faceIdx,
+                    "distortion": distortion
+                ]
+                
+                guard let jsonData = try? JSONSerialization.data(withJSONObject: dict),
+                      let jsonStr = String(data: jsonData, encoding: .utf8) else {
+                    await MainActor.run {
+                        self.distortionDataJSON = ""
+                    }
+                    return
+                }
+                
+                await MainActor.run {
+                    self.distortionDataJSON = jsonStr
+                }
+            } catch {
+                print("Failed to compute face distortion: \(error)")
+                await MainActor.run {
+                    self.distortionDataJSON = ""
+                }
+            }
+        }
+    }
 
     // Body move tool (MAS-125): select a body in the viewport and translate it
     // with a 3D gizmo / precise numeric fields. Moves are visual layout offsets
@@ -2064,6 +2143,11 @@ class AppState {
         layers = []
         selectedHandles.removeAll()
         selectedFaces3D.removeAll()
+        forcedSeams3D.removeAll()
+        forbiddenSeams3D.removeAll()
+        seamControlMode = "auto"
+        distortionMode = "conformal"
+        distortionDataJSON = ""
         bodies3D = []
         batchItems = []
         activeEditingBatchItem = nil
@@ -2837,6 +2921,11 @@ class AppState {
         isProcessing = true
         progress = 0.0
         selectedFaces3D.removeAll()
+        forcedSeams3D.removeAll()
+        forbiddenSeams3D.removeAll()
+        seamControlMode = "auto"
+        distortionMode = "conformal"
+        distortionDataJSON = ""
         
         Task {
             do {
@@ -2890,7 +2979,8 @@ class AppState {
                     "input": stepUrl.path,
                     "output": outputDxf.path,
                     "body_index": bodyIndex,
-                    "face_index": faceIndex
+                    "face_index": faceIndex,
+                    "distortion_mode": distortionMode
                 ]
                 if let existing = currentFilePath {
                     args["existing_dxf"] = existing.path
@@ -2939,7 +3029,8 @@ class AppState {
                 var args: [String: Any] = [
                     "input": stepUrl.path,
                     "output": outputDxf.path,
-                    "faces": facesArray
+                    "faces": facesArray,
+                    "distortion_mode": distortionMode
                 ]
                 if let existing = currentFilePath {
                     args["existing_dxf"] = existing.path
@@ -2991,7 +3082,17 @@ class AppState {
                     "tab_height": glueTabHeight,
                     "hole_diameter": holeDiameter,
                     "hole_spacing": holeSpacing,
-                    "hole_margin": holeOffsetDistance
+                    "hole_margin": holeOffsetDistance,
+                    "distortion_mode": distortionMode,
+                    "seam_control_mode": seamControlMode,
+                    "forced_seams": Array(forcedSeams3D).map { [
+                        "body_index": $0.bodyIndex,
+                        "edge_index": $0.edgeIndex
+                    ] },
+                    "forbidden_seams": Array(forbiddenSeams3D).map { [
+                        "body_index": $0.bodyIndex,
+                        "edge_index": $0.edgeIndex
+                    ] }
                 ]
                 if wholeBody {
                     args["whole_body"] = true

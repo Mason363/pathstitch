@@ -6,6 +6,11 @@ struct SelectedFace: Hashable, Codable {
     let faceIndex: Int
 }
 
+struct SelectedEdge: Hashable, Codable {
+    let bodyIndex: Int
+    let edgeIndex: Int
+}
+
 struct Face3D: Identifiable, Codable, Hashable {
     var id: String { "\(face_index)" }
     let face_index: Int
@@ -63,6 +68,12 @@ struct ThreeDViewport: NSViewRepresentable {
     let bodyOffsetsJSON: String
     let bodyMoveStateToken: Int
 
+    // Phase 2 & 3: Seam Control & Distortion Heatmap
+    let forcedSeams3D: Set<SelectedEdge>
+    let forbiddenSeams3D: Set<SelectedEdge>
+    let seamControlMode: String
+    let distortionDataJSON: String
+
     var state: AppState
     
     func makeCoordinator() -> Coordinator {
@@ -100,6 +111,8 @@ struct ThreeDViewport: NSViewRepresentable {
         context.coordinator.updateOrthographicMode()
         context.coordinator.updateHomeFrame()
         context.coordinator.updateBodyMoveState()
+        context.coordinator.updateSeams()
+        context.coordinator.updateDistortion()
     }
 }
 
@@ -123,6 +136,12 @@ class Coordinator: NSObject, WKScriptMessageHandler {
     private var lastTriggerHomeFrameToken = 0
     private var lastThreeDOrthographic = false
     private var lastBodyMoveStateToken = -1
+    
+    // Seams and distortion tracking
+    private var lastForcedSeams: Set<SelectedEdge> = []
+    private var lastForbiddenSeams: Set<SelectedEdge> = []
+    private var lastSeamControlMode: String = "auto"
+    private var lastDistortionDataJSON: String = ""
     
     init(state: AppState) {
         self.state = state
@@ -206,6 +225,27 @@ class Coordinator: NSObject, WKScriptMessageHandler {
                 self.state.selectedProjectionBodyIndex = bodyIdx
                 self.state.selectedProjectionFaceNormal = norm
                 self.state.selectedProjectionFaceOrigin = orig
+            }
+        } else if op == "selectEdge" {
+            let bodyIndex = json["bodyIndex"] as? Int ?? 0
+            let edgeIndex = json["edgeIndex"] as? Int ?? 0
+            DispatchQueue.main.async {
+                let edgeSel = SelectedEdge(bodyIndex: bodyIndex, edgeIndex: edgeIndex)
+                if self.state.seamControlMode == "manual" {
+                    if self.state.forcedSeams3D.contains(edgeSel) {
+                        self.state.forcedSeams3D.remove(edgeSel)
+                    } else {
+                        self.state.forcedSeams3D.insert(edgeSel)
+                        self.state.forbiddenSeams3D.remove(edgeSel)
+                    }
+                } else if self.state.seamControlMode == "hybrid" {
+                    if self.state.forbiddenSeams3D.contains(edgeSel) {
+                        self.state.forbiddenSeams3D.remove(edgeSel)
+                    } else {
+                        self.state.forbiddenSeams3D.insert(edgeSel)
+                        self.state.forcedSeams3D.remove(edgeSel)
+                    }
+                }
             }
         } else if op == "updateOffset" {
             let offset = json["offset"] as? Double ?? 0.0
@@ -297,6 +337,10 @@ class Coordinator: NSObject, WKScriptMessageHandler {
             lastLoadedModelPath = modelPath
             lastBodyMoveStateToken = -1  // re-push body-move state for the new model
             lastSelectedFaces.removeAll() // Force selection update for the new model
+            lastForcedSeams.removeAll()
+            lastForbiddenSeams.removeAll()
+            lastSeamControlMode = "auto"
+            lastDistortionDataJSON = ""
             
             // Re-initialize body visibilities tracking
             lastBodyVisibilities.removeAll()
@@ -355,6 +399,48 @@ class Coordinator: NSObject, WKScriptMessageHandler {
         if lastThreeDOrthographic != ortho {
             lastThreeDOrthographic = ortho
             let js = "setOrthographicMode(\(ortho ? "true" : "false"));"
+            webView.evaluateJavaScript(js, completionHandler: nil)
+        }
+    }
+    
+    func updateSeams() {
+        guard isWebViewReady, let webView = webView else { return }
+        
+        let forced = state.forcedSeams3D
+        let forbidden = state.forbiddenSeams3D
+        let mode = state.seamControlMode
+        
+        if lastForcedSeams != forced || lastForbiddenSeams != forbidden || lastSeamControlMode != mode {
+            lastForcedSeams = forced
+            lastForbiddenSeams = forbidden
+            lastSeamControlMode = mode
+            
+            let forcedArr = Array(forced).map { ["bodyIndex": $0.bodyIndex, "edgeIndex": $0.edgeIndex] }
+            let forbiddenArr = Array(forbidden).map { ["bodyIndex": $0.bodyIndex, "edgeIndex": $0.edgeIndex] }
+            
+            guard let forcedData = try? JSONSerialization.data(withJSONObject: forcedArr),
+                  let forcedStr = String(data: forcedData, encoding: .utf8),
+                  let forbiddenData = try? JSONSerialization.data(withJSONObject: forbiddenArr),
+                  let forbiddenStr = String(data: forbiddenData, encoding: .utf8) else {
+                return
+            }
+            
+            let escapedForced = forcedStr.replacingOccurrences(of: "\"", with: "\\\"")
+            let escapedForbidden = forbiddenStr.replacingOccurrences(of: "\"", with: "\\\"")
+            let js = "setSeams(\"\(escapedForced)\", \"\(escapedForbidden)\", \"\(mode)\");"
+            webView.evaluateJavaScript(js, completionHandler: nil)
+        }
+    }
+    
+    func updateDistortion() {
+        guard isWebViewReady, let webView = webView else { return }
+        
+        let current = state.distortionDataJSON
+        if lastDistortionDataJSON != current {
+            lastDistortionDataJSON = current
+            
+            let escapedStr = current.replacingOccurrences(of: "\"", with: "\\\"")
+            let js = "setFaceDistortion(\"\(escapedStr)\");"
             webView.evaluateJavaScript(js, completionHandler: nil)
         }
     }

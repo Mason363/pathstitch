@@ -328,16 +328,175 @@ def boundary_loops(tris):
     return loops
 
 
-def unfold_freeform_face(face) -> List[List[Tuple[float, float]]]:
-    """Flattens a doubly-curved face by LSCM and returns its boundary loops as
-    2D polylines (MAS-112 Phase 2)."""
+def split_closed_mesh(verts3d, tris):
+    """Splits a closed mesh (or mesh with no boundary) into two open meshes
+    by cutting along a central plane (meridian)."""
+    V = np.array(verts3d, dtype=float)
+    centroid = np.mean(V, axis=0)
+    
+    # Run a simple PCA-like analysis via covariance to find maximum variance normal
+    cov = np.cov(V.T)
+    evals, evecs = np.linalg.eigh(cov)
+    cut_normal = evecs[:, -1] # Longest dimension normal
+    
+    tri_centroids = np.mean(V[np.array(tris)], axis=1)
+    dists = np.dot(tri_centroids - centroid, cut_normal)
+    
+    tris_a = [t for idx, t in enumerate(tris) if dists[idx] >= 0]
+    tris_b = [t for idx, t in enumerate(tris) if dists[idx] < 0]
+    
+    def build_submesh(sub_tris):
+        used_verts = sorted(list(set(v for t in sub_tris for v in t)))
+        vert_map = {old: new for new, old in enumerate(used_verts)}
+        new_verts = [verts3d[v] for v in used_verts]
+        new_tris = [(vert_map[a], vert_map[b], vert_map[c]) for (a, b, c) in sub_tris]
+        return new_verts, new_tris
+        
+    verts_a, sub_tris_a = build_submesh(tris_a)
+    verts_b, sub_tris_b = build_submesh(tris_b)
+    
+    return (verts_a, sub_tris_a), (verts_b, sub_tris_b)
+
+
+def relax_mesh(verts3d, tris, uv_init, mode, iterations=100, step_size=0.1):
+    """Relaxation using mass-spring forces for equidistant / equal-area / balanced flattening."""
+    V = np.array(verts3d, dtype=float)
+    n = len(V)
+    uv = uv_init.copy()
+    
+    # 1. Extract all edges and their 3D lengths
+    from collections import defaultdict
+    edges_set = set()
+    for (a, b, c) in tris:
+        edges_set.add((min(a, b), max(a, b)))
+        edges_set.add((min(b, c), max(b, c)))
+        edges_set.add((min(c, a), max(c, a)))
+    edges = list(edges_set)
+    
+    d3d = np.array([np.linalg.norm(V[u] - V[v]) for (u, v) in edges])
+    
+    # 2. Pin the same two vertices as LSCM to fix gauge
+    loops = boundary_loops(tris)
+    boundary = loops[0] if loops else list(range(n))
+    pin_a = boundary[0]
+    pin_b = max(boundary, key=lambda v: np.linalg.norm(V[v] - V[pin_a]))
+    if pin_b == pin_a:
+        pin_b = (pin_a + 1) % n
+    pinned = {pin_a, pin_b}
+    
+    # 3D areas of triangles
+    area3d = []
+    for (a, b, c) in tris:
+        p0, p1, p2 = V[a], V[b], V[c]
+        area = 0.5 * np.linalg.norm(np.cross(p1 - p0, p2 - p0))
+        area3d.append(max(area, 1e-12))
+    area3d = np.array(area3d)
+    
+    # Relaxation loop
+    for _ in range(iterations):
+        forces = np.zeros_like(uv)
+        
+        # A. Edge length forces
+        if mode in ("equidistant", "balanced", "equal-area"):
+            u_pts = uv[[u for (u, v) in edges]]
+            v_pts = uv[[v for (u, v) in edges]]
+            d2d = np.linalg.norm(u_pts - v_pts, axis=1)
+            d2d = np.maximum(d2d, 1e-12)
+            
+            if mode == "equidistant":
+                k = 1.0
+            elif mode == "balanced":
+                k = 0.5
+            else: # equal-area
+                k = 0.1
+                
+            f_mag = k * (d2d - d3d) / d2d
+            f_vec = (v_pts - u_pts) * f_mag[:, np.newaxis]
+            
+            for idx, (u, v) in enumerate(edges):
+                forces[u] += f_vec[idx]
+                forces[v] -= f_vec[idx]
+                
+        # B. Triangle area forces
+        if mode in ("equal-area", "balanced"):
+            u0 = uv[[a for (a, b, c) in tris]]
+            u1 = uv[[b for (a, b, c) in tris]]
+            u2 = uv[[c for (a, b, c) in tris]]
+            
+            cross = (u1[:, 0] - u0[:, 0]) * (u2[:, 1] - u0[:, 1]) - (u2[:, 0] - u0[:, 0]) * (u1[:, 1] - u0[:, 1])
+            area2d = np.maximum(0.5 * np.abs(cross), 1e-12)
+            
+            ratio = np.sqrt(area3d / area2d)
+            
+            if mode == "equal-area":
+                k_area = 0.9
+            else: # balanced
+                k_area = 0.5
+                
+            for t_idx, (a, b, c) in enumerate(tris):
+                centroid = (uv[a] + uv[b] + uv[c]) / 3.0
+                r = ratio[t_idx]
+                f_a = k_area * (r - 1.0) * (uv[a] - centroid)
+                f_b = k_area * (r - 1.0) * (uv[b] - centroid)
+                f_c = k_area * (r - 1.0) * (uv[c] - centroid)
+                
+                forces[a] += f_a
+                forces[b] += f_b
+                forces[c] += f_c
+                
+        # C. Apply updates
+        for i in range(n):
+            if i not in pinned:
+                uv[i] += step_size * forces[i]
+                
+    return uv
+
+
+def parameterize_mesh(verts3d, tris, mode="conformal"):
+    """Parameterizes the mesh with the selected mode (conformal LSCM as base)."""
+    uv = lscm_flatten(verts3d, tris)
+    if mode == "conformal":
+        return uv
+    return relax_mesh(verts3d, tris, uv, mode)
+
+
+def unfold_freeform_face(face, mode="conformal") -> List[List[Tuple[float, float]]]:
+    """Flattens a doubly-curved face by LSCM/relaxation and returns its boundary loops as
+    2D polylines. Splitting closed shapes if needed."""
     verts, tris = triangulate_face(face)
     if not tris:
         raise ValueError("Face has no triangulation to flatten.")
-    uv = lscm_flatten(verts, tris)
+        
     loops = boundary_loops(tris)
     if not loops:
-        raise ValueError("Flattened face has no boundary loop.")
+        # Closed shape (sphere) -> split into two hemispheres!
+        (verts_a, tris_a), (verts_b, tris_b) = split_closed_mesh(verts, tris)
+        
+        uv_a = parameterize_mesh(verts_a, tris_a, mode)
+        uv_b = parameterize_mesh(verts_b, tris_b, mode)
+        
+        loops_a = boundary_loops(tris_a)
+        loops_b = boundary_loops(tris_b)
+        
+        wires: List[List[Tuple[float, float]]] = []
+        for loop in loops_a:
+            pts = [(float(uv_a[i][0]), float(uv_a[i][1])) for i in loop]
+            pts.append(pts[0])
+            wires.append(pts)
+            
+        min_x_a = min(uv_a[:, 0])
+        max_x_a = max(uv_a[:, 0])
+        min_x_b = min(uv_b[:, 0])
+        gap = 10.0
+        shift_x = max_x_a - min_x_a + gap - min_x_b
+        
+        for loop in loops_b:
+            pts = [(float(uv_b[i][0] + shift_x), float(uv_b[i][1])) for i in loop]
+            pts.append(pts[0])
+            wires.append(pts)
+        return wires
+
+    uv = parameterize_mesh(verts, tris, mode)
     wires: List[List[Tuple[float, float]]] = []
     for loop in loops:
         pts = [(float(uv[i][0]), float(uv[i][1])) for i in loop]
@@ -346,7 +505,7 @@ def unfold_freeform_face(face) -> List[List[Tuple[float, float]]]:
     return wires
 
 
-def unfold_face_geometry(face) -> List[List[Tuple[float, float]]]:
+def unfold_face_geometry(face, mode="conformal") -> List[List[Tuple[float, float]]]:
     """Main router to unfold a face and return list of 2D polylines."""
     stype = get_surface_type(face)
     if stype == "Plane":
@@ -356,8 +515,8 @@ def unfold_face_geometry(face) -> List[List[Tuple[float, float]]]:
     elif stype == "Cone":
         return unfold_conical_face(face)
     else:
-        # Doubly-curved / freeform → conformal LSCM flattening (Phase 2).
-        return unfold_freeform_face(face)
+        # Doubly-curved / freeform → conformal/relaxed flattening (Phase 2).
+        return unfold_freeform_face(face, mode=mode)
 
 def save_polylines_to_dxf(wires: List[List[Tuple[float, float]]], output_path: str):
     """Saves lists of 2D points as polylines in a DXF file."""

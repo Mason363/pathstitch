@@ -22,7 +22,7 @@ from OCC.Core.TopLoc import TopLoc_Location
 from OCC.Core.GProp import GProp_GProps
 from OCC.Core.BRepGProp import brepgprop
 
-from pathstitch_core.surface_unfold import get_surface_type, unfold_face_geometry, save_polylines_to_dxf
+from pathstitch_core.surface_unfold import get_surface_type, unfold_face_geometry, save_polylines_to_dxf, triangulate_face, parameterize_mesh
 
 def load_step_shape(file_path: str):
     """Loads a STEP file and returns its consolidated shape."""
@@ -83,6 +83,17 @@ def op_list_bodies(args: Dict[str, Any]) -> Dict[str, Any]:
             # Run mesh triangulation (0.3mm linear deflection deflection tolerance is a good speed/detail trade-off)
             BRepMesh_IncrementalMesh(body, 0.05)
             
+            # Map all edges of this body
+            from OCC.Core.TopTools import TopTools_IndexedMapOfShape
+            from OCC.Core.TopoDS import topods
+            emap = TopTools_IndexedMapOfShape()
+            edge_exp = TopExp_Explorer(body, TopAbs_EDGE)
+            while edge_exp.More():
+                emap.Add(topods.Edge(edge_exp.Current()))
+                edge_exp.Next()
+                
+            # Build edge to faces adjacency map
+            edge_to_faces = {}
             faces_list = []
             face_exp = TopExp_Explorer(body, TopAbs_FACE)
             f_idx = 0
@@ -90,6 +101,14 @@ def op_list_bodies(args: Dict[str, Any]) -> Dict[str, Any]:
             while face_exp.More():
                 face = face_exp.Current()
                 face_exp.Next()
+                
+                # Traverse edges of this face to record adjacency
+                e_exp = TopExp_Explorer(face, TopAbs_EDGE)
+                while e_exp.More():
+                    edge = topods.Edge(e_exp.Current())
+                    eid = emap.Add(edge)
+                    edge_to_faces.setdefault(eid, []).append(f_idx)
+                    e_exp.Next()
                 
                 stype = get_surface_type(face)
                 
@@ -135,10 +154,41 @@ def op_list_bodies(args: Dict[str, Any]) -> Dict[str, Any]:
                 })
                 f_idx += 1
                 
+            # Now build the edges list for this body
+            edges_list = []
+            from OCC.Core.BRepAdaptor import BRepAdaptor_Curve
+            for e_idx in range(1, emap.Extent() + 1):
+                edge = topods.Edge(emap.FindKey(e_idx))
+                try:
+                    adaptor = BRepAdaptor_Curve(edge)
+                    u_start = adaptor.FirstParameter()
+                    u_end = adaptor.LastParameter()
+                    try:
+                        from OCC.Core.GeomAbs import GeomAbs_Line
+                        is_line = (adaptor.GetType() == GeomAbs_Line)
+                    except Exception:
+                        is_line = False
+                    
+                    samples = 1 if is_line else 24
+                    pts = []
+                    for i in range(samples + 1):
+                        t = u_start + (u_end - u_start) * (i / samples)
+                        p = adaptor.Value(t)
+                        pts.extend([float(p.X()), float(p.Y()), float(p.Z())])
+                except Exception:
+                    pts = []
+                
+                edges_list.append({
+                    "edge_index": e_idx,
+                    "vertices": pts,
+                    "faces": edge_to_faces.get(e_idx, [])
+                })
+                
             bodies_data.append({
                 "body_index": b_idx,
                 "name": f"Body {b_idx + 1}",
-                "faces": faces_list
+                "faces": faces_list,
+                "edges": edges_list
             })
             
         # If no vertices were found, reset bounding box
@@ -252,8 +302,9 @@ def op_unfold_face(args: Dict[str, Any]) -> Dict[str, Any]:
         if target_face is None:
             return {"status": "error", "message": f"Face index {face_idx} out of range for body {body_idx}."}
             
-        # Call unfolding engine
-        polylines = unfold_face_geometry(target_face)
+        # Call unfolding engine with distortion mode
+        distortion_mode = args.get("distortion_mode", "conformal")
+        polylines = unfold_face_geometry(target_face, mode=distortion_mode)
         if not polylines:
             return {"status": "error", "message": "No geometry returned from unfolding."}
             
@@ -372,8 +423,9 @@ def op_unfold_faces(args: Dict[str, Any]) -> Dict[str, Any]:
             if target_face is None:
                 continue
                 
-            # Unfold face geometry
-            polylines = unfold_face_geometry(target_face)
+            # Unfold face geometry with distortion mode
+            distortion_mode = args.get("distortion_mode", "conformal")
+            polylines = unfold_face_geometry(target_face, mode=distortion_mode)
             if not polylines:
                 continue
                 
@@ -736,6 +788,85 @@ def op_combine_steps(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"status": "error", "message": f"Failed to combine STEP files: {str(e)}\n{traceback.format_exc()}"}
 
 
+def op_face_distortion(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Computes the 2D parameterization of a face under a given distortion mode,
+    and returns the per-vertex distortion values (area ratios) to color the 3D mesh."""
+    import numpy as np
+    
+    input_path = args.get("input")
+    body_idx = args.get("body_index")
+    face_idx = args.get("face_index")
+    mode = args.get("distortion_mode", "conformal")
+    
+    if not input_path or body_idx is None or face_idx is None:
+        return {"status": "error", "message": "Missing required arguments: input, body_index, face_index."}
+        
+    try:
+        shape = load_step_shape(input_path)
+        bodies = get_solid_bodies(shape)
+        if body_idx < 0 or body_idx >= len(bodies):
+            return {"status": "error", "message": f"Body index {body_idx} out of range."}
+        body = bodies[body_idx]
+        
+        # Traverse faces to find the target face index
+        face_exp = TopExp_Explorer(body, TopAbs_FACE)
+        f_idx = 0
+        target_face = None
+        while face_exp.More():
+            face = face_exp.Current()
+            face_exp.Next()
+            if f_idx == face_idx:
+                target_face = face
+                break
+            f_idx += 1
+            
+        if target_face is None:
+            return {"status": "error", "message": f"Face index {face_idx} out of range."}
+            
+        BRepMesh_IncrementalMesh(target_face, 0.05)
+        verts3d, tris = triangulate_face(target_face)
+        if not tris:
+            return {"status": "ok", "distortion": []}
+            
+        n = len(verts3d)
+        
+        stype = get_surface_type(target_face)
+        if stype in ("Plane", "Cylinder", "Cone") and mode == "conformal":
+            return {"status": "ok", "distortion": [0.0] * n}
+            
+        uv = parameterize_mesh(verts3d, tris, mode)
+        
+        from collections import defaultdict
+        vert_distortion = defaultdict(list)
+        
+        V = np.array(verts3d)
+        for t_idx, (a, b, c) in enumerate(tris):
+            p0, p1, p2 = V[a], V[b], V[c]
+            a3d = 0.5 * np.linalg.norm(np.cross(p1 - p0, p2 - p0))
+            a3d = max(a3d, 1e-12)
+            
+            u0, u1, u2 = uv[a], uv[b], uv[c]
+            cross = (u1[0] - u0[0]) * (u2[1] - u0[1]) - (u2[0] - u0[0]) * (u1[1] - u0[1])
+            a2d = 0.5 * abs(cross)
+            
+            # Symmetric area distortion: max(a2d/a3d, a3d/a2d) - 1.0
+            dist = max(a2d / a3d, a3d / a2d) - 1.0
+            
+            vert_distortion[a].append(dist)
+            vert_distortion[b].append(dist)
+            vert_distortion[c].append(dist)
+            
+        distortion = []
+        for i in range(n):
+            d_list = vert_distortion.get(i, [0.0])
+            distortion.append(float(np.mean(d_list)))
+            
+        return {"status": "ok", "distortion": distortion}
+    except Exception as e:
+        import traceback
+        return {"status": "error", "message": f"Failed to compute distortion: {str(e)}\n{traceback.format_exc()}"}
+
+
 # Imported at the bottom: net_unfold imports step_ops helpers lazily inside its
 # op, so this ordering avoids a circular import.
 from pathstitch_core.net_unfold import op_unfold_connected
@@ -749,6 +880,7 @@ OPERATIONS = {
     "unfold_connected": op_unfold_connected,
     "project_edges": op_project_edges,
     "combine_steps": op_combine_steps,
+    "face_distortion": op_face_distortion,
 }
 
 

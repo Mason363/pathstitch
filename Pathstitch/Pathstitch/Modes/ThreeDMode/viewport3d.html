@@ -163,6 +163,17 @@
 
         // Colors
         const COLOR_DEFAULT = 0xffffff; // Flat white
+        // Seams and edge state variables
+        let edgeLines = [];
+        let hoveredEdge = null;
+        let forcedSeams = [];    // Array of {bodyIndex, edgeIndex}
+        let forbiddenSeams = []; // Array of {bodyIndex, edgeIndex}
+        let seamControlMode = "auto"; // "auto", "manual", or "hybrid"
+
+        const COLOR_EDGE_DEFAULT = 0x444444;   // Dark gray
+        const COLOR_EDGE_FORCED = 0xef4444;    // Red
+        const COLOR_EDGE_FORBIDDEN = 0x3b82f6; // Blue
+        const COLOR_EDGE_HOVER = 0xf97316;     // Orange
         const COLOR_HOVER = 0xe2e8f0;   // Light gray/blue
         const COLOR_SELECTED = 0x3b82f6; // Accent color
         const COLOR_EDGE = 0x1e1e20;     // Black/dark charcoal
@@ -364,11 +375,21 @@
                         mesh.userData.wireframe.material.dispose();
                     }
                 });
+                edgeLines.forEach(line => {
+                    line.geometry.dispose();
+                    if (Array.isArray(line.material)) {
+                        line.material.forEach(m => m.dispose());
+                    } else {
+                        line.material.dispose();
+                    }
+                });
             }
             window.modelGroup = new THREE.Group();
             scene.add(window.modelGroup);
             faceMeshes = [];
+            edgeLines = [];
             hoveredFace = null;
+            hoveredEdge = null;
             selectedFaces = [];
             infoOverlay.style.display = 'none';
 
@@ -435,7 +456,37 @@
                     mesh.userData.wireframe = wireframe;
 
                     bodyGroup.add(mesh);
-                    faceMeshes.push(mesh);
+                });
+
+                // Render edges (Phase 3)
+                const edges = body.edges || [];
+                edges.forEach(edge => {
+                    if (!edge.vertices || edge.vertices.length === 0) return;
+                    
+                    const points = [];
+                    for (let i = 0; i < edge.vertices.length; i += 3) {
+                        points.push(new THREE.Vector3(edge.vertices[i], edge.vertices[i+1], edge.vertices[i+2]));
+                    }
+                    
+                    const geometry = new THREE.BufferGeometry().setFromPoints(points);
+                    
+                    const material = new THREE.LineBasicMaterial({
+                        color: COLOR_EDGE_DEFAULT,
+                        linewidth: 2,
+                        transparent: true,
+                        opacity: 0.8
+                    });
+                    
+                    const line = new THREE.Line(geometry, material);
+                    line.userData = {
+                        isEdge: true,
+                        bodyIndex: body.body_index,
+                        edgeIndex: edge.edge_index,
+                        adjacentFaces: edge.faces || []
+                    };
+                    
+                    bodyGroup.add(line);
+                    edgeLines.push(line);
                 });
             });
 
@@ -574,6 +625,69 @@
         // Highlight selection from SwiftUI
         window.setSelectedFaces = function(selectedJsonStr) {
             selectedFaces = JSON.parse(selectedJsonStr);
+            updateVisuals();
+        };
+
+        window.setSeams = function(forcedJsonStr, forbiddenJsonStr, mode) {
+            forcedSeams = JSON.parse(forcedJsonStr || "[]");
+            forbiddenSeams = JSON.parse(forbiddenJsonStr || "[]");
+            seamControlMode = mode;
+            updateVisuals();
+        };
+
+        window.setFaceDistortion = function(distortionJsonStr) {
+            let data = null;
+            try {
+                data = JSON.parse(distortionJsonStr);
+            } catch (e) {
+                data = null;
+            }
+            
+            // First, reset all face meshes vertex colors
+            faceMeshes.forEach(mesh => {
+                if (mesh.geometry.getAttribute('color')) {
+                    mesh.geometry.removeAttribute('color');
+                    mesh.material.vertexColors = false;
+                    mesh.material.needsUpdate = true;
+                }
+            });
+            
+            if (!data || !data.distortion || data.distortion.length === 0) {
+                updateVisuals();
+                return;
+            }
+            
+            const targetBodyIndex = data.body_index;
+            const targetFaceIndex = data.face_index;
+            const distValues = data.distortion;
+            
+            const mesh = faceMeshes.find(m => m.userData.bodyIndex === targetBodyIndex && m.userData.faceIndex === targetFaceIndex);
+            if (!mesh) return;
+            
+            const n = distValues.length;
+            const colors = new Float32Array(n * 3);
+            
+            for (let i = 0; i < n; i++) {
+                const val = Math.max(0.0, Math.min(1.0, distValues[i])); // clamp to [0, 1]
+                let r = 0, g = 0, b = 0;
+                if (val < 0.5) {
+                    const t = val / 0.5;
+                    g = t;
+                    b = 1.0 - t;
+                } else {
+                    const t = (val - 0.5) / 0.5;
+                    r = t;
+                    g = 1.0 - t;
+                }
+                colors[i * 3] = r;
+                colors[i * 3 + 1] = g;
+                colors[i * 3 + 2] = b;
+            }
+            
+            mesh.geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+            mesh.material.vertexColors = true;
+            mesh.material.needsUpdate = true;
+            
             updateVisuals();
         };
 
@@ -1001,6 +1115,36 @@
                 return;
             }
 
+            // Edge raycasting in manual/hybrid seam modes (Phase 3)
+            if (!isPlaneSelectionActive && (seamControlMode === "manual" || seamControlMode === "hybrid")) {
+                raycaster.params.Line.threshold = 3.0;
+                const edgeIntersects = raycaster.intersectObjects(edgeLines);
+                if (edgeIntersects.length > 0) {
+                    const hitEdge = edgeIntersects[0].object;
+                    if (hoveredEdge !== hitEdge) {
+                        hoveredEdge = hitEdge;
+                        updateVisuals();
+                        
+                        // Show edge info in overlay
+                        infoOverlay.style.display = 'block';
+                        infoOverlay.innerHTML = `Body: ${hitEdge.userData.bodyIndex + 1} | Edge: ${hitEdge.userData.edgeIndex} | Faces: ${hitEdge.userData.adjacentFaces.join(', ')}`;
+                    }
+                    if (hoveredFace !== null) {
+                        hoveredFace = null;
+                        updateVisuals();
+                    }
+                    document.body.style.cursor = 'pointer';
+                    return; // Bypass face selection hover!
+                } else {
+                    if (hoveredEdge !== null) {
+                        hoveredEdge = null;
+                        updateVisuals();
+                        document.body.style.cursor = 'default';
+                        infoOverlay.style.display = 'none';
+                    }
+                }
+            }
+
             // Normal or face selection mode
             const intersects = raycaster.intersectObjects(faceMeshes);
 
@@ -1116,6 +1260,26 @@
                     }
                 }
                 return;
+            }
+
+            // Edge clicks in manual/hybrid seam modes (Phase 3)
+            if (!isPlaneSelectionActive && (seamControlMode === "manual" || seamControlMode === "hybrid")) {
+                raycaster.params.Line.threshold = 3.0;
+                const edgeIntersects = raycaster.intersectObjects(edgeLines);
+                if (edgeIntersects.length > 0) {
+                    const clickedEdge = edgeIntersects[0].object;
+                    const bodyIndex = clickedEdge.userData.bodyIndex;
+                    const edgeIndex = clickedEdge.userData.edgeIndex;
+                    
+                    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.pathstitch) {
+                        window.webkit.messageHandlers.pathstitch.postMessage(JSON.stringify({
+                            op: "selectEdge",
+                            bodyIndex: bodyIndex,
+                            edgeIndex: edgeIndex
+                        }));
+                    }
+                    return; // Bypass face click!
+                }
             }
 
             // Normal or face mode clicks
@@ -1245,7 +1409,14 @@
                     mesh.userData.wireframe.material.opacity = 1.0;
 
                     const isMoveBody = bodyMoveActive && mesh.userData.bodyIndex === selectedBodyIndex;
-                    if (isMoveBody) {
+                    if (mesh.material.vertexColors) {
+                        mesh.material.color.setHex(COLOR_DEFAULT);
+                        if (isMoveBody || isSelected || isHovered) {
+                            mesh.userData.wireframe.material.color.setHex(COLOR_HIGHLIGHT_EDGE);
+                        } else {
+                            mesh.userData.wireframe.material.color.setHex(COLOR_EDGE);
+                        }
+                    } else if (isMoveBody) {
                         // Highlight the whole body being moved (MAS-125).
                         mesh.material.color.setHex(COLOR_SELECTED);
                         mesh.userData.wireframe.material.color.setHex(COLOR_HIGHLIGHT_EDGE);
@@ -1259,6 +1430,34 @@
                         mesh.material.color.setHex(COLOR_DEFAULT);
                         mesh.userData.wireframe.material.color.setHex(COLOR_EDGE);
                     }
+                }
+            });
+
+            // Update edge lines colors
+            edgeLines.forEach(line => {
+                const bIdx = line.userData.bodyIndex;
+                const eIdx = line.userData.edgeIndex;
+                
+                const isForced = forcedSeams.some(fs => fs.bodyIndex === bIdx && fs.edgeIndex === eIdx);
+                const isForbidden = forbiddenSeams.some(fs => fs.bodyIndex === bIdx && fs.edgeIndex === eIdx);
+                const isHovered = (hoveredEdge === line);
+                
+                if (isForced) {
+                    line.material.color.setHex(COLOR_EDGE_FORCED);
+                    line.material.opacity = 1.0;
+                    line.visible = true;
+                } else if (isForbidden) {
+                    line.material.color.setHex(COLOR_EDGE_FORBIDDEN);
+                    line.material.opacity = 1.0;
+                    line.visible = true;
+                } else if (isHovered) {
+                    line.material.color.setHex(COLOR_EDGE_HOVER);
+                    line.material.opacity = 1.0;
+                    line.visible = true;
+                } else {
+                    line.material.color.setHex(COLOR_EDGE_DEFAULT);
+                    line.material.opacity = (seamControlMode === "auto") ? 0.2 : 0.7;
+                    line.visible = true;
                 }
             });
 

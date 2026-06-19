@@ -41,6 +41,10 @@ from OCC.Core.BRepTools import breptools, BRepTools_WireExplorer
 from OCC.Core.GeomAbs import GeomAbs_Plane, GeomAbs_Cylinder, GeomAbs_Cone
 from OCC.Core.GProp import GProp_GProps
 from OCC.Core.BRepGProp import brepgprop
+from OCC.Core.BRepLProp import BRepLProp_SLProps
+from OCC.Core.TopLoc import TopLoc_Location
+import numpy as np
+from pathstitch_core.surface_unfold import triangulate_face, parameterize_mesh
 
 EDGE_SAMPLES = 24
 GAP = 10.0  # mm between disconnected patches
@@ -95,8 +99,69 @@ def _uv_mapper(face, kind, surf=None):
     raise ValueError(f"Not developable: {kind}")
 
 
+def _surface_normal(surf, u, v) -> Tuple[float, float, float]:
+    try:
+        props = BRepLProp_SLProps(1, 1e-6)
+        props.SetSurface(surf)
+        props.SetParameters(u, v)
+        if props.IsNormalDefined():
+            n = props.Normal()
+            return (float(n.X()), float(n.Y()), float(n.Z()))
+    except Exception:
+        pass
+    return (0.0, 0.0, 1.0)
+
+
+class MeshMapper:
+    def __init__(self, face, distortion_mode="conformal"):
+        verts3d, tris = triangulate_face(face)
+        if not tris:
+            raise ValueError("Face has no triangulation.")
+            
+        loc = TopLoc_Location()
+        tri = BRep_Tool.Triangulation(face, loc)
+        uv_nodes = []
+        for i in range(1, tri.NbNodes() + 1):
+            p2d = tri.UVNode(i)
+            uv_nodes.append((p2d.X(), p2d.Y()))
+        self.uv_nodes = np.array(uv_nodes)
+        
+        self.uv2d = parameterize_mesh(verts3d, tris, distortion_mode)
+        self.tris = tris
+
+    def __call__(self, u, v):
+        p = np.array([u, v])
+        for (i0, i1, i2) in self.tris:
+            a = self.uv_nodes[i0]
+            b = self.uv_nodes[i1]
+            c = self.uv_nodes[i2]
+            
+            v0 = b - a
+            v1 = c - a
+            v2 = p - a
+            
+            den = v0[0]*v1[1] - v1[0]*v0[1]
+            if abs(den) < 1e-12:
+                continue
+                
+            v_coord = (v2[0]*v1[1] - v1[0]*v2[1]) / den
+            w_coord = (v0[0]*v2[1] - v2[0]*v0[1]) / den
+            u_coord = 1.0 - v_coord - w_coord
+            
+            if u_coord >= -1e-4 and v_coord >= -1e-4 and w_coord >= -1e-4:
+                p0_2d = self.uv2d[i0]
+                p1_2d = self.uv2d[i1]
+                p2_2d = self.uv2d[i2]
+                xy = u_coord*p0_2d + v_coord*p1_2d + w_coord*p2_2d
+                return (float(xy[0]), float(xy[1]))
+                
+        dists = np.sum((self.uv_nodes - p)**2, axis=1)
+        idx = np.argmin(dists)
+        return (float(self.uv2d[idx][0]), float(self.uv2d[idx][1]))
+
+
 def _sample_edge(edge, face, mapper, surf=None) -> Optional[Dict[str, Any]]:
-    """Samples one edge of `face`: matched lists of 2D (unfolded) and 3D points."""
+    """Samples one edge of `face`: matched lists of 2D (unfolded) and 3D points, plus normal at midpoint."""
     try:
         curve2d, t0, t1 = BRep_Tool.CurveOnSurface(edge, face)
     except Exception:
@@ -107,6 +172,11 @@ def _sample_edge(edge, face, mapper, surf=None) -> Optional[Dict[str, Any]]:
         surf = BRepAdaptor_Surface(face)
     pts2d: List[Tuple[float, float]] = []
     pts3d: List[Tuple[float, float, float]] = []
+    
+    t_mid = t0 + (t1 - t0) * 0.5
+    p_mid = curve2d.Value(t_mid)
+    normal = _surface_normal(surf, p_mid.X(), p_mid.Y())
+    
     for i in range(EDGE_SAMPLES + 1):
         t = t0 + (t1 - t0) * (i / EDGE_SAMPLES)
         p = curve2d.Value(t)
@@ -114,7 +184,7 @@ def _sample_edge(edge, face, mapper, surf=None) -> Optional[Dict[str, Any]]:
         pts2d.append(mapper(u, v))
         p3 = surf.Value(u, v)
         pts3d.append((p3.X(), p3.Y(), p3.Z()))
-    return {"pts2d": pts2d, "pts3d": pts3d}
+    return {"pts2d": pts2d, "pts3d": pts3d, "normal": normal}
 
 
 def _is_straight(pts: List[Tuple[float, float]]) -> bool:
@@ -237,7 +307,7 @@ def _collect_faces(body) -> List[Any]:
     return faces
 
 
-def _build_records(body, wanted: Optional[set]) -> Tuple[Dict[int, Dict], Dict[int, List[int]], List[Dict]]:
+def _build_records(body, wanted: Optional[set], distortion_mode: str = "conformal") -> Tuple[Dict[int, Dict], Dict[int, List[int]], List[Dict]]:
     """Extracts unfold data for the wanted faces of one body.
 
     Returns (face_records, edge_to_faces, skipped):
@@ -246,6 +316,12 @@ def _build_records(body, wanted: Optional[set]) -> Tuple[Dict[int, Dict], Dict[i
       edge_to_faces[eid] = [f_idx, ...] (wanted faces only)
     """
     emap = TopTools_IndexedMapOfShape()
+    # PRE-POPULATE all edges of the body to guarantee stable, absolute IDs!
+    edge_exp = TopExp_Explorer(body, TopAbs_EDGE)
+    while edge_exp.More():
+        emap.Add(topods.Edge(edge_exp.Current()))
+        edge_exp.Next()
+
     records: Dict[int, Dict] = {}
     edge_to_faces: Dict[int, List[int]] = {}
     skipped: List[Dict] = []
@@ -255,10 +331,15 @@ def _build_records(body, wanted: Optional[set]) -> Tuple[Dict[int, Dict], Dict[i
             continue
         kind = _surface_kind(face)
         if kind == "Other":
-            skipped.append({"face_index": f_idx, "type": kind})
-            continue
-        surf = BRepAdaptor_Surface(face)
-        mapper = _uv_mapper(face, kind, surf=surf)
+            try:
+                mapper = MeshMapper(face, distortion_mode)
+                surf = BRepAdaptor_Surface(face)
+            except Exception as e:
+                skipped.append({"face_index": f_idx, "type": f"Other (Flattening failed: {str(e)})"})
+                continue
+        else:
+            surf = BRepAdaptor_Surface(face)
+            mapper = _uv_mapper(face, kind, surf=surf)
 
         edges = []
         eexp = TopExp_Explorer(face, TopAbs_EDGE)
@@ -278,6 +359,7 @@ def _build_records(body, wanted: Optional[set]) -> Tuple[Dict[int, Dict], Dict[i
                 "straight": _is_straight(rec["pts2d"]),
                 "length": _polyline_length(rec["pts2d"]),
                 "is_seam": is_seam,
+                "normal": rec["normal"],
             })
             if not is_seam:
                 edge_to_faces.setdefault(eid, [])
@@ -290,6 +372,12 @@ def _build_records(body, wanted: Optional[set]) -> Tuple[Dict[int, Dict], Dict[i
             "polygon": _outer_wire_polygon(face, mapper, surf=surf),
             "edges": edges,
         }
+        if kind == "Other":
+            verts3d, _ = triangulate_face(face)
+            records[f_idx]["uv2d"] = mapper.uv2d.tolist()
+            records[f_idx]["tris"] = mapper.tris
+            records[f_idx]["verts3d"] = verts3d
+            
     return records, edge_to_faces, skipped
 
 
@@ -297,21 +385,42 @@ def _build_records(body, wanted: Optional[set]) -> Tuple[Dict[int, Dict], Dict[i
 # Spanning forest + rollout
 # ---------------------------------------------------------------------------
 
-def _fold_candidates(records, edge_to_faces) -> Dict[int, List[Tuple[int, int, float]]]:
+def _fold_candidates(records, edge_to_faces, forced_seams=None, forbidden_seams=None) -> Dict[int, List[Tuple[int, int, float]]]:
     """adjacency[f] = [(neighbor_face, eid, shared_edge_length)], fold-eligible only."""
+    if forced_seams is None:
+        forced_seams = set()
+    if forbidden_seams is None:
+        forbidden_seams = set()
+
     adj: Dict[int, List[Tuple[int, int, float]]] = {f: [] for f in records}
     for eid, faces in edge_to_faces.items():
         if len(faces) != 2:
             continue
+        # Drop forced seams from fold candidate adjacency
+        if eid in forced_seams:
+            continue
+            
         fa, fb = faces
         ra = next(e for e in records[fa]["edges"] if e["eid"] == eid)
         rb = next(e for e in records[fb]["edges"] if e["eid"] == eid)
         # Foldable only if straight in BOTH unfoldings
         if not (ra["straight"] and rb["straight"]):
             continue
+            
         length = min(ra["length"], rb["length"])
-        adj[fa].append((fb, eid, length))
-        adj[fb].append((fa, eid, length))
+        
+        # Curvature weights: prefer flatter folds (dihedral angle close to 0)
+        na = ra.get("normal", (0.0, 0.0, 1.0))
+        nb = rb.get("normal", (0.0, 0.0, 1.0))
+        cos_theta = na[0]*nb[0] + na[1]*nb[1] + na[2]*nb[2]
+        weight = length * (1.0 + cos_theta)
+        
+        # Pin forbidden seams (forced folds) into spanning tree by boosting weight
+        if eid in forbidden_seams:
+            weight = weight + 1e6
+            
+        adj[fa].append((fb, eid, weight))
+        adj[fb].append((fa, eid, weight))
     return adj
 
 
@@ -560,11 +669,10 @@ def _sew_holes(pts2d, face_poly, diameter, spacing, margin):
 
 # ---------------------------------------------------------------------------
 # DXF assembly
-# ---------------------------------------------------------------------------
-
-def _ensure_layers(doc):
+# -------------------------------------------------def _ensure_layers(doc):
     specs = [("SEAM_CUT", 1, "CONTINUOUS"), ("CREASE", 5, "DASHED"),
-             ("GLUE_TABS", 3, "CONTINUOUS"), ("SEW_HOLES", 3, "CONTINUOUS")]
+             ("GLUE_TABS", 3, "CONTINUOUS"), ("SEW_HOLES", 3, "CONTINUOUS"),
+             ("DISTORTION", 7, "CONTINUOUS")]
     if "DASHED" not in doc.linetypes:
         doc.linetypes.add("DASHED", pattern=[0.75, 0.5, -0.25])
     for name, color, lt in specs:
@@ -573,19 +681,22 @@ def _ensure_layers(doc):
 
 
 def unfold_connected(body, wanted: Optional[set], mode: str, anchor: Optional[int],
-                     decoration: str, deco_params: Dict[str, float]):
+                      decoration: str, deco_params: Dict[str, float],
+                      distortion_mode: str = "conformal",
+                      forced_seams: Optional[set] = None,
+                      forbidden_seams: Optional[set] = None):
     """Runs the full pipeline for one body. Returns (draw_ops, stats, skipped).
 
-    draw_ops: list of ("polyline"|"circle", layer, payload) in net coordinates.
+    draw_ops: list of ("polyline"|"circle"|"solid", layer, payload) in net coordinates.
     """
-    records, edge_to_faces, skipped = _build_records(body, wanted)
+    records, edge_to_faces, skipped = _build_records(body, wanted, distortion_mode)
     if not records:
         return [], {"patches": 0, "faces": 0, "folds": 0, "seams": 0}, skipped
 
     if anchor is None or anchor not in records:
         anchor = max(records, key=lambda f: records[f]["area"])
 
-    adj = _fold_candidates(records, edge_to_faces)
+    adj = _fold_candidates(records, edge_to_faces, forced_seams, forbidden_seams)
     order = _spanning_order(records, adj, anchor, mode)
     placements, fold_pairs, patch_of_face = _rollout(records, order)
 
@@ -593,8 +704,8 @@ def unfold_connected(body, wanted: Optional[set], mode: str, anchor: Optional[in
     fold_eids = {(min(a, b), max(a, b), e) for (a, b, e) in fold_pairs}
     fold_edge_ids = {e for (_a, _b, e) in fold_pairs}
 
-    # draw_ops entries: (kind, layer, payload, patch_index)
-    draw_ops: List[Tuple[str, str, Any, int]] = []
+    # draw_ops entries: (kind, layer, payload, patch_index_or_tuple)
+    draw_ops: List[Tuple[str, str, Any, Any]] = []
     n_seams = 0
 
     seam_instance_seen: set = set()
@@ -602,6 +713,33 @@ def unfold_connected(body, wanted: Optional[set], mode: str, anchor: Optional[in
         xf = placements[f]
         patch = patch_of_face[f]
         face_poly_placed = xf.apply_all(rec["polygon"])
+        
+        # If this is a curved face, add solid triangle fills on the DISTORTION layer
+        if rec["kind"] == "Other" and "tris" in rec:
+            tris = rec["tris"]
+            uv2d = np.array(rec["uv2d"])
+            verts3d = np.array(rec["verts3d"])
+            uv2d_placed = np.array(xf.apply_all(rec["uv2d"]))
+            
+            for (i0, i1, i2) in tris:
+                p0_3d, p1_3d, p2_3d = verts3d[i0], verts3d[i1], verts3d[i2]
+                a3d = 0.5 * np.linalg.norm(np.cross(p1_3d - p0_3d, p2_3d - p0_3d))
+                a3d = max(a3d, 1e-12)
+                
+                p0_2d, p1_2d, p2_2d = uv2d_placed[i0], uv2d_placed[i1], uv2d_placed[i2]
+                a2d = 0.5 * abs((p1_2d[0] - p0_2d[0]) * (p2_2d[1] - p0_2d[1]) - (p2_2d[0] - p0_2d[0]) * (p1_2d[1] - p0_2d[1]))
+                a2d = max(a2d, 1e-12)
+                
+                dist = max(a2d / a3d, a3d / a2d) - 1.0
+                if dist < 0.02:
+                    aci = 5 # Blue
+                elif dist < 0.1:
+                    aci = 3 # Green
+                else:
+                    aci = 1 # Red
+                
+                draw_ops.append(("solid", "DISTORTION", [p0_2d, p1_2d, p2_2d], (patch, aci)))
+
         for e in rec["edges"]:
             placed = xf.apply_all(e["pts2d"])
             partner = [o for o in edge_to_faces.get(e["eid"], []) if o != f]
@@ -651,12 +789,16 @@ def unfold_connected(body, wanted: Optional[set], mode: str, anchor: Optional[in
     # patch's drawn geometry so tabs/holes can't poke outside the slot)
     patch_pts: Dict[int, List[Tuple[float, float]]] = {}
     for (kind, _layer, payload, patch) in draw_ops:
+        p_idx = patch[0] if isinstance(patch, tuple) else patch
         if kind == "circle":
             (cx, cy), r = payload
-            patch_pts.setdefault(patch, []).extend(
+            patch_pts.setdefault(p_idx, []).extend(
                 [(cx - r, cy - r), (cx + r, cy + r)])
+        elif kind == "solid":
+            patch_pts.setdefault(p_idx, []).extend(payload)
         else:
-            patch_pts.setdefault(patch, []).extend(payload)
+            patch_pts.setdefault(p_idx, []).extend(payload)
+            
     offsets: Dict[int, Tuple[float, float]] = {}
     cursor = 0.0
     for p in sorted(patch_pts):
@@ -667,10 +809,15 @@ def unfold_connected(body, wanted: Optional[set], mode: str, anchor: Optional[in
 
     shifted: List[Tuple[str, str, Any]] = []
     for (kind, layer, payload, patch) in draw_ops:
-        ox, oy = offsets.get(patch, (0.0, 0.0))
+        p_idx = patch[0] if isinstance(patch, tuple) else patch
+        ox, oy = offsets.get(p_idx, (0.0, 0.0))
         if kind == "circle":
             (cx, cy), r = payload
             shifted.append((kind, layer, ((cx + ox, cy + oy), r)))
+        elif kind == "solid":
+            pts = [(x + ox, y + oy) for (x, y) in payload]
+            aci = patch[1]
+            shifted.append((kind, layer, (pts, aci)))
         else:
             shifted.append((kind, layer, [(x + ox, y + oy) for (x, y) in payload]))
 
@@ -700,6 +847,9 @@ def op_unfold_connected(args: Dict[str, Any]) -> Dict[str, Any]:
       anchor        {body_index, face_index} optional rollout root
       decoration    "none" | "tabs" | "holes"          (default "none")
       tab_height, hole_diameter, hole_spacing, hole_margin  floats (mm)
+      distortion_mode "conformal" | "equal-area" | "equidistant" | "balanced"
+      forced_seams  [{body_index, edge_index}, ...]
+      forbidden_seams [{body_index, edge_index}, ...]
     """
     import os
     from pathstitch_core.step_ops import load_step_shape, get_solid_bodies, get_dxf_bounds
@@ -719,6 +869,9 @@ def op_unfold_connected(args: Dict[str, Any]) -> Dict[str, Any]:
     }
     whole_body = bool(args.get("whole_body", False))
     anchor_arg = args.get("anchor") or {}
+    distortion_mode = args.get("distortion_mode", "conformal")
+    forced_seams_list = args.get("forced_seams") or []
+    forbidden_seams_list = args.get("forbidden_seams") or []
 
     try:
         shape = load_step_shape(input_path)
@@ -748,9 +901,17 @@ def op_unfold_connected(args: Dict[str, Any]) -> Dict[str, Any]:
             anchor = None
             if anchor_arg.get("body_index") == b_idx:
                 anchor = anchor_arg.get("face_index")
+                
+            # Filter seams for this body
+            forced_seams = {item.get("edge_index") for item in forced_seams_list if item.get("body_index") == b_idx}
+            forbidden_seams = {item.get("edge_index") for item in forbidden_seams_list if item.get("body_index") == b_idx}
+            
             ops, stats, skipped = unfold_connected(
                 bodies[b_idx], per_body[b_idx], mode, anchor,
-                decoration, deco_params)
+                decoration, deco_params,
+                distortion_mode=distortion_mode,
+                forced_seams=forced_seams,
+                forbidden_seams=forbidden_seams)
             for s in skipped:
                 s["body_index"] = b_idx
             all_skipped.extend(skipped)
@@ -764,6 +925,11 @@ def op_unfold_connected(args: Dict[str, Any]) -> Dict[str, Any]:
                     (cx, cy), r = payload
                     all_ops.append((kind, layer, ((cx + cursor_x, cy), r)))
                     max_x = max(max_x, cx + cursor_x + r)
+                elif kind == "solid":
+                    pts, aci = payload
+                    translated = [(x + cursor_x, y) for (x, y) in pts]
+                    all_ops.append((kind, layer, (translated, aci)))
+                    max_x = max(max_x, max(p[0] for p in translated))
                 else:
                     pts = [(x + cursor_x, y) for (x, y) in payload]
                     all_ops.append((kind, layer, pts))
@@ -776,8 +942,7 @@ def op_unfold_connected(args: Dict[str, Any]) -> Dict[str, Any]:
                 msg += (" Skipped non-developable faces: " +
                         ", ".join(f"B{s['body_index']+1}:F{s['face_index']}"
                                   for s in all_skipped) +
-                        ". Doubly-curved surfaces need mesh flattening "
-                        "(not yet supported).")
+                        ". Flattening failed.")
             return {"status": "error", "message": msg}
 
         # Load or create the destination DXF, appending after existing content
@@ -798,6 +963,10 @@ def op_unfold_connected(args: Dict[str, Any]) -> Dict[str, Any]:
                 (cx, cy), r = payload
                 msp.add_circle((cx + start_x, cy + start_y), r,
                                dxfattribs={"layer": layer})
+            elif kind == "solid":
+                pts, aci = payload
+                translated = [(x + start_x, y + start_y) for (x, y) in pts]
+                msp.add_solid(translated, dxfattribs={"layer": layer, "color": aci})
             else:
                 pts = [(x + start_x, y + start_y) for (x, y) in payload]
                 if len(pts) >= 2:
