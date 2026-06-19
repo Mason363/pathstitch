@@ -1,5 +1,16 @@
 import CoreGraphics
 import Foundation
+import simd
+
+/// Reads every CARTESIAN_POINT from a STEP file as a 3D point cloud, for the
+/// interactive SceneKit preview (MAS-124). Returns model-space coordinates;
+/// the view controller handles centering/scaling.
+public func parseStepPointCloud(url: URL) -> [SIMD3<Float>] {
+    guard let text = try? String(contentsOf: url, encoding: .utf8) ?? String(contentsOf: url, encoding: .isoLatin1) else {
+        return []
+    }
+    return parseStepCartesianPoints(text).map { SIMD3<Float>(Float($0.x), Float($0.y), Float($0.z)) }
+}
 
 /// Lightweight STEP (.step/.stp) preview for QuickLook (MAS-63). A full B-rep
 /// tessellation needs OpenCASCADE, which can't run inside a QuickLook app

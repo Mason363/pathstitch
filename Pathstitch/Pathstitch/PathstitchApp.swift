@@ -14,6 +14,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Track which document window is frontmost so menu-bar commands react to
+        // the active document. SwiftUI `Commands` don't observe the computed
+        // `NSApp.activeAppState`, so the Export menu's enabled state and
+        // checkmarks went permanently stale (MAS-136). Register before windows
+        // come up so the first document's becomeKey is captured.
+        NotificationCenter.default.addObserver(
+            forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main
+        ) { note in
+            let window = note.object as? NSWindow
+            ActiveDocument.shared.state = (window?.delegate as? DocumentWindowDelegate)?.state
+        }
+
         WindowManager.shared.applicationDidFinishLaunching(notification)
 
         // Monitor system appearance to update dock icon dynamically
@@ -64,6 +76,67 @@ extension NSApplication {
             return delegate.state
         }
         return nil
+    }
+}
+
+/// Observable mirror of the frontmost document's `AppState`, kept up to date by
+/// the `didBecomeKeyNotification` observer in `AppDelegate`. Menu-bar commands
+/// observe this instead of the non-reactive `NSApp.activeAppState` so their
+/// enabled state and checkmarks update live (MAS-136).
+@Observable
+final class ActiveDocument {
+    static let shared = ActiveDocument()
+    var state: AppState?
+    private init() {}
+}
+
+/// The File ▸ Export submenu, in its own observing `View` so the Export item's
+/// enabled state, the selected-format checkmark, and the two toggle checkmarks
+/// all reflect the active document live. Previously these read
+/// `NSApp.activeAppState` directly inside `Commands`, which SwiftUI never
+/// re-evaluates — leaving Export permanently greyed out and the checkmarks
+/// stuck (MAS-136).
+struct ExportMenu: View {
+    @State private var activeDoc = ActiveDocument.shared
+
+    var body: some View {
+        // Read the observed values in the body so the Observation framework
+        // tracks them and re-renders the menu when they change.
+        let state = activeDoc.state
+        let canExport = state?.currentFilePath != nil
+        let format = state?.exportFormat ?? "dxf"
+        let selectedOnly = state?.exportSelectedOnly ?? false
+        let measurementLines = state?.exportMeasurementLines ?? false
+
+        Menu("Export") {
+            Button("Export...") {
+                activeDoc.state?.exportWithDialog()
+            }
+            .keyboardShortcut("e", modifiers: [.command])
+            .disabled(!canExport)
+
+            Divider()
+
+            Picker("Export Format", selection: Binding(
+                get: { format },
+                set: { activeDoc.state?.exportFormat = $0 }
+            )) {
+                Text("AutoCAD DXF (.dxf)").tag("dxf")
+                Text("Scalable Vector Graphics (.svg)").tag("svg")
+                Text("Document PDF (.pdf)").tag("pdf")
+                Text("Raster Image (.png)").tag("png")
+            }
+
+            Toggle("Export Selected Only", isOn: Binding(
+                get: { selectedOnly },
+                set: { activeDoc.state?.exportSelectedOnly = $0 }
+            ))
+
+            Toggle("Export Measurement Lines", isOn: Binding(
+                get: { measurementLines },
+                set: { activeDoc.state?.exportMeasurementLines = $0 }
+            ))
+        }
     }
 }
 
@@ -122,36 +195,10 @@ struct PathstitchApp: App {
 
                 Divider()
 
-                // Export (was the top-level "Export Settings" menu — MAS-68)
-                Menu("Export") {
-                    Button("Export...") {
-                        NSApp.activeAppState?.exportWithDialog()
-                    }
-                    .keyboardShortcut("e", modifiers: [.command])
-                    .disabled(NSApp.activeAppState?.currentFilePath == nil)
-
-                    Divider()
-
-                    Picker("Export Format", selection: Binding(
-                        get: { NSApp.activeAppState?.exportFormat ?? "dxf" },
-                        set: { NSApp.activeAppState?.exportFormat = $0 }
-                    )) {
-                        Text("AutoCAD DXF (.dxf)").tag("dxf")
-                        Text("Scalable Vector Graphics (.svg)").tag("svg")
-                        Text("Document PDF (.pdf)").tag("pdf")
-                        Text("Raster Image (.png)").tag("png")
-                    }
-
-                    Toggle("Export Selected Only", isOn: Binding(
-                        get: { NSApp.activeAppState?.exportSelectedOnly ?? false },
-                        set: { NSApp.activeAppState?.exportSelectedOnly = $0 }
-                    ))
-
-                    Toggle("Export Measurement Lines", isOn: Binding(
-                        get: { NSApp.activeAppState?.exportMeasurementLines ?? false },
-                        set: { NSApp.activeAppState?.exportMeasurementLines = $0 }
-                    ))
-                }
+                // Export (was the top-level "Export Settings" menu — MAS-68).
+                // Lives in its own observing view so the enabled state and
+                // checkmarks track the active document (MAS-136).
+                ExportMenu()
 
                 // Image (was the top-level "Reference Image" menu — MAS-68)
                 Menu("Image") {

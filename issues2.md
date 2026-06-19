@@ -382,7 +382,7 @@ boilerplate, e.g. repeated acceptance-criteria checklists that just restate the 
 
 ## 13. Export & file previews
 
-- [ ] **Group 13 done**
+- [x] **Group 13 done** — implemented 2026-06-19; builds clean; marked In Progress in Linear for review.
 
 ### MAS-136 — Exporting
 > Exporting straight up doesn't work. Also, show a check mark indicator next to "Export Selected Only" and "Export Measurement Lines" to show weather they are on or not. Also, change which format is checked if the user clicks another one in the export format. And the export button itself in the menu bar is always grayed out, so the user just can't export.
