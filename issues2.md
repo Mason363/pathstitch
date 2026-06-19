@@ -349,7 +349,7 @@ boilerplate, e.g. repeated acceptance-criteria checklists that just restate the 
 
 ## 11. Layers
 
-- [ ] **Group 11 done**
+- [x] **Group 11 done** — implemented 2026-06-19; builds clean; marked In Progress in Linear for review. MAS-105: clicking a layer in the panel now selects every geometry entity it contains (`selectAllInLayer`), the inverse of the existing selection→active-layer sync; a reference-image layer just activates (no viewport geometry), and an empty layer still activates as the draw target.
 
 ### MAS-105 — Layers v2
 > Clicking on a layer selects all the geometries that are in that layer

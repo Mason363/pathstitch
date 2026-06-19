@@ -6029,6 +6029,29 @@ class AppState {
         }
     }
 
+    /// Clicking a layer selects every geometry entity it contains (MAS-105), the
+    /// inverse of `updateActiveLayersFromSelection`. A reference-image layer has no
+    /// selectable viewport geometry, so it only becomes the active layer (which
+    /// opens its transform panel via the `activeLayerId` didSet — MAS-137). Setting
+    /// `selectedHandles` drives the active-layer highlight; `activeLayerId` is then
+    /// pinned explicitly so an empty layer still activates as the draw target.
+    func selectAllInLayer(layerId: String) {
+        guard let layer = layers.first(where: { $0.id == layerId }) else { return }
+        if layer.isReferenceImageLayer {
+            activeLayerId = layerId
+            return
+        }
+        let handles = entities
+            .filter { $0.layerId == layerId || $0.layer == layer.name }
+            .map { $0.handle }
+        selectedHandles = Set(handles)
+        activeLayerId = layerId
+        // Make the selection actionable — a creation tool would ignore it.
+        if !handles.isEmpty && currentTool != .select {
+            currentTool = .select
+        }
+    }
+
     func addLayer(name: String, color: Color? = nil) {
         let sanitizedName = sanitizeLayerName(name)
         let actualColor = color ?? self.colorForLayerName(sanitizedName)

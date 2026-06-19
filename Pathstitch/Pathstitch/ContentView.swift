@@ -2426,7 +2426,8 @@ extension ContentView {
                                 .simultaneousGesture(
                                     TapGesture(count: 1).onEnded {
                                         if !item.isFolder {
-                                            state.activeLayerId = item.id
+                                            // Clicking a layer selects all of its geometry (MAS-105).
+                                            state.selectAllInLayer(layerId: item.id)
                                         }
                                     }
                                 )
