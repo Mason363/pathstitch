@@ -4906,6 +4906,253 @@ def op_trim_segment(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"status": "error", "message": f"Failed to trim: {str(e)}"}
 
 
+# --- PSD import (MAS-141) --------------------------------------------------
+# Adobe Photoshop (.psd) files are parsed with the open-source `psd-tools`
+# library. Each PSD layer becomes a Pathstitch layer: pixel/fill layers are
+# rendered to full-resolution PNGs (loaded as reference-image layers), while
+# vector content — Photoshop stores placed vector art as smart objects that
+# embed the original SVG — is extracted as true vector polylines.
+#
+# All placements are reported in a single, viewport-independent coordinate
+# frame: PSD pixels with the origin at the canvas centre and +Y pointing up
+# (matching Pathstitch model space). The Swift side then applies one uniform
+# "fit canvas to viewport" scale so every layer stays in register, exactly as
+# it was composed in Photoshop.
+
+def _uniqueish_id() -> str:
+    import uuid
+    return uuid.uuid4().hex
+
+
+def _psd_svg_to_entities(svg_bytes: bytes, out_dir: str,
+                         left: float, top: float, right: float, bottom: float,
+                         cw: float, ch: float) -> List[Dict[str, Any]]:
+    """Convert an embedded smart-object SVG into LWPOLYLINE entity dicts placed
+    to exactly fill the smart object's bounding box on the PSD canvas, returned
+    in canvas-centred, +Y-up pixel coordinates.
+
+    Reuses the battle-tested `op_import_svg` path flattener: the SVG is written
+    out, imported into a temp DXF, then every entity is flattened to a polyline
+    and affine-fitted (independent X/Y scale) into the placement box — the same
+    way the rendered raster layer fills its own box, so vector and raster layers
+    line up.
+    """
+    svg_path = os.path.join(out_dir, f"psdvec_{_uniqueish_id()}.svg")
+    dxf_path = svg_path[:-4] + ".dxf"
+    try:
+        with open(svg_path, "wb") as f:
+            f.write(svg_bytes)
+        res = op_import_svg({"input": svg_path, "output": dxf_path, "consolidate": False})
+        if res.get("status") != "ok" or not os.path.exists(dxf_path):
+            return []
+
+        doc = ezdxf.readfile(dxf_path)
+        msp = doc.modelspace()
+        raw: List[Tuple[List[Tuple[float, float]], bool]] = []
+        for e in msp:
+            t = e.dxftype()
+            try:
+                if t == "LWPOLYLINE":
+                    pts = [(float(p[0]), float(p[1])) for p in e.get_points()]
+                    raw.append((pts, bool(e.closed)))
+                elif t == "LINE":
+                    raw.append(([(float(e.dxf.start.x), float(e.dxf.start.y)),
+                                 (float(e.dxf.end.x), float(e.dxf.end.y))], False))
+                elif t == "CIRCLE":
+                    c = e.dxf.center
+                    r = float(e.dxf.radius)
+                    pts = [(c.x + r * math.cos(a), c.y + r * math.sin(a))
+                           for a in (i * 2.0 * math.pi / 64.0 for i in range(64))]
+                    raw.append((pts, True))
+                else:
+                    # ARC / ELLIPSE / SPLINE / POLYLINE — flatten to a polyline.
+                    pts = [(float(p.x), float(p.y)) for p in e.flattening(0.25)]
+                    if len(pts) >= 2:
+                        raw.append((pts, False))
+            except Exception:
+                continue
+
+        if not raw:
+            return []
+
+        xs = [p[0] for verts, _ in raw for p in verts]
+        ys = [p[1] for verts, _ in raw for p in verts]
+        ex0, ex1 = min(xs), max(xs)
+        ey0, ey1 = min(ys), max(ys)
+        ew = (ex1 - ex0) or 1.0
+        eh = (ey1 - ey0) or 1.0
+
+        # Target placement box in canvas-centred, +Y-up pixel space.
+        tx0 = left - cw / 2.0
+        tx1 = right - cw / 2.0
+        ty0 = ch / 2.0 - bottom   # smaller Y (lower on screen)
+        ty1 = ch / 2.0 - top      # larger Y (higher on screen)
+        sx = (tx1 - tx0) / ew
+        sy = (ty1 - ty0) / eh
+
+        out: List[Dict[str, Any]] = []
+        for verts, closed in raw:
+            nv = [[tx0 + (x - ex0) * sx, ty0 + (y - ey0) * sy] for (x, y) in verts]
+            if len(nv) >= 2:
+                out.append({"type": "LWPOLYLINE", "vertices": nv, "closed": closed})
+        return out
+    except Exception:
+        return []
+    finally:
+        for p in (svg_path, dxf_path):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+
+def op_parse_psd(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Parse a .psd file into per-layer raster/vector data (MAS-141).
+
+    args: { input: <psd path>, out_dir: <temp dir for rendered PNGs> }
+    Returns layers top-to-bottom. Raster layers reference a rendered PNG and
+    carry their placement centre + natural pixel size; vector layers carry
+    ready-to-commit LWPOLYLINE entities. A full flattened composite PNG is also
+    rendered for the "load as one image" import option.
+    """
+    input_path = args.get("input")
+    out_dir = args.get("out_dir")
+    if not input_path or not os.path.exists(input_path):
+        return {"status": "error", "message": f"Input file not found: {input_path}"}
+    if not out_dir:
+        return {"status": "error", "message": "out_dir must be specified."}
+
+    try:
+        from psd_tools import PSDImage
+    except Exception as e:
+        return {"status": "error", "message": f"psd-tools is not installed: {str(e)}"}
+
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+        psd = PSDImage.open(input_path)
+        cw = float(psd.width)
+        ch = float(psd.height)
+        uid = _uniqueish_id()
+
+        # Flatten the group hierarchy into leaf layers, preserving the visual
+        # top-to-bottom stacking order that psd-tools yields.
+        leaves: List[Any] = []
+
+        def collect(group) -> None:
+            for layer in group:
+                if layer.is_group():
+                    collect(layer)
+                else:
+                    leaves.append(layer)
+
+        collect(psd)
+
+        used_names = set()
+
+        def unique_name(base: str) -> str:
+            base = (base or "Layer").strip() or "Layer"
+            name = base
+            i = 2
+            while name in used_names:
+                name = f"{base} {i}"
+                i += 1
+            used_names.add(name)
+            return name
+
+        layers_out: List[Dict[str, Any]] = []
+        idx = 0
+        for layer in leaves:
+            idx += 1
+            bbox = layer.bbox  # (left, top, right, bottom)
+            left, top, right, bottom = (float(bbox[0]), float(bbox[1]),
+                                        float(bbox[2]), float(bbox[3]))
+            if right <= left or bottom <= top:
+                continue  # empty layer
+
+            name = unique_name(layer.name if layer.name else f"Layer {idx}")
+
+            # Detect a vector smart object that embeds SVG art.
+            svg_bytes = None
+            try:
+                so = getattr(layer, "smart_object", None)
+                if so is not None and so.filetype is not None \
+                        and str(so.filetype).lower() == "svg":
+                    svg_bytes = so.data
+            except Exception:
+                svg_bytes = None
+
+            if svg_bytes:
+                ents = _psd_svg_to_entities(svg_bytes, out_dir,
+                                            left, top, right, bottom, cw, ch)
+                if ents:
+                    layers_out.append({
+                        "name": name,
+                        "kind": "vector",
+                        "entities": ents,
+                        "visible": bool(layer.visible),
+                    })
+                    continue
+                # Embedded SVG yielded no geometry — fall back to raster render.
+
+            # Raster: render this layer's own pixels (cropped to its bbox) at
+            # full resolution.
+            try:
+                pil = layer.composite()
+            except Exception:
+                pil = None
+            if pil is None:
+                continue
+            if pil.mode != "RGBA":
+                pil = pil.convert("RGBA")
+
+            png_path = os.path.join(out_dir, f"psdlayer_{uid}_{idx}.png")
+            pil.save(png_path)
+
+            layers_out.append({
+                "name": name,
+                "kind": "raster",
+                "png_path": png_path,
+                # Placement centre in canvas-centred, +Y-up pixel space.
+                "center_x": (left + right) / 2.0 - cw / 2.0,
+                "center_y": ch / 2.0 - (top + bottom) / 2.0,
+                "width_px": float(pil.width),
+                "height_px": float(pil.height),
+                "visible": bool(layer.visible),
+            })
+
+        # Full flattened composite for the "load as one image" / merge options.
+        comp = psd.composite()
+        if comp.mode != "RGBA":
+            comp = comp.convert("RGBA")
+        comp_path = os.path.join(out_dir, f"psdcomposite_{uid}.png")
+        comp.save(comp_path)
+
+        # Fully-flattened PSDs (no explicit layer records) still import as a
+        # single reference image rather than "nothing".
+        if not layers_out:
+            layers_out.append({
+                "name": unique_name("Layer 1"),
+                "kind": "raster",
+                "png_path": comp_path,
+                "center_x": 0.0,
+                "center_y": 0.0,
+                "width_px": float(comp.width),
+                "height_px": float(comp.height),
+                "visible": True,
+            })
+
+        return {"status": "ok", "data": {
+            "canvas_width": cw,
+            "canvas_height": ch,
+            "layers": layers_out,
+            "composite_png_path": comp_path,
+            "composite_width": float(comp.width),
+            "composite_height": float(comp.height),
+        }}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to parse PSD: {str(e)}"}
+
+
 OPERATIONS = {
     "list_entities": op_list_entities,
     "offset_lines": op_offset_lines,
@@ -4923,6 +5170,7 @@ OPERATIONS = {
     "import_pdf": op_import_pdf,
     "trace_raster": op_trace_raster,
     "commit_trace": op_commit_trace,
+    "parse_psd": op_parse_psd,
     "translate_entities": op_translate_entities,
     "edit_vertices": op_edit_vertices,
     "apply_corners": op_apply_corners,

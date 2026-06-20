@@ -3071,7 +3071,12 @@ struct DxfCanvasView: View {
                             }
                         }
                     } else {
-                        if !NSEvent.modifierFlags.contains(.shift) {
+                        // Offset is a modal tool: clicking empty space confirms the
+                        // pending offset and returns to Select — matching Enter/OK,
+                        // with Esc/Cancel to discard. Standard click-away-to-commit.
+                        if state.currentTool == .offset && !state.selectedHandles.isEmpty {
+                            state.applyOffset(exitAfterApply: true)
+                        } else if !NSEvent.modifierFlags.contains(.shift) {
                             state.selectedHandles.removeAll()
                         }
                     }

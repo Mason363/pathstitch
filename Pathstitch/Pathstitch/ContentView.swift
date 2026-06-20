@@ -306,6 +306,12 @@ struct ContentView: View {
                 }
             }
         }
+        // PSD import choice dialog, centered (MAS-141).
+        .overlay {
+            if state.showPSDImportDialog, let psd = state.pendingPSDImport {
+                PSDImportDialog(state: state, psd: psd)
+            }
+        }
         // Only reveal the loading overlay if work outlasts a short delay, so the
         // now-fast worker ops never flash a loader (§7).
         .task(id: state.isProcessing) {
@@ -398,6 +404,7 @@ struct ContentView: View {
             UTType(filenameExtension: "stl"),
             UTType(filenameExtension: "svg"),
             UTType(filenameExtension: "stch"),
+            UTType(filenameExtension: "psd"),
             UTType.image
         ].compactMap { $0 }
         openPanel.allowsMultipleSelection = false
@@ -523,9 +530,147 @@ struct HoverableButtonLabel<Label: View>: View {
 // Plasticity style buttons
 struct PlasticityButtonStyle: ButtonStyle {
     var isEnabled: Bool
-    
+
     func makeBody(configuration: Configuration) -> some View {
         HoverableButtonLabel(label: configuration.label, isEnabled: isEnabled, isPressed: configuration.isPressed)
+    }
+}
+
+// MARK: - PSD import dialog (MAS-141)
+// Centered modal asking how to bring an imported .psd into the workspace.
+struct PSDImportDialog: View {
+    @Bindable var state: AppState
+    let psd: PSDImportData
+
+    private var rasterCount: Int { psd.rasterLayers.count }
+    private var vectorCount: Int { psd.vectorLayers.count }
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.45)
+                .ignoresSafeArea()
+                .onTapGesture { state.cancelPSDImport() }
+
+            VStack(alignment: .leading, spacing: 0) {
+                // Header
+                HStack(spacing: 10) {
+                    Image(systemName: "square.stack.3d.up.fill")
+                        .foregroundColor(Color.accent)
+                        .font(.system(size: 18))
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Import Photoshop File")
+                            .font(PlasticityFont.header)
+                            .foregroundColor(Color.text_primary)
+                        Text(layerSummary)
+                            .font(.system(size: 11))
+                            .foregroundColor(Color.text_secondary)
+                    }
+                    Spacer()
+                }
+                .padding(.bottom, 14)
+
+                Text("How would you like to import “\(psd.sourceURL.deletingPathExtension().lastPathComponent)”?")
+                    .font(.system(size: 12))
+                    .foregroundColor(Color.text_secondary)
+                    .padding(.bottom, 12)
+
+                VStack(spacing: 8) {
+                    option(icon: "rectangle.stack",
+                           title: "Load As Is",
+                           subtitle: vectorCount > 0
+                                ? "Keep each layer separate — raster layers as reference images, vector layers as editable paths."
+                                : "Keep each layer separate as its own reference-image layer.",
+                           action: { state.applyPSDImport(mode: .loadAsIs) })
+
+                    option(icon: "photo",
+                           title: "Load As One Image",
+                           subtitle: "Flatten every layer into a single reference image.",
+                           action: { state.applyPSDImport(mode: .loadAsOne) })
+
+                    option(icon: "wand.and.stars",
+                           title: "Auto-Convert to Vector",
+                           subtitle: rasterCount > 0
+                                ? "Load the layers, then vectorize all \(rasterCount) raster layer\(rasterCount == 1 ? "" : "s") with shared settings."
+                                : "Load the vector layers (no raster layers to convert).",
+                           action: { state.applyPSDImport(mode: .autoVectorize) })
+
+                    option(icon: "square.on.square.dashed",
+                           title: "Merge & Convert",
+                           subtitle: "Flatten everything to one image, then vectorize it.",
+                           action: { state.applyPSDImport(mode: .mergeAndConvert) })
+                }
+
+                Button(action: { state.cancelPSDImport() }) {
+                    Text("Cancel")
+                        .font(PlasticityFont.body)
+                        .foregroundColor(Color.text_primary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                        .background(Color.bg_input)
+                        .cornerRadius(6)
+                }
+                .buttonStyle(PlainButtonStyle())
+                .padding(.top, 14)
+            }
+            .padding(22)
+            .frame(width: 460)
+            .background(Color.bg_panel)
+            .cornerRadius(12)
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.border_subtle, lineWidth: 1))
+            .shadow(color: Color.black.opacity(0.4), radius: 24, y: 8)
+        }
+    }
+
+    private var layerSummary: String {
+        var parts: [String] = []
+        if rasterCount > 0 { parts.append("\(rasterCount) raster") }
+        if vectorCount > 0 { parts.append("\(vectorCount) vector") }
+        let detail = parts.isEmpty ? "" : " (\(parts.joined(separator: ", ")))"
+        return "\(psd.totalLayerCount) layer\(psd.totalLayerCount == 1 ? "" : "s")\(detail)"
+    }
+
+    @ViewBuilder
+    private func option(icon: String, title: String, subtitle: String, action: @escaping () -> Void) -> some View {
+        PSDImportOptionButton(icon: icon, title: title, subtitle: subtitle, action: action)
+    }
+}
+
+private struct PSDImportOptionButton: View {
+    let icon: String
+    let title: String
+    let subtitle: String
+    let action: () -> Void
+    @State private var hovered = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: icon)
+                    .foregroundColor(Color.accent)
+                    .font(.system(size: 15))
+                    .frame(width: 22)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title)
+                        .font(PlasticityFont.body)
+                        .fontWeight(.semibold)
+                        .foregroundColor(Color.text_primary)
+                    Text(subtitle)
+                        .font(.system(size: 10.5))
+                        .foregroundColor(Color.text_secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .multilineTextAlignment(.leading)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(hovered ? Color.accent.opacity(0.12) : Color.bg_input)
+            .cornerRadius(8)
+            .overlay(RoundedRectangle(cornerRadius: 8)
+                .stroke(hovered ? Color.accent : Color.border_subtle, lineWidth: 1))
+        }
+        .buttonStyle(PlainButtonStyle())
+        .onHover { hovered = $0 }
     }
 }
 
@@ -2802,11 +2947,21 @@ extension ContentView {
                 
                 Divider()
                 
+                // When a PSD import queued several raster layers, one settings
+                // pass vectorizes them all together (MAS-141).
+                let psdBatch = state.psdVectorizeBatchLayerIds.count
+                if psdBatch > 0 {
+                    Text("These settings will be applied to all \(psdBatch) raster layer\(psdBatch == 1 ? "" : "s") from the PSD.")
+                        .font(.system(size: 9))
+                        .foregroundColor(Color.text_muted)
+                }
+
                 // Action buttons
                 HStack(spacing: 8) {
                     Button(action: {
                         state.isTracingRefImage = false
                         state.tracePreviewEntities = []
+                        state.psdVectorizeBatchLayerIds = []
                     }) {
                         Text("Cancel")
                             .font(PlasticityFont.body)
@@ -2817,11 +2972,15 @@ extension ContentView {
                             .cornerRadius(4)
                     }
                     .buttonStyle(PlainButtonStyle())
-                    
+
                     Button(action: {
-                        state.commitTrace()
+                        if psdBatch > 0 {
+                            state.commitPSDVectorizeAll()
+                        } else {
+                            state.commitTrace()
+                        }
                     }) {
-                        Text("Generate Vectors")
+                        Text(psdBatch > 0 ? "Vectorize All Layers" : "Generate Vectors")
                             .font(PlasticityFont.body)
                             .foregroundColor(Color.text_primary)
                             .frame(maxWidth: .infinity)

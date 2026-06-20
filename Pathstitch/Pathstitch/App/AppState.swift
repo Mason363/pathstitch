@@ -549,6 +549,52 @@ struct DXFLayerFolder: Identifiable, Hashable, Codable {
     var parentFolderId: String? = nil
 }
 
+// MARK: - PSD import model (MAS-141)
+// Decoded result of the Python `parse_psd` op. All placement coordinates are in
+// PSD pixels with the origin at the canvas centre and +Y up; the importer scales
+// them by a single "fit canvas to viewport" factor so every layer stays in
+// register exactly as composed in Photoshop.
+
+struct PSDRasterLayer {
+    let name: String
+    let pngPath: String
+    let centerX: Double
+    let centerY: Double
+    let widthPx: Double
+    let heightPx: Double
+    let visible: Bool
+}
+
+struct PSDVectorLayer {
+    let name: String
+    /// Each entity is a polyline: its vertices (PSD pixel, centred, +Y up) and
+    /// whether it is closed.
+    let entities: [(vertices: [[Double]], closed: Bool)]
+    let visible: Bool
+}
+
+struct PSDImportData {
+    let sourceURL: URL
+    let canvasWidth: Double
+    let canvasHeight: Double
+    let compositePngPath: String
+    let compositeWidth: Double
+    let compositeHeight: Double
+    /// Raster + vector layers in original stacking order is preserved within
+    /// each list; raster layers carry rendered PNGs, vector layers carry true
+    /// polylines.
+    let rasterLayers: [PSDRasterLayer]
+    let vectorLayers: [PSDVectorLayer]
+    let totalLayerCount: Int
+}
+
+enum PSDImportMode {
+    case loadAsIs        // raster layers as reference images, vectors as vectors
+    case loadAsOne       // flatten everything into a single reference image
+    case autoVectorize   // load layers, then vectorize all raster layers
+    case mergeAndConvert // flatten to one image, then vectorize it
+}
+
 struct LogEntry: Identifiable, Codable, Hashable {
     var id: UUID = UUID()
     var timestamp: Date = Date()
@@ -722,7 +768,20 @@ class AppState {
     var traceCornerSmoothness: Double = 50.0
     var tracePathOptimization: Double = 50.0
     var tracePreviewEntities: [DXFEntity] = []
-    
+
+    // PSD import (MAS-141). When a .psd is parsed, the result is held here and a
+    // centered choice dialog is shown asking how to bring the layers in.
+    var pendingPSDImport: PSDImportData? = nil
+    var showPSDImportDialog: Bool = false
+    /// Canvas drop location for a queued PSD import (so the layers land where the
+    /// file was dropped, matching image import).
+    var psdImportDropAt: CGPoint? = nil
+    // Reference-image layer ids queued for a single shared vectorize pass. While
+    // non-empty (and `isTracingRefImage`), the vectorize panel commits to all of
+    // them at once with the same trace settings ("applies to all raster layers
+    // equally"), per MAS-141.
+    var psdVectorizeBatchLayerIds: [String] = []
+
     // Transform Backup
     var backupOffsetX: Double = 0.0
     var backupOffsetY: Double = 0.0
@@ -2422,6 +2481,7 @@ class AppState {
         let routedExt = url.pathExtension.lowercased()
         if routedExt == "stch" { loadProject(from: url); return }
         if routedExt == "pdf"  { importPDF(from: url);  return }
+        if routedExt == "psd"  { importPSD(from: url);  return }
 
         if !checkUnsavedChangesBeforeProceeding() { return }
         errorMessage = nil
@@ -2636,13 +2696,15 @@ class AppState {
         let projectExts: Set<String> = ["stch"]
         let stepExts: Set<String> = ["step", "stp", "obj", "stl"]
         let imageExts: Set<String> = ["png", "jpg", "jpeg", "bmp", "tiff", "gif", "webp", "avif", "heic"]
-        
+
         let openInNewWindow = urls.filter { projectExts.contains($0.pathExtension.lowercased()) }
         let stepModels = urls.filter { stepExts.contains($0.pathExtension.lowercased()) }
         let images = urls.filter { imageExts.contains($0.pathExtension.lowercased()) }
+        // PSD files get their own import flow (per-layer + choice dialog, MAS-141).
+        let psdFiles = urls.filter { $0.pathExtension.lowercased() == "psd" }
         let toMerge = urls.filter {
             let e = $0.pathExtension.lowercased()
-            return !projectExts.contains(e) && !stepExts.contains(e) && !imageExts.contains(e)
+            return !projectExts.contains(e) && !stepExts.contains(e) && !imageExts.contains(e) && e != "psd"
         }
 
         for fileURL in openInNewWindow {
@@ -2660,6 +2722,12 @@ class AppState {
         // Load reference images as layers
         for imgURL in images {
             loadReferenceImage(from: imgURL, dropAt: dropAt)
+        }
+
+        // PSD: parse layers then prompt for the import mode (MAS-141). Only the
+        // first one is prompted at a time; dropping several PSDs queues them.
+        for psdURL in psdFiles {
+            importPSD(from: psdURL, dropAt: dropAt)
         }
 
         guard !toMerge.isEmpty else { return }
@@ -4466,70 +4534,66 @@ class AppState {
 
     func updateLivePreview() {
         previewTask?.cancel()
-        
-        guard let url = currentFilePath, !selectedHandles.isEmpty else {
+
+        guard !selectedHandles.isEmpty else {
             self.previewEntities = []
             return
         }
-        
-        if currentTool != .offset && currentTool != .addHoles {
+
+        // Offset preview is computed natively in Swift — instant, no Python
+        // round-trip — so the ghost tracks the drag handle in real time. The
+        // accurate geometry is still produced by Python on commit (applyOffset).
+        if currentTool == .offset {
+            let selected = entities.filter { selectedHandles.contains($0.handle) }
+            self.previewEntities = OffsetGeometry.preview(
+                selected: selected,
+                distance: offsetDistance,
+                side: offsetSide
+            )
+            return
+        }
+
+        guard currentTool == .addHoles, let url = currentFilePath else {
             self.previewEntities = []
             return
         }
-        
+
         previewTask = Task {
             do {
                 let tempDir = sessionTempDirectory
                 try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
                 let previewDxf = tempDir.appendingPathComponent("preview_temp.dxf")
-                
-                let res: [String: Any]
-                if currentTool == .offset {
-                    res = try await PythonBridge.shared.run(
-                        module: "dxf_ops",
-                        op: "offset_lines",
-                        args: [
-                            "input": url.path,
-                            "output": previewDxf.path,
-                            "handles": Array(selectedHandles),
-                            "distance": offsetDistance,
-                            "side": offsetSide,
-                            "layer": "PREVIEW",
-                            "construction": offsetConstruction
-                        ]
-                    )
-                } else {
-                    res = try await PythonBridge.shared.run(
-                        module: "dxf_ops",
-                        op: "add_holes",
-                        args: [
-                            "input": url.path,
-                            "output": previewDxf.path,
-                            "handles": Array(selectedHandles),
-                            "offset_distance": holeOffsetDistance,
-                            "hole_diameter": holeDiameter,
-                            "hole_spacing": holeSpacing,
-                            "distribution": holeDistribution,
-                            "hole_count": holeCount,
-                            "pattern": holePattern,
-                            "corner_behavior": holeCornerBehavior,
-                            "side": holeSide,
-                            "row_spacing": holeRowSpacing,
-                            "enable_variable_spacing": holeEnableVariableSpacing,
-                            "enable_proximity_filter": holeEnableProximityFilter,
-                            "enable_corner_interpolation": holeEnableCornerInterpolation,
-                            "enable_line_proximity_filter": holeEnableLineProximityFilter,
-                            "line_proximity_threshold": holeLineProximityThreshold,
-                            "proximity_filter_distance": holeProximityDistance,
-                            "variable_spacing_min": holeVariableSpacingMin,
-                            "variable_spacing_max": holeVariableSpacingMax,
-                            "enable_avoidance": holeEnableAvoidance,
-                            "avoidance_radius": holeAvoidanceRadius,
-                            "keepout_handles": Array(sewingKeepoutHandles)
-                        ]
-                    )
-                }
-                
+
+                _ = try await PythonBridge.shared.run(
+                    module: "dxf_ops",
+                    op: "add_holes",
+                    args: [
+                        "input": url.path,
+                        "output": previewDxf.path,
+                        "handles": Array(selectedHandles),
+                        "offset_distance": holeOffsetDistance,
+                        "hole_diameter": holeDiameter,
+                        "hole_spacing": holeSpacing,
+                        "distribution": holeDistribution,
+                        "hole_count": holeCount,
+                        "pattern": holePattern,
+                        "corner_behavior": holeCornerBehavior,
+                        "side": holeSide,
+                        "row_spacing": holeRowSpacing,
+                        "enable_variable_spacing": holeEnableVariableSpacing,
+                        "enable_proximity_filter": holeEnableProximityFilter,
+                        "enable_corner_interpolation": holeEnableCornerInterpolation,
+                        "enable_line_proximity_filter": holeEnableLineProximityFilter,
+                        "line_proximity_threshold": holeLineProximityThreshold,
+                        "proximity_filter_distance": holeProximityDistance,
+                        "variable_spacing_min": holeVariableSpacingMin,
+                        "variable_spacing_max": holeVariableSpacingMax,
+                        "enable_avoidance": holeEnableAvoidance,
+                        "avoidance_radius": holeAvoidanceRadius,
+                        "keepout_handles": Array(sewingKeepoutHandles)
+                    ]
+                )
+
                 try Task.checkCancellation()
                 
                 let listResult = try await PythonBridge.shared.run(
@@ -4777,7 +4841,428 @@ class AppState {
         self.hasUnsavedChanges = true
         logEntries.append(LogEntry(action: "Load Reference Image", details: "Loaded reference image layer: \(layerName)"))
     }
-    
+
+    // MARK: - PSD import (MAS-141)
+
+    /// Parses a `.psd` into per-layer raster/vector data via the Python engine,
+    /// then presents the centered choice dialog. Additive — never wipes the
+    /// canvas; layers merge into the current workspace like any other import.
+    func importPSD(from url: URL, dropAt: CGPoint? = nil) {
+        let isSecurityScoped = url.startAccessingSecurityScopedResource()
+        let tempDir = sessionTempDirectory
+        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+
+        // Copy into the session temp dir so the security-scoped handle doesn't
+        // have to stay alive across the async parse.
+        let localPSD = tempDir.appendingPathComponent("import_\(UUID().uuidString).psd")
+        do {
+            try? FileManager.default.removeItem(at: localPSD)
+            try FileManager.default.copyItem(at: url, to: localPSD)
+        } catch {
+            if isSecurityScoped { url.stopAccessingSecurityScopedResource() }
+            errorMessage = "Failed to read PSD file: \(error.localizedDescription)"
+            return
+        }
+        if isSecurityScoped { url.stopAccessingSecurityScopedResource() }
+
+        let outDir = tempDir.appendingPathComponent("psd_\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+        let displayName = url.deletingPathExtension().lastPathComponent
+
+        isProcessing = true
+        Task {
+            do {
+                let res = try await PythonBridge.shared.run(
+                    module: "dxf_ops",
+                    op: "parse_psd",
+                    args: ["input": localPSD.path, "out_dir": outDir.path]
+                )
+                try? FileManager.default.removeItem(at: localPSD)
+
+                guard res["status"] as? String == "ok",
+                      let data = res["data"] as? [String: Any] else {
+                    let msg = res["message"] as? String ?? "Failed to parse PSD."
+                    await MainActor.run {
+                        self.isProcessing = false
+                        self.errorMessage = msg
+                        self.logAction("Import PSD Error", details: msg)
+                    }
+                    return
+                }
+
+                let parsed = AppState.decodePSDData(data, sourceURL: url, dropAt: dropAt)
+                await MainActor.run {
+                    self.isProcessing = false
+                    guard parsed.totalLayerCount > 0 else {
+                        self.errorMessage = "No importable layers found in \(displayName).psd."
+                        return
+                    }
+                    self.pendingPSDImport = parsed
+                    self.psdImportDropAt = dropAt
+                    self.showPSDImportDialog = true
+                }
+            } catch {
+                await MainActor.run {
+                    self.isProcessing = false
+                    self.errorMessage = "Failed to parse PSD: \(error.localizedDescription)"
+                    self.logAction("Import PSD Error", details: error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    /// Decodes the raw `parse_psd` payload into a typed `PSDImportData`.
+    static func decodePSDData(_ data: [String: Any], sourceURL: URL, dropAt: CGPoint?) -> PSDImportData {
+        let cw = (data["canvas_width"] as? NSNumber)?.doubleValue ?? 0
+        let ch = (data["canvas_height"] as? NSNumber)?.doubleValue ?? 0
+        let comp = data["composite_png_path"] as? String ?? ""
+        let compW = (data["composite_width"] as? NSNumber)?.doubleValue ?? cw
+        let compH = (data["composite_height"] as? NSNumber)?.doubleValue ?? ch
+
+        func num(_ v: Any?) -> Double { (v as? NSNumber)?.doubleValue ?? 0 }
+
+        var rasters: [PSDRasterLayer] = []
+        var vectors: [PSDVectorLayer] = []
+        for l in (data["layers"] as? [[String: Any]] ?? []) {
+            let name = l["name"] as? String ?? "Layer"
+            let kind = l["kind"] as? String ?? "raster"
+            let visible = l["visible"] as? Bool ?? true
+            if kind == "vector" {
+                var ents: [(vertices: [[Double]], closed: Bool)] = []
+                for e in (l["entities"] as? [[String: Any]] ?? []) {
+                    let closed = e["closed"] as? Bool ?? true
+                    var verts: [[Double]] = []
+                    for pair in (e["vertices"] as? [[Any]] ?? []) where pair.count >= 2 {
+                        if let x = (pair[0] as? NSNumber)?.doubleValue,
+                           let y = (pair[1] as? NSNumber)?.doubleValue {
+                            verts.append([x, y])
+                        }
+                    }
+                    if verts.count >= 2 { ents.append((verts, closed)) }
+                }
+                if !ents.isEmpty {
+                    vectors.append(PSDVectorLayer(name: name, entities: ents, visible: visible))
+                }
+            } else {
+                guard let png = l["png_path"] as? String else { continue }
+                rasters.append(PSDRasterLayer(
+                    name: name, pngPath: png,
+                    centerX: num(l["center_x"]), centerY: num(l["center_y"]),
+                    widthPx: num(l["width_px"]), heightPx: num(l["height_px"]),
+                    visible: visible))
+            }
+        }
+
+        return PSDImportData(
+            sourceURL: sourceURL, canvasWidth: cw, canvasHeight: ch,
+            compositePngPath: comp, compositeWidth: compW, compositeHeight: compH,
+            rasterLayers: rasters, vectorLayers: vectors,
+            totalLayerCount: rasters.count + vectors.count)
+    }
+
+    func cancelPSDImport() {
+        showPSDImportDialog = false
+        pendingPSDImport = nil
+        psdImportDropAt = nil
+    }
+
+    /// Applies the chosen PSD import mode. Creates one Pathstitch layer per PSD
+    /// layer, scaling the whole composition by a single fit factor so the layers
+    /// stay registered exactly as they were composed in Photoshop (MAS-141).
+    func applyPSDImport(mode: PSDImportMode) {
+        guard let psd = pendingPSDImport else { return }
+        showPSDImportDialog = false
+        pendingPSDImport = nil
+        psdVectorizeBatchLayerIds = []
+        let dropAt = psdImportDropAt
+        psdImportDropAt = nil
+
+        let cw = psd.canvasWidth, ch = psd.canvasHeight
+        guard cw > 0, ch > 0 else { return }
+
+        // One fit factor: scale the PSD canvas to ~80% of the current viewport.
+        let viewW = Double(currentViewportSize.width)
+        let viewH = Double(currentViewportSize.height)
+        let fit: Double
+        if canvasScale > 0.001 {
+            let mvW = viewW / Double(canvasScale)
+            let mvH = viewH / Double(canvasScale)
+            fit = max(0.0001, min((mvW * 0.8) / cw, (mvH * 0.8) / ch))
+        } else {
+            fit = 1.0
+        }
+
+        // Model-space point the PSD canvas centre maps to (drop point or view centre).
+        let board: CGPoint
+        if let dropPos = dropAt {
+            let dx = (dropPos.x - currentViewportSize.width / 2 - canvasOffset.width) / canvasScale
+            let dy = -(dropPos.y - currentViewportSize.height / 2 - canvasOffset.height) / canvasScale
+            board = CGPoint(x: dx, y: dy)
+        } else {
+            board = CGPoint(x: -Double(canvasOffset.width) / Double(canvasScale),
+                            y: Double(canvasOffset.height) / Double(canvasScale))
+        }
+
+        saveToHistory()
+        let activeURL = ensureActiveDXFFileExists()
+        currentFilePath = activeURL
+        activeMode = .twoD
+
+        let baseName = sanitizeLayerName("PSD_\(psd.sourceURL.deletingPathExtension().lastPathComponent)")
+
+        // Build the reference-image layers (synchronous; no Python) and collect
+        // the vector layers to commit.
+        var batchIds: [String] = []
+        var vectorSpecs: [(layer: String, dicts: [[String: Any]])] = []
+
+        func vectorDicts(_ vec: PSDVectorLayer) -> [[String: Any]] {
+            var dicts: [[String: Any]] = []
+            for ent in vec.entities {
+                var verts: [[Double]] = []
+                for p in ent.vertices where p.count >= 2 {
+                    verts.append([Double(board.x) + p[0] * fit, Double(board.y) + p[1] * fit])
+                }
+                if verts.count >= 2 {
+                    dicts.append(["type": "LWPOLYLINE", "vertices": verts, "closed": ent.closed])
+                }
+            }
+            return dicts
+        }
+
+        switch mode {
+        case .loadAsOne:
+            _ = createPSDReferenceLayer(name: baseName, pngPath: psd.compositePngPath,
+                                        centerX: 0, centerY: 0,
+                                        widthPx: psd.compositeWidth, heightPx: psd.compositeHeight,
+                                        fit: fit, board: board, visible: true)
+
+        case .loadAsIs, .autoVectorize:
+            for v in psd.vectorLayers {
+                let dicts = vectorDicts(v)
+                if !dicts.isEmpty {
+                    let lname = sanitizeLayerName("PSD_\(v.name)")
+                    vectorSpecs.append((lname, dicts))
+                    if !layers.contains(where: { $0.name == lname }) {
+                        layers.append(DXFLayer(id: UUID().uuidString, name: lname, color: .green, visible: v.visible))
+                    }
+                }
+            }
+            // Reference images all draw at "back" depth in layer-array order
+            // (first = underneath). The parser yields PSD layers top-to-bottom,
+            // so append bottom-to-top to reproduce Photoshop's compositing.
+            for r in psd.rasterLayers.reversed() {
+                if let id = createPSDReferenceLayer(name: sanitizeLayerName("PSD_\(r.name)"),
+                                                    pngPath: r.pngPath, centerX: r.centerX, centerY: r.centerY,
+                                                    widthPx: r.widthPx, heightPx: r.heightPx,
+                                                    fit: fit, board: board, visible: r.visible) {
+                    batchIds.append(id)
+                }
+            }
+
+        case .mergeAndConvert:
+            if let id = createPSDReferenceLayer(name: baseName, pngPath: psd.compositePngPath,
+                                                centerX: 0, centerY: 0,
+                                                widthPx: psd.compositeWidth, heightPx: psd.compositeHeight,
+                                                fit: fit, board: board, visible: true) {
+                batchIds.append(id)
+            }
+        }
+
+        let vectorizeAfter = (mode == .autoVectorize || mode == .mergeAndConvert)
+        hasUnsavedChanges = true
+
+        // Commit vector layers sequentially (one shared buffer → no races), then
+        // refresh and, for the convert modes, hand off to the vectorize panel.
+        if vectorSpecs.isEmpty {
+            if vectorizeAfter {
+                beginPSDVectorize(batchIds)
+            }
+            logAction("Import PSD", details: "Imported \(psd.totalLayerCount) layer(s) from \(psd.sourceURL.lastPathComponent).")
+            return
+        }
+
+        isProcessing = true
+        let specs = vectorSpecs
+        Task {
+            await reconcileBufferIfNeeded()
+            for spec in specs {
+                _ = try? await PythonBridge.shared.run(
+                    module: "dxf_ops", op: "commit_trace",
+                    args: ["input": activeURL.path, "output": activeURL.path,
+                           "layer": spec.layer, "entities": spec.dicts])
+            }
+            await MainActor.run {
+                self.reloadDXF()
+                if vectorizeAfter { self.beginPSDVectorize(batchIds) }
+                self.logAction("Import PSD", details: "Imported \(psd.totalLayerCount) layer(s) from \(psd.sourceURL.lastPathComponent).")
+            }
+        }
+    }
+
+    /// Creates a reference-image layer from a rendered PSD-layer PNG, placed in
+    /// the shared model frame. Returns the new layer id (nil if the PNG can't be
+    /// read).
+    @discardableResult
+    private func createPSDReferenceLayer(name: String, pngPath: String,
+                                         centerX: Double, centerY: Double,
+                                         widthPx: Double, heightPx: Double,
+                                         fit: Double, board: CGPoint, visible: Bool) -> String? {
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: pngPath)) else { return nil }
+        let base64 = data.base64EncodedString()
+
+        // Use the Python-reported pixel size so display size (= width * fit) is
+        // identical across layers and matches the vector placement.
+        var w = widthPx, h = heightPx
+        if (w <= 0 || h <= 0), let img = NSImage(data: data) {
+            w = Double(img.size.width); h = Double(img.size.height)
+        }
+        guard w > 0, h > 0 else { return nil }
+
+        var layer = DXFLayer(id: UUID().uuidString, name: name, color: .blue, visible: visible, parentFolderId: nil)
+        layer.isReferenceImageLayer = true
+        layer.refImageBase64 = base64
+        layer.refImageWidth = w
+        layer.refImageHeight = h
+        layer.refImagePixelWidth = w
+        layer.refImagePixelHeight = h
+        layer.refImageScaleX = fit
+        layer.refImageScaleY = fit
+        layer.refImageOffsetX = Double(board.x) + centerX * fit
+        layer.refImageOffsetY = Double(board.y) + centerY * fit
+        layer.refImageOpacity = 1.0   // full opacity so the composition reads true
+        layer.refImageDepth = "back"
+        layers.append(layer)
+        activeLayerId = layer.id
+        return layer.id
+    }
+
+    /// Enters the shared "vectorize all" pass: the trace panel drives one set of
+    /// settings applied to every queued raster layer at once (MAS-141).
+    private func beginPSDVectorize(_ ids: [String]) {
+        let valid = ids.filter { id in layers.contains(where: { $0.id == id && $0.isReferenceImageLayer }) }
+        guard let first = valid.first else { return }
+        psdVectorizeBatchLayerIds = valid
+        activeLayerId = first
+        isEditingRefImageTransform = false
+        isTracingRefImage = true
+        updateTracePreview()
+    }
+
+    /// Traces every queued PSD raster layer with the current trace settings and
+    /// commits the vectors, then hides the source images (MAS-141). Falls back to
+    /// the single-layer `commitTrace()` when there is no batch.
+    func commitPSDVectorizeAll() {
+        let ids = psdVectorizeBatchLayerIds
+        guard !ids.isEmpty else { commitTrace(); return }
+
+        let activeDxfURL = ensureActiveDXFFileExists()
+        saveToHistory()
+        isProcessing = true
+
+        let threshold = Int(traceThreshold)
+        let tol = traceTolerance, corner = traceCornerSmoothness, popt = tracePathOptimization
+        let bgless = backgroundlessMode, useRembg = removeBackgroundMode
+
+        Task {
+            await reconcileBufferIfNeeded()
+            var committedNames: [String] = []
+
+            for id in ids {
+                guard let layer = await MainActor.run(body: { self.layers.first(where: { $0.id == id }) }),
+                      layer.isReferenceImageLayer,
+                      let b64 = layer.refImageBase64,
+                      let imgData = Data(base64Encoded: b64) else { continue }
+
+                let tempImg = sessionTempDirectory.appendingPathComponent("psdtrace_\(id).png")
+                let tempDxf = sessionTempDirectory.appendingPathComponent("psdtrace_\(id).dxf")
+                do {
+                    try imgData.write(to: tempImg)
+                    let traceRes = try await PythonBridge.shared.run(
+                        module: "dxf_ops", op: "trace_raster",
+                        args: ["input": tempImg.path, "output": tempDxf.path,
+                               "threshold": threshold, "tolerance": tol,
+                               "corner_smoothness": corner, "path_optimization": popt,
+                               "backgroundless": bgless, "remove_background": useRembg])
+                    guard traceRes["status"] as? String == "ok" else { continue }
+
+                    let listRes = try await PythonBridge.shared.run(
+                        module: "dxf_ops", op: "list_entities", args: ["input": tempDxf.path])
+                    guard let ldata = listRes["data"] as? [String: Any],
+                          let entDicts = ldata["entities"] as? [[String: Any]] else { continue }
+                    let decoded = entDicts.compactMap { d -> DXFEntity? in
+                        guard let jd = try? JSONSerialization.data(withJSONObject: d),
+                              let e = try? JSONDecoder().decode(DXFEntity.self, from: jd) else { return nil }
+                        return e
+                    }
+                    let dicts = self.transformTraceEntities(decoded, layer: layer)
+                    guard !dicts.isEmpty else { continue }
+                    let targetName = self.sanitizeLayerName("\(layer.name)_traced")
+                    _ = try await PythonBridge.shared.run(
+                        module: "dxf_ops", op: "commit_trace",
+                        args: ["input": activeDxfURL.path, "output": activeDxfURL.path,
+                               "layer": targetName, "entities": dicts])
+                    committedNames.append(targetName)
+                } catch { /* skip this layer, keep going */ }
+                try? FileManager.default.removeItem(at: tempImg)
+                try? FileManager.default.removeItem(at: tempDxf)
+            }
+
+            let names = committedNames
+            let processedIds = ids
+            await MainActor.run {
+                for n in names where !self.layers.contains(where: { $0.name == n }) {
+                    self.layers.append(DXFLayer(id: UUID().uuidString, name: n, color: .green, visible: true))
+                }
+                for id in processedIds {
+                    if let idx = self.layers.firstIndex(where: { $0.id == id }) {
+                        self.layers[idx].visible = false
+                    }
+                }
+                self.currentFilePath = activeDxfURL
+                self.activeMode = .twoD
+                self.isTracingRefImage = false
+                self.tracePreviewEntities = []
+                self.psdVectorizeBatchLayerIds = []
+                self.reloadDXF()
+                self.hasUnsavedChanges = true
+                self.logAction("PSD Vectorize", details: "Vectorized \(names.count) PSD raster layer(s).")
+            }
+        }
+    }
+
+    /// Maps traced entities (image-pixel space) into model space using a
+    /// reference-image layer's placement. Shared by `commitTrace` and the PSD
+    /// batch vectorize pass.
+    func transformTraceEntities(_ entities: [DXFEntity], layer: DXFLayer) -> [[String: Any]] {
+        let w = layer.refImageWidth, h = layer.refImageHeight
+        let scaleX = layer.refImageScaleX, scaleY = layer.refImageScaleY
+        let rot = layer.refImageRotation
+        let offX = layer.refImageOffsetX, offY = layer.refImageOffsetY
+        let pixelW = layer.refImagePixelWidth > 0 ? layer.refImagePixelWidth : w
+        let pixelH = layer.refImagePixelHeight > 0 ? layer.refImagePixelHeight : h
+        let rad = rot * .pi / 180.0
+        let cosR = cos(rad), sinR = sin(rad)
+
+        var out: [[String: Any]] = []
+        for ent in entities {
+            guard let vertices = ent.vertices else { continue }
+            var tv: [[Double]] = []
+            for pt in vertices where pt.count >= 2 {
+                let sx = pt[0] * (w / pixelW)
+                let sy = pt[1] * (h / pixelH)
+                let x1 = sx - w / 2.0, y1 = sy - h / 2.0
+                let x2 = x1 * scaleX, y2 = y1 * scaleY
+                let x3 = x2 * cosR - y2 * sinR
+                let y3 = x2 * sinR + y2 * cosR
+                tv.append([offX + x3, offY + y3])
+            }
+            if tv.count >= 2 {
+                out.append(["type": "LWPOLYLINE", "vertices": tv, "closed": ent.closed ?? true])
+            }
+        }
+        return out
+    }
+
     func commitCalibrationDistance() {
         guard var activeL = activeLayer, activeL.isReferenceImageLayer else { return }
         guard calibrationPoints.count == 2 else { return }
@@ -4880,49 +5365,13 @@ class AppState {
     
     func commitTrace() {
         guard let activeL = activeLayer, activeL.isReferenceImageLayer else { return }
-        
-        let w = activeL.refImageWidth
-        let h = activeL.refImageHeight
-        let scaleX = activeL.refImageScaleX
-        let scaleY = activeL.refImageScaleY
-        let rot = activeL.refImageRotation
-        let offset = CGPoint(x: activeL.refImageOffsetX, y: activeL.refImageOffsetY)
-        
-        let pixelW = activeL.refImagePixelWidth > 0 ? activeL.refImagePixelWidth : w
-        let pixelH = activeL.refImagePixelHeight > 0 ? activeL.refImagePixelHeight : h
-        
+
         // Target layer name is "{RefImageName}_traced"
         let targetLayerName = sanitizeLayerName("\(activeL.name)_traced")
-        
-        // Transform the entities
-        var transformedDicts: [[String: Any]] = []
-        for ent in tracePreviewEntities {
-            if let vertices = ent.vertices {
-                var transformedVerts: [[Double]] = []
-                for pt in vertices where pt.count >= 2 {
-                    let ptScaledX = pt[0] * (w / pixelW)
-                    let ptScaledY = pt[1] * (h / pixelH)
-                    let x1 = ptScaledX - w / 2
-                    let y1 = ptScaledY - h / 2
-                    let x2 = x1 * scaleX
-                    let y2 = y1 * scaleY
-                    let rad = rot * .pi / 180.0
-                    let cosR = cos(rad)
-                    let sinR = sin(rad)
-                    let x3 = x2 * cosR - y2 * sinR
-                    let y3 = x2 * sinR + y2 * cosR
-                    transformedVerts.append([offset.x + x3, offset.y + y3])
-                }
-                if transformedVerts.count >= 2 {
-                    transformedDicts.append([
-                        "type": "LWPOLYLINE",
-                        "vertices": transformedVerts,
-                        "closed": ent.closed ?? true
-                    ])
-                }
-            }
-        }
-        
+
+        // Transform the entities into model space (shared with PSD vectorize).
+        let transformedDicts = transformTraceEntities(tracePreviewEntities, layer: activeL)
+
         guard !transformedDicts.isEmpty else { return }
         
         saveToHistory()

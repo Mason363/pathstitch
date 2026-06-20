@@ -241,7 +241,70 @@ def test_dxf_ops():
     assert line.dxf.handle in handles, "Touching line should be in chain"
     print("Chain selection with intermediate vertices verified successfully!")
 
+    # 11. Test PSD import (MAS-141)
+    test_parse_psd()
+
     print("ALL TESTS PASSED SUCCESSFULLY!")
+
+
+def test_parse_psd():
+    """Validates op_parse_psd (MAS-141). Always exercises the synthetic
+    fully-flattened path; additionally validates real multi-layer/vector PSDs
+    when the local test-asset folder is present."""
+    print("Testing parse_psd...")
+    try:
+        from psd_tools import PSDImage
+        from PIL import Image
+    except Exception as e:
+        print(f"  psd-tools/PIL unavailable, skipping PSD tests: {e}")
+        return
+
+    import tempfile, shutil
+    out_dir = tempfile.mkdtemp(prefix="psdtest_")
+    try:
+        # A flattened PSD (no explicit layer records) must still import as one
+        # raster layer thanks to the composite fallback.
+        flat = os.path.join(out_dir, "flat.psd")
+        PSDImage.frompil(Image.new("RGBA", (64, 48), (120, 30, 30, 255))).save(flat)
+        res = run_cli("parse_psd", {"input": flat, "out_dir": out_dir})
+        assert res["status"] == "ok", f"parse_psd(flat) failed: {res}"
+        d = res["data"]
+        assert d["canvas_width"] == 64 and d["canvas_height"] == 48
+        assert len(d["layers"]) >= 1, "Flattened PSD should import as >=1 layer"
+        assert os.path.exists(d["composite_png_path"]), "composite PNG missing"
+        assert d["layers"][0]["kind"] == "raster"
+        print("  Flattened PSD imported as a single reference image.")
+
+        # Real-asset validation (developer machine only).
+        asset_dir = "/Users/chen/Documents/Assets/Other Pathstitch Files/Pathstitch .PSD tests"
+        if os.path.isdir(asset_dir):
+            raster_file = os.path.join(asset_dir, "Raster No Backtround 4 layers.psd")
+            if os.path.exists(raster_file):
+                r = run_cli("parse_psd", {"input": raster_file, "out_dir": out_dir})
+                assert r["status"] == "ok", f"parse_psd(raster) failed: {r}"
+                rl = [l for l in r["data"]["layers"] if l["kind"] == "raster"]
+                assert len(rl) == 4, f"Expected 4 raster layers, got {len(rl)}"
+                for l in rl:
+                    assert os.path.exists(l["png_path"]), "raster PNG missing"
+                    assert l["width_px"] > 0 and l["height_px"] > 0
+                print(f"  Multi-layer raster PSD: {len(rl)} layers extracted.")
+
+            vector_file = os.path.join(asset_dir, "Vector No Background 1 layers.psd")
+            if os.path.exists(vector_file):
+                v = run_cli("parse_psd", {"input": vector_file, "out_dir": out_dir})
+                assert v["status"] == "ok", f"parse_psd(vector) failed: {v}"
+                vl = [l for l in v["data"]["layers"] if l["kind"] == "vector"]
+                assert len(vl) >= 1, "Expected a vector layer from a vector PSD"
+                total_verts = sum(len(e["vertices"]) for l in vl for e in l["entities"])
+                assert total_verts > 50, f"Vector layer too sparse: {total_verts} verts"
+                print(f"  Vector PSD: {len(vl)} vector layer(s), {total_verts} verts extracted.")
+        else:
+            print("  (Skipping real-asset PSD checks: asset folder not present.)")
+
+        print("PSD import verified successfully!")
+    finally:
+        shutil.rmtree(out_dir, ignore_errors=True)
+
 
 if __name__ == "__main__":
     test_dxf_ops()

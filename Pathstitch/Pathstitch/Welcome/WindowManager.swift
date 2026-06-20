@@ -178,7 +178,7 @@ class WindowManager: NSObject, NSApplicationDelegate {
     /// Opens any supported file type (project, DXF, STEP, SVG, PDF, image),
     /// each in its own workspace window.
     func openAnyFileWithDialog() {
-        let exts = ["stch", "dxf", "step", "stp", "obj", "stl", "svg", "pdf", "png", "jpg", "jpeg", "bmp", "tiff", "gif"]
+        let exts = ["stch", "dxf", "step", "stp", "obj", "stl", "svg", "pdf", "psd", "png", "jpg", "jpeg", "bmp", "tiff", "gif"]
         let openPanel = NSOpenPanel()
         openPanel.allowedContentTypes = exts.compactMap { UTType(filenameExtension: $0) }
         openPanel.allowsMultipleSelection = true
@@ -192,7 +192,7 @@ class WindowManager: NSObject, NSApplicationDelegate {
     
     func importFileWithDialog() {
         let openPanel = NSOpenPanel()
-        let exts = ["stch", "dxf", "step", "stp", "obj", "stl", "svg", "pdf", "png", "jpg", "jpeg", "bmp", "tiff", "gif"]
+        let exts = ["stch", "dxf", "step", "stp", "obj", "stl", "svg", "pdf", "psd", "png", "jpg", "jpeg", "bmp", "tiff", "gif"]
         openPanel.allowedContentTypes = exts.compactMap { UTType(filenameExtension: $0) }
         openPanel.allowsMultipleSelection = true
         openPanel.canChooseDirectories = false
