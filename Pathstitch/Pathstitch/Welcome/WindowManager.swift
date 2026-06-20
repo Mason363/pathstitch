@@ -74,6 +74,18 @@ class WindowManager: NSObject, NSApplicationDelegate {
     func hideWelcomeWindow() {
         welcomeWindowController?.close()
     }
+
+    private var aboutWindowController: AboutWindowController?
+
+    /// Show the custom About window (MAS-149 / MAS-142).
+    func showAboutWindow() {
+        if aboutWindowController == nil {
+            aboutWindowController = AboutWindowController()
+        }
+        aboutWindowController?.window?.center()
+        aboutWindowController?.showWindow(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
     
     /// `true` while at least one document workspace window is open. Used by the
     /// welcome window to decide whether closing it should quit the app (MAS-138).

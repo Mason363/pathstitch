@@ -297,3 +297,5 @@ Issues and ideas are welcome via the tracker.
 ## Credits
 
 Built with ❤️ by **Mason Chen**.
+
+<sub>If Pathstitch saves you time, you can [buy me a coffee](https://buymeacoffee.com/masonchen). ☕</sub>

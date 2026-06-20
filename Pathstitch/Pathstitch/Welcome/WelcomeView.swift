@@ -4,7 +4,10 @@ import AppKit
 
 struct WelcomeView: View {
     @State private var state = WelcomeState()
-    
+    // Subtle Buy-Me-a-Coffee nudge (MAS-149). Dismissed permanently once the
+    // user closes it; the flag persists across launches via UserDefaults.
+    @AppStorage("welcome.bmcDismissed.v1") private var bmcDismissed = false
+
     var body: some View {
         HStack(spacing: 0) {
             // Left sidebar: 120px
@@ -121,6 +124,16 @@ struct WelcomeView: View {
             .background(Color.bg_base)
         }
         .frame(width: 880, height: 560)
+        .overlay(alignment: .bottomTrailing) {
+            if !bmcDismissed {
+                BuyMeACoffeeCard {
+                    withAnimation(.easeOut(duration: 0.15)) { bmcDismissed = true }
+                }
+                .padding(.trailing, 16)
+                .padding(.bottom, 16)
+                .transition(.opacity)
+            }
+        }
         .onDrop(of: [.fileURL], delegate: WelcomeDropDelegate(state: state))
         .onAppear {
             state.refreshRecents()
@@ -134,6 +147,56 @@ struct WelcomeView: View {
         .onReceive(NotificationCenter.default.publisher(for: .welcomeOpenSelected)) { _ in
             state.openSelected()
         }
+    }
+}
+
+/// Small, unobtrusive "Buy me a coffee" card pinned to the bottom-right of the
+/// welcome screen (MAS-149). Clicking the body opens the support page; the ×
+/// dismisses it for good.
+struct BuyMeACoffeeCard: View {
+    var onDismiss: () -> Void
+    @State private var hovering = false
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Button {
+                if let url = URL(string: "https://buymeacoffee.com/masonchen") {
+                    NSWorkspace.shared.open(url)
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "cup.and.saucer.fill")
+                        .font(.system(size: 11))
+                        .foregroundColor(.accent)
+                    Text("Buy me a coffee")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.text_primary)
+                }
+            }
+            .buttonStyle(.plain)
+            .help("https://buymeacoffee.com/masonchen")
+
+            Button(action: onDismiss) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundColor(.text_secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Dismiss")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.bg_panel)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color.border_subtle, lineWidth: 1)
+                )
+        )
+        .opacity(hovering ? 1.0 : 0.7)
+        .onHover { hovering = $0 }
+        .animation(.easeInOut(duration: 0.15), value: hovering)
     }
 }
 

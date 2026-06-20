@@ -149,6 +149,14 @@ struct PathstitchApp: App {
             PreferencesView()
         }
         .commands {
+            // Replace the standard about panel with our custom one (MAS-149 /
+            // MAS-142): surfaces the support link, version and update controls.
+            CommandGroup(replacing: .appInfo) {
+                Button("About Pathstitch") {
+                    WindowManager.shared.showAboutWindow()
+                }
+            }
+
             CommandGroup(after: .appInfo) {
                 Button("Start Screen") {
                     WindowManager.shared.showWelcomeWindow()
