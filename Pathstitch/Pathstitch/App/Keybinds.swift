@@ -120,6 +120,8 @@ enum AppCommands {
               defaultCombo: KeyCombo(key: "m")) { $0.currentTool = .move },
         .init(id: "tool.offset", title: "Offset Tool", icon: "arrow.up.and.down", category: "Tools",
               defaultCombo: KeyCombo(key: "o")) { $0.currentTool = .offset },
+        .init(id: "tool.addThickness", title: "Add Thickness Tool", icon: "rectangle.expand.vertical", category: "Tools",
+              defaultCombo: KeyCombo(key: "")) { $0.currentTool = .addThickness },
         .init(id: "tool.addHoles", title: "Add Holes Tool", icon: "circle.dashed", category: "Tools",
               defaultCombo: KeyCombo(key: "g")) { $0.currentTool = .addHoles },
         .init(id: "tool.cleanup", title: "Join / Cleanup Tool", icon: "sparkles", category: "Tools",
@@ -254,7 +256,18 @@ final class KeybindStore {
     private let storageKey = "pathstitch.keybinds.v1"
     private(set) var overrides: [String: KeyCombo] = [:]
 
-    private init() { load() }
+    private init() {
+        load()
+        migrateIfNeeded()
+    }
+
+    private func migrateIfNeeded() {
+        let migrationKey = "pathstitch.keybinds.migrated.v2"
+        if !UserDefaults.standard.bool(forKey: migrationKey) {
+            resetAll()
+            UserDefaults.standard.set(true, forKey: migrationKey)
+        }
+    }
 
     func combo(for id: String) -> KeyCombo {
         if let o = overrides[id] { return o }

@@ -39,6 +39,7 @@ enum TwoDTool: String, CaseIterable {
     case move = "Move"
     case pan = "Pan"
     case offset = "Offset"
+    case addThickness = "Add Thickness"
     case addHoles = "Add Holes"
     case cleanup = "Join/Cleanup"
     case measure = "Measure"
@@ -66,6 +67,7 @@ enum TwoDTool: String, CaseIterable {
         case .move: return "arrow.up.and.down.and.arrow.left.and.right"
         case .pan: return "hand.raised"
         case .offset: return "arrow.up.and.down"
+        case .addThickness: return "rectangle.expand.vertical"
         case .addHoles: return "circle.dashed"
         case .cleanup: return "sparkles"
         case .measure: return "ruler"
@@ -97,6 +99,7 @@ enum TwoDTool: String, CaseIterable {
         case .move: return "tool.move"
         case .pan: return "tool.pan"
         case .offset: return "tool.offset"
+        case .addThickness: return "tool.addThickness"
         case .addHoles: return "tool.addHoles"
         case .cleanup: return "tool.cleanup"
         case .measure: return "tool.measure"
@@ -871,6 +874,10 @@ class AppState {
     var holeAvoidanceRadius: Double = 3.0
 
     var consolidateSvgStrokes: Bool = true
+    // SVGs import as cuttable outlines of this width (mm). 0 = raw centerlines.
+    var svgImportThickness: Double = 3.0
+    // "Add Thickness" tool — width (mm) applied to selected zero-width lines.
+    var addThicknessWidth: Double = 3.0
     var cleanupTolerance: Double = 0.1
     var exportFormat: String = "dxf"
     var exportSelectedOnly: Bool = false
@@ -1819,12 +1826,18 @@ class AppState {
                 let uuidStr = UUID().uuidString
                 let outputDxf = tempDir.appendingPathComponent("projected_\(uuidStr).dxf")
                 
+                // Per-body manual move offsets (MAS-140) so the projection lands
+                // where each body sits in the 3D view, not at its authored origin.
+                let bodyOffsetsArg = Dictionary(uniqueKeysWithValues:
+                    bodyOffsets.map { (String($0.key), $0.value) })
+
                 var args: [String: Any] = [
                     "input": stepUrl.path,
                     "output": outputDxf.path,
                     "plane_type": planeType,
                     "offset": offsetVal,
-                    "visible_bodies": visibleIndices
+                    "visible_bodies": visibleIndices,
+                    "body_offsets": bodyOffsetsArg
                 ]
                 if planeType == "face", let faceIdx = faceIdx {
                     args["face_index"] = faceIdx
@@ -2496,7 +2509,8 @@ class AppState {
                             args: [
                                 "input": tempSVGURL.path,
                                 "output": targetURL.path,
-                                "consolidate": consolidateSvgStrokes
+                                "consolidate": consolidateSvgStrokes,
+                                "thickness": svgImportThickness
                             ]
                         )
                         await MainActor.run {
@@ -2762,7 +2776,7 @@ class AppState {
             _ = try await PythonBridge.shared.run(
                 module: "dxf_ops",
                 op: "import_svg",
-                args: ["input": tmpSvg.path, "output": outURL.path, "consolidate": consolidateSvgStrokes]
+                args: ["input": tmpSvg.path, "output": outURL.path, "consolidate": consolidateSvgStrokes, "thickness": svgImportThickness]
             )
             try? FileManager.default.removeItem(at: tmpSvg)
             return outURL
@@ -4009,11 +4023,61 @@ class AppState {
         }
     }
     
+    /// Adds thickness to the selected zero-width lines (or all lines when nothing
+    /// is selected), replacing each centerline with a closed outline of
+    /// `addThicknessWidth`. Geometry that already has thickness is skipped by the
+    /// Python op, so re-running is safe.
+    func addThickness(exitAfterApply: Bool = false) {
+        saveToHistory()
+        guard let url = currentFilePath else { return }
+        isProcessing = true
+        let width = addThicknessWidth
+
+        Task {
+            do {
+                await reconcileBufferIfNeeded()
+                let activeDxfURL = sessionTempDirectory.appendingPathComponent("active.dxf")
+
+                let res = try await PythonBridge.shared.run(
+                    module: "dxf_ops",
+                    op: "add_thickness",
+                    args: [
+                        "input": url.path,
+                        "output": activeDxfURL.path,
+                        "handles": Array(selectedHandles),
+                        "thickness": width
+                    ]
+                )
+
+                await MainActor.run {
+                    if let status = res["status"] as? String, status != "ok" {
+                        self.errorMessage = (res["message"] as? String) ?? "Add Thickness failed."
+                        self.isProcessing = false
+                        return
+                    }
+                    let newHandles = (res["data"] as? [String: Any])?["new_entities"] as? [String] ?? []
+                    self.currentFilePath = activeDxfURL
+                    self.selectedHandles.removeAll()
+                    self.previewEntities = []
+                    self.reloadDXF()
+                    self.selectedHandles = Set(newHandles)
+                    self.logEntries.append(LogEntry(action: "Add Thickness", details: "Width \(width) mm"))
+                    if exitAfterApply { self.currentTool = .select }
+                }
+            } catch {
+                await MainActor.run {
+                    self.errorMessage = error.localizedDescription
+                    self.isProcessing = false
+                }
+            }
+        }
+    }
+
     func applySewingHoles() {
         saveToHistory()
         guard let url = currentFilePath else { return }
         isProcessing = true
-        
+
         Task {
             do {
                 await reconcileBufferIfNeeded()

@@ -452,10 +452,20 @@
                         opacity: 1.0
                     });
                     const wireframe = new THREE.LineSegments(edgesGeom, lineMat);
+                    // Decorative only — never a raycast target. faceMeshes is
+                    // raycast recursively, so without this the wireframe child
+                    // (which has no bodyIndex/faceIndex userData) could win a hit
+                    // and post a bogus face selection, especially after seam mode
+                    // raises the global Line.threshold.
+                    wireframe.raycast = function () {};
                     mesh.add(wireframe);
                     mesh.userData.wireframe = wireframe;
 
                     bodyGroup.add(mesh);
+                    // Register the face mesh for raycasting (hover + click face
+                    // selection, plane-face picking, body-move hit testing). Without
+                    // this, faceMeshes stays empty and no face is ever selectable.
+                    faceMeshes.push(mesh);
                 });
 
                 // Render edges (Phase 3)
@@ -490,44 +500,33 @@
                 });
             });
 
-            // Space bodies out along X-axis and ground them at Y = 0
-            const gap = 20.0;
-            let currentX = 0;
-
+            // Preserve the model's TRUE coordinates (MAS-140). The face vertices
+            // are absolute STEP coordinates, so leaving each body untransformed
+            // renders it exactly where it is modeled — two cubes 10 mm apart stay
+            // 10 mm apart, and the 3D view matches the Project-Plane projection.
+            // Appended imports are de-conflicted in Python (op_combine_steps), so
+            // no per-body redistribution happens here. Each body's "home" is its
+            // true position (the origin of modelGroup space); manual gizmo moves
+            // (bodyOffsets) are applied on top of that.
             bodyGroups.forEach(bodyGroup => {
-                const box = new THREE.Box3().setFromObject(bodyGroup);
-                const size = box.getSize(new THREE.Vector3());
-                const center = box.getCenter(new THREE.Vector3());
-
-                // Ground children locally and center in X & Z
-                bodyGroup.children.forEach(child => {
-                    child.position.x -= center.x;
-                    child.position.y -= box.min.y;
-                    child.position.z -= center.z;
-                });
-
-                // Position bodyGroup along X axis (the import-time distribution)
-                const halfWidth = (size.x || 1.0) / 2.0;
-                bodyGroup.position.x = currentX + halfWidth;
-                bodyGroup.position.y = 0;
-                bodyGroup.position.z = 0;
-
-                // Remember the distributed home so manual move offsets (MAS-125)
-                // are applied relative to it and can be read back as a delta.
+                bodyGroup.position.set(0, 0, 0);
                 bodyGroup.userData.basePosition = bodyGroup.position.clone();
-
-                currentX += (size.x || 1.0) + gap;
             });
 
-            // Apply any persisted manual move offsets on top of the distribution.
+            // Apply any persisted manual move offsets on top of the true positions.
             applyAllBodyOffsets();
 
-            const totalArrangedWidth = currentX > gap ? currentX - gap : 0.0;
-
-            // Center entire modelGroup on X and Z axes
-            window.modelGroup.position.x = -totalArrangedWidth / 2.0;
-            window.modelGroup.position.y = 0;
-            window.modelGroup.position.z = 0;
+            // Frame the whole model with a single RIGID translation: center its
+            // combined bounding box on X/Z and rest it on the grid (Y = 0). Being
+            // one translation of the entire modelGroup, it preserves every body's
+            // relative position — and thus the true spacing — exactly.
+            window.modelGroup.position.set(0, 0, 0);
+            window.modelGroup.updateMatrixWorld(true);
+            const arrangedBox = new THREE.Box3().setFromObject(window.modelGroup);
+            if (!arrangedBox.isEmpty()) {
+                const arrangedCenter = arrangedBox.getCenter(new THREE.Vector3());
+                window.modelGroup.position.set(-arrangedCenter.x, -arrangedBox.min.y, -arrangedCenter.z);
+            }
 
             // Resize plane projection helpers based on model dimensions
             const finalBox = new THREE.Box3().setFromObject(window.modelGroup);

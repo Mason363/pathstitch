@@ -291,15 +291,18 @@ struct PathstitchApp: App {
             // or Preferences to discover/change them.
             CommandMenu("Tools") {
                 Button("Search…") { NSApp.activeAppState?.showSearchPalette = true }
-                    .keyboardShortcut("k", modifiers: [.command])
+                    .keyboardShortcut("s", modifiers: [])
                 Divider()
                 Button("Select") { NSApp.activeAppState?.currentTool = .select }
                 Button("Move") { NSApp.activeAppState?.currentTool = .move }
+                Button("Scale") { NSApp.activeAppState?.currentTool = .scale }
                 Button("Pan") { NSApp.activeAppState?.currentTool = .pan }
                 Button("Offset") { NSApp.activeAppState?.currentTool = .offset }
+                Button("Add Thickness") { NSApp.activeAppState?.currentTool = .addThickness }
                 Button("Add Holes") { NSApp.activeAppState?.currentTool = .addHoles }
                 Button("Join/Cleanup") { NSApp.activeAppState?.currentTool = .cleanup }
                 Button("Measure") { NSApp.activeAppState?.currentTool = .measure }
+                Button("Dimension") { NSApp.activeAppState?.currentTool = .dimension }
                 Button("Mirror") { NSApp.activeAppState?.currentTool = .mirror }
                 Button("Convert Lines") { NSApp.activeAppState?.currentTool = .convertLines }
                 Button("Trim") { NSApp.activeAppState?.currentTool = .trim }
@@ -311,6 +314,7 @@ struct PathstitchApp: App {
                 Button("Line Sketch") { NSApp.activeAppState?.currentTool = .sketchLine }
                 Button("Circle Sketch") { NSApp.activeAppState?.currentTool = .sketchCircle }
                 Button("Rectangle Sketch") { NSApp.activeAppState?.currentTool = .sketchRectangle }
+                Button("Polygon Sketch") { NSApp.activeAppState?.currentTool = .sketchPolygon }
                 Button("Text Sketch") { NSApp.activeAppState?.currentTool = .sketchText }
                 Button("Pen") { NSApp.activeAppState?.currentTool = .pen }
                 Button("Fillet") { NSApp.activeAppState?.currentTool = .fillet }

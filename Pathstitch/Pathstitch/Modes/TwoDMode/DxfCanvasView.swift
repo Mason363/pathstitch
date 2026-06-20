@@ -3044,7 +3044,7 @@ struct DxfCanvasView: View {
                     state.patternPathHandle = nearest.handle
                     state.pickingPatternPath = false
                 }
-            } else if state.currentTool == .select || state.currentTool == .move || state.currentTool == .offset || state.currentTool == .addHoles || state.currentTool == .cleanup || state.currentTool == .paperFolding || state.currentTool == .convertLines || state.currentTool == .scale || state.currentTool == .patterning {
+            } else if state.currentTool == .select || state.currentTool == .move || state.currentTool == .offset || state.currentTool == .addThickness || state.currentTool == .addHoles || state.currentTool == .cleanup || state.currentTool == .paperFolding || state.currentTool == .convertLines || state.currentTool == .scale || state.currentTool == .patterning {
                 let clickedModelPt = toModel(point: point, size: size, bounds: modelBounds)
                 
                 // Check for dimension line click selection first
@@ -5472,7 +5472,7 @@ extension View {
                 if isHovered { NSCursor.openHand.set() }
                 else { NSCursor.arrow.set() }
             }
-        case .select, .move, .offset, .addHoles, .cleanup, .measure, .dimension, .scale, .sketchLine, .sketchCircle, .sketchRectangle, .sketchText, .sketchPolygon, .pen, .fillet, .chamfer, .convertLines, .mirror, .trim, .paperFolding, .patterning:
+        case .select, .move, .offset, .addThickness, .addHoles, .cleanup, .measure, .dimension, .scale, .sketchLine, .sketchCircle, .sketchRectangle, .sketchText, .sketchPolygon, .pen, .fillet, .chamfer, .convertLines, .mirror, .trim, .paperFolding, .patterning:
             return self.onHover { isHovered in
                 if isHovered { NSCursor.crosshair.set() }
                 else { NSCursor.arrow.set() }

@@ -823,7 +823,7 @@ extension ContentView {
 
     @ViewBuilder
     private var activeToolDetailsSection: some View {
-        if state.currentTool == .offset || state.currentTool == .cleanup || state.currentTool == .measure || state.currentTool == .sketchLine || state.currentTool == .sketchCircle || state.currentTool == .sketchRectangle || state.currentTool == .sketchText {
+        if state.currentTool == .offset || state.currentTool == .addThickness || state.currentTool == .cleanup || state.currentTool == .measure || state.currentTool == .sketchLine || state.currentTool == .sketchCircle || state.currentTool == .sketchRectangle || state.currentTool == .sketchText {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Text("ACTIVE TOOL DETAILS")
@@ -831,7 +831,55 @@ extension ContentView {
                         .foregroundColor(Color.text_secondary)
                         .tracking(0.5)
                 }
-                
+
+                if state.currentTool == .addThickness {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Adds thickness to selected zero-width lines (or all lines if none selected), turning each centerline into a closed, cuttable outline. Lines that already have thickness are skipped.")
+                            .font(PlasticityFont.label)
+                            .foregroundColor(Color.text_secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        Text("Thickness (mm)")
+                            .font(PlasticityFont.label)
+                            .foregroundColor(Color.text_secondary)
+
+                        TextField("Thickness", value: $state.addThicknessWidth, format: .number)
+                            .textFieldStyle(PlainTextFieldStyle())
+                            .padding(6)
+                            .background(Color.bg_input)
+                            .cornerRadius(4)
+                            .foregroundColor(Color.text_primary)
+                            .font(PlasticityFont.body)
+                            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+                            .help("Total width of the thickened outline in millimeters")
+                            .onSubmit {
+                                if state.addThicknessWidth > 0 { state.addThickness(exitAfterApply: true) }
+                            }
+
+                        HStack(spacing: 8) {
+                            Button("OK") {
+                                state.addThickness(exitAfterApply: true)
+                            }
+                            .buttonStyle(PlasticityButtonStyle(isEnabled: state.addThicknessWidth > 0))
+                            .disabled(state.addThicknessWidth <= 0)
+                            .help("Add thickness and exit the tool")
+
+                            Button("Cancel") {
+                                state.currentTool = .select
+                            }
+                            .buttonStyle(PlasticityButtonStyle(isEnabled: true))
+                            .help("Drop the tool without changing geometry (Esc)")
+                        }
+
+                        Button("Apply (keep tool)") {
+                            state.addThickness()
+                        }
+                        .buttonStyle(PlasticityButtonStyle(isEnabled: state.addThicknessWidth > 0))
+                        .disabled(state.addThicknessWidth <= 0)
+                        .help("Add thickness but stay in the tool")
+                    }
+                }
+
                 if state.currentTool == .offset {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Offset Mode")
@@ -2474,7 +2522,7 @@ extension ContentView {
     /// collapsible card only appears when there's something in it (MAS-114).
     private var hasActiveToolOptions: Bool {
         switch state.currentTool {
-        case .offset, .cleanup, .addHoles, .sketchRectangle, .sketchText,
+        case .offset, .addThickness, .cleanup, .addHoles, .sketchRectangle, .sketchText,
              .sketchLine, .sketchCircle, .fillet, .chamfer, .paperFolding,
              .patterning, .move, .convertLines, .mirror, .select, .dimension, .scale,
              .sketchPolygon:
@@ -2797,6 +2845,8 @@ extension ContentView {
                     referenceImageSettingsSection
                 }
             } else if state.currentTool == .offset {
+                activeToolDetailsSection
+            } else if state.currentTool == .addThickness {
                 activeToolDetailsSection
             } else if state.currentTool == .cleanup {
                 activeToolDetailsSection

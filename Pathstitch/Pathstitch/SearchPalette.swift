@@ -12,6 +12,7 @@ struct SearchPalette: View {
     @State private var query: String = ""
     @State private var selection: Int = 0
     @FocusState private var fieldFocused: Bool
+    @State private var lastMousePosition: NSPoint? = nil
     /// Local key monitor for Esc / ↑ / ↓. The focused TextField's field editor
     /// swallows these before SwiftUI's `.onKeyPress`/`.onExitCommand` see them,
     /// so we intercept at the app level instead.
@@ -64,7 +65,15 @@ struct SearchPalette: View {
                             .id(cmd.id)
                             .contentShape(Rectangle())
                             .onTapGesture { activate(at: idx) }
-                            .onHover { if $0 { selection = idx } }
+                            .onHover { hovering in
+                                if hovering {
+                                    let currentPos = NSEvent.mouseLocation
+                                    if lastMousePosition != currentPos {
+                                        selection = idx
+                                        lastMousePosition = currentPos
+                                    }
+                                }
+                            }
                         }
                         if results.isEmpty {
                             Text("No matching commands")
@@ -96,6 +105,7 @@ struct SearchPalette: View {
             DispatchQueue.main.async { fieldFocused = true }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { fieldFocused = true }
             installKeyMonitor()
+            lastMousePosition = NSEvent.mouseLocation
         }
         .onDisappear { removeKeyMonitor() }
         .onChange(of: query) { _ in selection = 0 }

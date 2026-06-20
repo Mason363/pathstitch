@@ -397,7 +397,7 @@ boilerplate, e.g. repeated acceptance-criteria checklists that just restate the 
 ## 14. Search & keybinds
 *App-wide utility/settings — low dependency on everything above, can land any time.*
 
-- [ ] **Group 14 done**
+- [x] **Group 14 done**
 
 ### MAS-133 — Search menu
 > Make sure the search menu has all the most up-to-date tools, keyboard shortcuts, and fix this bug:
@@ -414,7 +414,7 @@ boilerplate, e.g. repeated acceptance-criteria checklists that just restate the 
 ## 15. Documentation catch-up
 *Must come last — it's explicitly "update everything" once the other changes have landed.*
 
-- [ ] **Group 15 done**
+- [x] **Group 15 done**
 
 ### MAS-129 — Update everything
 > With all the new changes, update the readme, update the documentation, update menu bar -> tools, update everything that needs catching up on

@@ -80,47 +80,50 @@ rearrangeable toolbar.
 
 **Draw**
 - **Line / Circle / Rectangle** — core primitives with live dimensions.
-- **Polygon** — regular N‑sided shapes, drag for size & rotation.
-- **Text** — place and edit text on the canvas.
-- **Pen** — Illustrator‑style bézier paths.
+- **Polygon** — N-sided shapes, drag to set radius/rotation, tab for sides.
+- **Text v3** — double-click to edit inline, choose system fonts, adjust size, spacing, bold, italic, underline, and multi-line.
+- **Pen** — Illustrator-style bézier paths.
 - **Snapping** — point/edge/grid snapping while drawing.
+- **Reference images** — import, calibrate, transform, and trace/vectorize image underlays.
 
 **Edit**
-- **Fillet / Chamfer** — parametric, per‑corner, G1/G2, draggable; shared radius for corners picked together.
-- **Trim** — hover‑to‑preview, click or drag to cut at intersections.
-- **Offset** — chain‑select, live ghost, flip side, construction lines.
+- **Fillet / Chamfer** — parametric, per-corner, G1/G2, draggable; shared radius for corners picked together.
+- **Trim** — hover-to-preview, click or drag to cut at intersections.
+- **Offset** — chain-select, live ghost, flip side, construction lines.
 - **Join / Cleanup** — bridge hanging endpoints with straight lines.
 - **Convert Lines** — restyle to dashed / perforated / decorative lines.
-- **Move** — gizmo + exact point‑to‑point.
+- **Move** — gizmo + exact point-to-point.
 - **Scale** — live drag, from center or a picked point.
-- **Mirror** — objects/mirror‑line modes with live ghost.
+- **Mirror** — objects/mirror-line modes with live ghost.
 - **Reflect / Flip / Duplicate** — quick transforms.
+- **Layers v2** — organize geometry by layer; click a layer in the panel to select its geometry.
 
 **Measure & dimension**
-- **Measure** — ad‑hoc distance lines.
-- **Dimension** — linear / radius / point‑to‑point with a parameter engine (formulas, variables, units, `fx:`/driven).
+- **Measure** — ad-hoc distance lines.
+- **Dimension** — linear / radius / point-to-point with a parameter engine (formulas, variables, units, `fx:`/driven).
 
 **Make**
-- **Stitch holes** — saddle‑stitch generation along any path, spacing/corner controls.
-- **Keep‑out avoidance** — gap the stitch line around tagged hardware.
+- **Stitch holes** — saddle-stitch generation along any path, spacing/corner controls.
+- **Keep-out avoidance** — gap the stitch line around tagged hardware.
 - **Patterning** — rectangular & circular arrays with live ghost preview.
 - **Paper folding** — crease lines + glue tabs for 3D assembly.
-- **Layers** — organize geometry by layer.
 
 **3D → 2D**
 - **STEP import** — load `.step` / `.stp` into a 3D viewport.
-- **Plane projection** — sketch from a cutting plane.
-- **Unfold** — flatten developable surfaces into cut‑ready nets.
+- **3D bodies** — drag-and-drop to import multiple 3D models with auto-distribution and 3D translation gizmos; plane cross-section previews.
+- **Plane projection** — sketch from a cutting plane with cross-section previews.
+- **Unfold & Unwrapping** — flatten developable surfaces and doubly-curved faces (conformal LSCM).
+- **Home v2** — press Home to frame all geometry or return to the default startup view if the canvas is empty.
 
 **Export & integrate**
-- **Export** — DXF, SVG, PDF, PNG.
+- **Export** — DXF, SVG, PDF, PNG with filters for selected-only or measurements and clear indicator checkmarks.
 - **Projects** — native `.stch` files.
-- **QuickLook** — Finder previews + thumbnails for DXF & STEP.
+- **QuickLook Previews** — Finder previews + thumbnails for DXF (full curve support) & STEP (native fast 3D renderer).
 - **Batch mode** — operate over many files at once.
 
 **Workspace**
-- **Command palette** — `S` or `⌘K` to find any tool or action.
-- **Keybinds & themes** — customizable shortcuts, light/dark.
+- **Command palette** — search-optimized palette (`S` or `⌘K`) to find and run any tool.
+- **Keybinds & themes** — customizable shortcuts and appearance (light/dark).
 - **Toolbar** — zoned, rearrangeable, resizable panels with collapsible options.
 - **Recent projects** — welcome screen with reveal/remove.
 
@@ -136,7 +139,7 @@ Single-key, Fusion/Photoshop-style defaults (all rebindable in Preferences → S
 | `O` | Offset | `P` | Pen | `⌫` | Delete |
 | `T` | Trim | `D` | Dimension | `⌘⇧H` / `⌘⇧J` | Flip H / V |
 | `F` | Fillet | `I` | Measure | `N` | Toggle snapping |
-| `B` | Chamfer | `E` | Convert Lines | `A` | Toggle chain‑select |
+| `B` | Chamfer | `E` | Convert Lines | `A` | Toggle chain-select |
 | `G` | Add Holes | `J` | Join / Cleanup | `⇧G` | Toggle grid |
 
 Tools without a default key (Scale, Polygon, Text, Mirror, Patterning, Paper Folding) are reachable from the toolbar or the search palette, and can be bound in Preferences.
@@ -145,18 +148,10 @@ Tools without a default key (Scale, Polygon, Text, Mirror, Patterning, Paper Fol
 
 - **Angular dimensions** — angle between two lines.
 - **Dimension associativity** — edit a master value, dependents follow.
-- **Scale‑on‑first‑dimension** — proportional whole‑sketch scaling.
+- **Scale-on-first-dimension** — proportional whole-sketch scaling.
 - **Pattern/mirror handles** — draggable gizmos, instance suppression, associative links.
-- **Sewing v2 (phases 2–4)** — flip‑match symmetry, registration keyholes, differential pitch, saved profiles.
-- **Reference images** — import, trace, and vectorize underlays.
-- **Text v3** — system fonts, inline editing, bold/italic/spacing.
-- **Layers v2** — click a layer to select its geometry.
-- **3D bodies** — drag‑in distribution + 3D move gizmo, intersection‑only plane import, cross‑section preview.
-- **Home v2** — reset to the opening view on an empty canvas.
-- **Unwrapping** — curved/LSCM unfolding beyond developable nets.
-- **Export fixes** — reliable export + clearer format/indicator UI.
-- **Better previews** — full curve support in DXF QuickLook, native fast STEP preview.
-- **Search & keybinds** — up‑to‑date palette and accurate shortcut display.
+- **Sewing v2 (phases 2-4)** — flip-match symmetry, registration keyholes, differential pitch, saved profiles.
+- **Unwrapping (Phases 3-4)** — advanced connected net flattening and nesting.
 
 ---
 
