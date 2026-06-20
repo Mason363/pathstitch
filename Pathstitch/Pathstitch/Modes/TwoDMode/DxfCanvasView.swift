@@ -3238,56 +3238,11 @@ struct DxfCanvasView: View {
             arrowPath.closeSubpath()
             context.fill(arrowPath, with: .color(Color.status_warn))
         }
-        
-        if isDraggingOffset {
-            let strokeColor = Color.status_warn
-            let strokeStyle = StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round, dash: [4, 4])
-            let offsetVector = CGPoint(
-                x: handleInfo.normal.x * CGFloat(state.offsetDistance) * scaleDir,
-                y: handleInfo.normal.y * CGFloat(state.offsetDistance) * scaleDir
-            )
-            
-            for handle in state.selectedHandles {
-                guard let ent = state.entities.first(where: { $0.handle == handle }) else { continue }
-                var previewPath = SwiftUI.Path()
-                
-                if ent.type == "LINE", let s = ent.start, let e = ent.end {
-                    let offX: Double = Double(offsetVector.x)
-                    let offY: Double = Double(offsetVector.y)
-                    let p1 = toScreen(dx: s[0] + offX, dy: s[1] + offY, size: size, bounds: modelBounds)
-                    let p2 = toScreen(dx: e[0] + offX, dy: e[1] + offY, size: size, bounds: modelBounds)
-                    previewPath.move(to: p1)
-                    previewPath.addLine(to: p2)
-                    context.stroke(previewPath, with: .color(strokeColor), style: strokeStyle)
-                } else if ent.type == "CIRCLE", let center: [Double] = ent.center, let radius: Double = ent.radius {
-                    let offsetVal: Double = Double(state.offsetDistance)
-                    let dirVal: Double = Double(scaleDir)
-                    let newRadius: Double = radius + offsetVal * dirVal
-                    if newRadius > Double(0.1) {
-                        let sc: CGPoint = toScreen(dx: center[0], dy: center[1], size: size, bounds: modelBounds)
-                        let r: CGFloat = CGFloat(newRadius) * state.canvasScale
-                        let diameter: CGFloat = r * CGFloat(2.0)
-                        let rect: CGRect = CGRect(x: sc.x - r, y: sc.y - r, width: diameter, height: diameter)
-                        previewPath.addEllipse(in: rect)
-                        context.stroke(previewPath, with: .color(strokeColor), style: strokeStyle)
-                    }
-                } else if let vertices: [[Double]] = ent.vertices, vertices.count >= 2 {
-                    let offX: Double = Double(offsetVector.x)
-                    let offY: Double = Double(offsetVector.y)
-                    let screenPts: [CGPoint] = vertices.map { (v: [Double]) -> CGPoint in
-                        toScreen(dx: v[0] + offX, dy: v[1] + offY, size: size, bounds: modelBounds)
-                    }
-                    previewPath.move(to: screenPts[0])
-                    for idx in 1..<screenPts.count {
-                        previewPath.addLine(to: screenPts[idx])
-                    }
-                    if ent.closed == true {
-                        previewPath.closeSubpath()
-                    }
-                    context.stroke(previewPath, with: .color(strokeColor), style: strokeStyle)
-                }
-            }
-        }
+        // NOTE: the real offset preview is the concentric `previewEntities` ghost
+        // drawn in renderCanvas (computed natively in OffsetGeometry). A legacy
+        // drag-only overlay used to live here that just *translated* each selected
+        // entity along the normal — a same-size shifted copy, not a true offset —
+        // which flickered over the correct preview while dragging. It's removed.
     }
     
     struct OffsetHandleInfo {
