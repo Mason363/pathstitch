@@ -2688,6 +2688,7 @@ class AppState {
         }
 
         let alert = NSAlert()
+        alert.icon = AppIconManager.currentIcon()   // match Settings ▸ App Icon (MAS-150)
         alert.messageText = "Check imported size"
         if strong {
             alert.informativeText = "\"\(sourceName)\" imported at \(fmt(w)) × \(fmt(h)) mm and declares its units as \(declared). Confirm the real-world size:"

@@ -7,6 +7,9 @@ struct WelcomeView: View {
     // Subtle Buy-Me-a-Coffee nudge (MAS-149). Dismissed permanently once the
     // user closes it; the flag persists across launches via UserDefaults.
     @AppStorage("welcome.bmcDismissed.v1") private var bmcDismissed = false
+    // Re-render the logo when the icon setting changes so it always matches
+    // Settings ▸ App Icon (MAS-150).
+    @AppStorage(SettingsKeys.icon) private var iconChoice = "auto"
 
     var body: some View {
         HStack(spacing: 0) {
@@ -14,7 +17,7 @@ struct WelcomeView: View {
             VStack(spacing: 20) {
                 // App Icon / Logo & Version
                 VStack(spacing: 8) {
-                    Image(nsImage: NSApp.applicationIconImage)
+                    Image(nsImage: AppIconManager.currentIcon() ?? NSApp.applicationIconImage)
                         .resizable()
                         .aspectRatio(contentMode: .fit)
                         .frame(width: 48, height: 48)

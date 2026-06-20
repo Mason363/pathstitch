@@ -6,6 +6,8 @@ import SwiftUI
 /// wired in — the version / check-for-updates controls in one place.
 struct AboutView: View {
     @ObservedObject private var updater = UpdaterManager.shared
+    // Keep the logo synced to Settings ▸ App Icon (MAS-150).
+    @AppStorage(SettingsKeys.icon) private var iconChoice = "auto"
 
     private var version: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
@@ -16,7 +18,7 @@ struct AboutView: View {
 
     var body: some View {
         VStack(spacing: 14) {
-            Image(nsImage: NSApp.applicationIconImage)
+            Image(nsImage: AppIconManager.currentIcon() ?? NSApp.applicationIconImage)
                 .resizable()
                 .aspectRatio(contentMode: .fit)
                 .frame(width: 72, height: 72)

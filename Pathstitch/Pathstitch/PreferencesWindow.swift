@@ -284,8 +284,11 @@ private struct AboutPrefsTab: View {
 // MARK: - App icon selection (MAS-72)
 
 enum AppIconManager {
-    /// Applies the user's icon choice ("auto" follows system appearance).
-    static func refresh() {
+    /// The logo variant the user's icon choice resolves to right now ("auto"
+    /// follows system appearance). Single source of truth so every in-app logo
+    /// (welcome, About, alert icons) stays in sync with Settings ▸ App Icon
+    /// (MAS-150).
+    static func currentIcon() -> NSImage? {
         let choice = UserDefaults.standard.string(forKey: SettingsKeys.icon) ?? "auto"
         let useDark: Bool
         switch choice {
@@ -294,6 +297,11 @@ enum AppIconManager {
         default:
             useDark = NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
         }
-        NSApp.applicationIconImage = NSImage(named: useDark ? "AppIconDark" : "AppIconLight")
+        return NSImage(named: useDark ? "AppIconDark" : "AppIconLight")
+    }
+
+    /// Applies the user's icon choice to the dock/app icon.
+    static func refresh() {
+        NSApp.applicationIconImage = currentIcon()
     }
 }
