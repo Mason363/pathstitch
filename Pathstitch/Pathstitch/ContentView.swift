@@ -245,12 +245,8 @@ struct ContentView: View {
     // sidebar widens in whole-column steps.
     @State private var rightPanelWidth: CGFloat = 240
     @State private var leftToolbarWidth: CGFloat = 48
-    // Active-tool option panels open by default ("full and open on the get-go", MAS-60).
-    @State private var isSelectionExpanded = true
-    @State private var isHolesSewingExpanded = true
-    @State private var isPaperFoldingExpanded = true
-    @State private var isPatterningExpanded = true
-    @State private var isTextPlacingExpanded = true
+    // Active-tool option panels are always fully expanded — no collapse chevron
+    // or sub-menu feel (MAS-60). Their options render directly in the panel.
     @State private var isReferenceImageExpanded = false
     @State private var isLayersExpanded = false
     @State private var isImportSettingsExpanded = false
@@ -479,10 +475,29 @@ struct WindowAccessor: NSViewRepresentable {
     class Coordinator: NSObject {
         weak var window: NSWindow?
         var state: AppState?
-        
+        private var flagsMonitor: Any?
+
         func setup(window: NSWindow, state: AppState) {
             self.window = window
             self.state = state
+            installShiftMonitor()
+        }
+
+        /// Track the Shift key globally so holding it momentarily inverts snapping
+        /// (MAS-157). A flagsChanged monitor fires on every modifier transition.
+        private func installShiftMonitor() {
+            guard flagsMonitor == nil else { return }
+            flagsMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+                let held = event.modifierFlags.contains(.shift)
+                if self?.state?.shiftSnapHeld != held {
+                    self?.state?.shiftSnapHeld = held
+                }
+                return event
+            }
+        }
+
+        deinit {
+            if let m = flagsMonitor { NSEvent.removeMonitor(m) }
         }
     }
 }
@@ -1095,11 +1110,11 @@ extension ContentView {
                                 .foregroundColor(Color.text_secondary)
                             
                             Picker("", selection: $state.offsetSide) {
-                                Text("Left").tag("left")
-                                Text("Right").tag("right")
+                                Text("Outward").tag("outer")
+                                Text("Inward").tag("inner")
                             }
                             .pickerStyle(SegmentedPickerStyle())
-                            .help("Select side to offset: left or right")
+                            .help("Offset outward (grow) or inward (shrink). Defaults to outward.")
 
                             // Flip the offset to the opposite side (MAS-109).
                             Button {
@@ -1322,21 +1337,9 @@ extension ContentView {
                         .foregroundColor(Color.text_primary)
                         .tracking(0.5)
                     Spacer()
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundColor(Color.text_secondary)
-                        .rotationEffect(isHolesSewingExpanded ? .degrees(90) : .zero)
                 }
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    withAnimation(.easeOut(duration: 0.15)) {
-                        isHolesSewingExpanded.toggle()
-                    }
-                }
-                .help("Toggle Holes Sewing settings panel")
-                
-                if isHolesSewingExpanded {
-                    VStack(alignment: .leading, spacing: 8) {
+
+                VStack(alignment: .leading, spacing: 8) {
                         HStack {
                             Text("Offset Distance (mm)")
                                 .font(PlasticityFont.label)
@@ -1602,21 +1605,37 @@ extension ContentView {
                             .padding(.leading, 8)
                         }
 
-                        Button("Apply Sewing Holes") {
-                            state.applySewingHoles()
-                        }
-                        .buttonStyle(PlasticityButtonStyle(isEnabled: !state.selectedHandles.isEmpty))
-                        .disabled(state.selectedHandles.isEmpty)
-                        .help("Generate sewing holes along selected paths using these parameters")
+                        // NOTE: the "Apply Sewing Holes" action is rendered as a
+                        // pinned footer (holesApplyFooter) below the scrolling
+                        // panel so it stays reachable no matter how many advanced
+                        // options are expanded — see the inspector VSplitView.
                     }
                     .padding(.vertical, 4)
-                }
             }
             .padding(8)
             .background(Color.bg_input.opacity(0.4))
             .cornerRadius(4)
             .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_subtle, lineWidth: 1))
         }
+    }
+
+    /// Primary Sewing-Holes action, pinned beneath the (scrolling) options panel
+    /// so it's always visible regardless of how tall the parameter list grows.
+    @ViewBuilder
+    private var holesApplyFooter: some View {
+        VStack(spacing: 0) {
+            Divider().background(Color.border_subtle)
+            Button("Apply Sewing Holes") {
+                state.applySewingHoles()
+            }
+            .buttonStyle(PlasticityButtonStyle(isEnabled: !state.selectedHandles.isEmpty))
+            .disabled(state.selectedHandles.isEmpty)
+            .help("Generate sewing holes along selected paths using these parameters")
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity)
+        }
+        .background(Color.bg_panel)
     }
 
     /// Binds the radius field to the active corner's value, applying live so the
@@ -1700,20 +1719,9 @@ extension ContentView {
                     .foregroundColor(Color.text_primary)
                     .tracking(0.5)
                 Spacer()
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundColor(Color.text_secondary)
-                    .rotationEffect(isPaperFoldingExpanded ? .degrees(90) : .zero)
             }
-            .contentShape(Rectangle())
-            .onTapGesture {
-                withAnimation(.easeOut(duration: 0.15)) {
-                    isPaperFoldingExpanded.toggle()
-                }
-            }
-            .help("Toggle Paper Folding (crease pattern / glue tabs) settings panel")
-            
-            if isPaperFoldingExpanded {
+
+            if true {
                     VStack(alignment: .leading, spacing: 10) {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("CREASE PATTERN")
@@ -1843,20 +1851,9 @@ extension ContentView {
                     .foregroundColor(Color.text_primary)
                     .tracking(0.5)
                 Spacer()
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundColor(Color.text_secondary)
-                    .rotationEffect(isPatterningExpanded ? .degrees(90) : .zero)
             }
-            .contentShape(Rectangle())
-            .onTapGesture {
-                withAnimation(.easeOut(duration: 0.15)) {
-                    isPatterningExpanded.toggle()
-                }
-            }
-            .help("Toggle Patterning (grid / path duplicate) settings panel")
-            
-            if isPatterningExpanded {
+
+            if true {
                 VStack(alignment: .leading, spacing: 10) {
                     if state.selectedHandles.isEmpty {
                         Text("Select geometry to pattern.")
@@ -1873,36 +1870,60 @@ extension ContentView {
                     if state.patternMode == "rectangular" {
                         Text("Drag the on-canvas arrows, or set values:")
                             .font(PlasticityFont.label).foregroundColor(Color.text_muted)
+
+                        // Number of copies (per axis), with steppers (MAS-157).
                         HStack {
-                            Text("Count X / Y").font(PlasticityFont.label).foregroundColor(Color.text_secondary)
+                            Text("Copies X / Y").font(PlasticityFont.label).foregroundColor(Color.text_secondary)
                             Spacer()
-                            patternField(Binding(get: { Double(state.patternCountX) }, set: { state.patternCountX = max(1, Int($0)) }))
+                            patternStepperField(Binding(get: { Double(state.patternCountX) }, set: { state.patternCountX = max(1, Int($0)) }), step: 1, minValue: 1, isInt: true)
                             Text("×")
-                            patternField(Binding(get: { Double(state.patternCountY) }, set: { state.patternCountY = max(1, Int($0)) }))
+                            patternStepperField(Binding(get: { Double(state.patternCountY) }, set: { state.patternCountY = max(1, Int($0)) }), step: 1, minValue: 1, isInt: true)
                         }
-                        HStack {
-                            Text("Spacing X / Y").font(PlasticityFont.label).foregroundColor(Color.text_secondary)
-                            Spacer()
-                            patternField($state.patternSpacingX)
-                            Text("/")
-                            patternField($state.patternSpacingY)
+
+                        // Choose how the distance between copies is specified.
+                        Picker("", selection: $state.patternDistanceMode) {
+                            Text("Spacing").tag("spacing")
+                            Text("Extent").tag("extent")
                         }
+                        .pickerStyle(SegmentedPickerStyle())
+                        .help("Spacing — gap between adjacent copies. Extent — total distance from the first to the last copy.")
+
+                        if state.patternDistanceMode == "spacing" {
+                            HStack {
+                                Text("Spacing X / Y").font(PlasticityFont.label).foregroundColor(Color.text_secondary)
+                                Spacer()
+                                patternStepperField($state.patternSpacingX, step: 1)
+                                Text("/")
+                                patternStepperField($state.patternSpacingY, step: 1)
+                            }
+                        } else {
+                            HStack {
+                                Text("Extent X / Y").font(PlasticityFont.label).foregroundColor(Color.text_secondary)
+                                Spacer()
+                                patternStepperField($state.patternExtentX, step: 1)
+                                Text("/")
+                                patternStepperField($state.patternExtentY, step: 1)
+                            }
+                            Text("≈ \(state.effectivePatternSpacingX, specifier: "%.1f") / \(state.effectivePatternSpacingY, specifier: "%.1f") mm between copies")
+                                .font(PlasticityFont.label).foregroundColor(Color.text_muted)
+                        }
+
                         Button("Apply Pattern") {
                             state.applyPatternGrid(columns: state.patternCountX, rows: state.patternCountY,
-                                                   colSpacing: state.patternSpacingX, rowSpacing: state.patternSpacingY)
+                                                   colSpacing: state.effectivePatternSpacingX, rowSpacing: state.effectivePatternSpacingY)
                         }
                         .buttonStyle(PlasticityButtonStyle(isEnabled: !state.selectedHandles.isEmpty))
                         .disabled(state.selectedHandles.isEmpty)
                     } else if state.patternMode == "circular" {
                         HStack {
-                            Text("Count").font(PlasticityFont.label).foregroundColor(Color.text_secondary)
+                            Text("Copies").font(PlasticityFont.label).foregroundColor(Color.text_secondary)
                             Spacer()
-                            patternField(Binding(get: { Double(state.patternCircCount) }, set: { state.patternCircCount = max(2, Int($0)) }))
+                            patternStepperField(Binding(get: { Double(state.patternCircCount) }, set: { state.patternCircCount = max(2, Int($0)) }), step: 1, minValue: 2, isInt: true)
                         }
                         HStack {
                             Text("Total Angle (°)").font(PlasticityFont.label).foregroundColor(Color.text_secondary)
                             Spacer()
-                            patternField($state.patternCircAngle)
+                            patternStepperField($state.patternCircAngle, step: 5)
                         }
                         Button {
                             state.pickingPatternPivot = true
@@ -1923,7 +1944,7 @@ extension ContentView {
                         HStack {
                             Text("Spacing (mm)").font(PlasticityFont.label).foregroundColor(Color.text_secondary)
                             Spacer()
-                            patternField($state.patternPathSpacing)
+                            patternStepperField($state.patternPathSpacing, step: 1)
                         }
                         Button {
                             state.pickingPatternPath = true
@@ -1968,6 +1989,43 @@ extension ContentView {
             .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
     }
 
+    /// Numeric field with little up/down stepper arrows so values can be nudged
+    /// without retyping (MAS-157). `isInt` rounds to whole numbers; `minValue`
+    /// clamps the low end.
+    private func patternStepperField(_ value: Binding<Double>, step: Double = 1,
+                                     minValue: Double = -.greatestFiniteMagnitude,
+                                     isInt: Bool = false) -> some View {
+        HStack(spacing: 3) {
+            patternField(value)
+            VStack(spacing: 1) {
+                Button {
+                    var v = value.wrappedValue + step
+                    if isInt { v = (v).rounded() }
+                    value.wrappedValue = max(minValue, v)
+                } label: {
+                    Image(systemName: "chevron.up")
+                        .font(.system(size: 7, weight: .bold))
+                        .frame(width: 14, height: 9)
+                }
+                .buttonStyle(PlainButtonStyle())
+                Button {
+                    var v = value.wrappedValue - step
+                    if isInt { v = (v).rounded() }
+                    value.wrappedValue = max(minValue, v)
+                } label: {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 7, weight: .bold))
+                        .frame(width: 14, height: 9)
+                }
+                .buttonStyle(PlainButtonStyle())
+            }
+            .foregroundColor(Color.text_secondary)
+            .background(Color.bg_input)
+            .cornerRadius(3)
+            .overlay(RoundedRectangle(cornerRadius: 3).stroke(Color.border_strong, lineWidth: 1))
+        }
+    }
+
     @ViewBuilder
     private var textPlacingSection: some View {
         if state.currentTool == .select || state.currentTool == .sketchText {
@@ -1980,20 +2038,9 @@ extension ContentView {
                         .foregroundColor(Color.text_primary)
                         .tracking(0.5)
                     Spacer()
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 9, weight: .bold))
-                        .foregroundColor(Color.text_secondary)
-                        .rotationEffect(isTextPlacingExpanded ? .degrees(90) : .zero)
                 }
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    withAnimation(.easeOut(duration: 0.15)) {
-                        isTextPlacingExpanded.toggle()
-                    }
-                }
-                .help("Toggle Text Placing settings panel")
-                
-                if isTextPlacingExpanded {
+
+                if true {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Draw a box on the canvas, then type. Shift+Enter for a new line, Enter to place.")
                             .font(PlasticityFont.label)
@@ -2011,6 +2058,26 @@ extension ContentView {
                             italic: textToolStyleBinding(\.editingTextItalic, \.textToolItalic),
                             underline: textToolStyleBinding(\.editingTextUnderline, \.textToolUnderline)
                         )
+
+                        Divider().background(Color.border_subtle).padding(.vertical, 2)
+
+                        // Fit the text to its drawn bounding box (MAS-157). Standard
+                        // options found in other apps: warp to fit height, fit width,
+                        // or stretch to fill the whole box.
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Fit to Box")
+                                .font(PlasticityFont.label)
+                                .foregroundColor(Color.text_secondary)
+                            Picker("", selection: $state.textFitMode) {
+                                Text("None").tag("none")
+                                Text("Height").tag("height")
+                                Text("Width").tag("width")
+                                Text("Both").tag("both")
+                            }
+                            .pickerStyle(SegmentedPickerStyle())
+                            .labelsHidden()
+                            .help("Draw a box, then type. None keeps the font size; Height/Width fit one axis; Both warps to fill the whole box.")
+                        }
 
                         Divider().background(Color.border_subtle).padding(.vertical, 2)
 
@@ -2529,20 +2596,29 @@ extension ContentView {
                                                 .foregroundColor(Color.accent)
                                                 .frame(width: 12, height: 12)
                                         } else {
-                                            // Premium color dot overlaying borderless color picker
+                                            // Premium color dot overlaying a borderless color
+                                            // picker. The picker fills a larger, fully
+                                            // hit-testable area so a click anywhere on the
+                                            // swatch reliably opens the picker (MAS-157).
                                             ZStack {
                                                 Circle()
                                                     .fill(item.color ?? Color.clear)
-                                                    .frame(width: 10, height: 10)
+                                                    .overlay(
+                                                        Circle().stroke(Color.border_strong, lineWidth: 1)
+                                                    )
+                                                    .frame(width: 12, height: 12)
+                                                    .allowsHitTesting(false)
                                                 ColorPicker("", selection: Binding(
                                                     get: { item.color ?? Color.clear },
                                                     set: { state.colorLayer(id: item.id, newColorHex: $0.toHex()) }
                                                 ))
                                                 .labelsHidden()
-                                                .opacity(0.015)
-                                                .frame(width: 10, height: 10)
+                                                .opacity(0.02)
+                                                .frame(width: 20, height: 20)
+                                                .contentShape(Rectangle())
                                             }
-                                            .frame(width: 12, height: 12)
+                                            .frame(width: 20, height: 20)
+                                            .help("Click to change this layer's color")
                                         }
                                     }
                                     
@@ -2889,6 +2965,26 @@ extension ContentView {
                     
                     Divider()
                     
+                    // Background removal — available directly from the image panel,
+                    // not just inside the trace flow (MAS-157).
+                    Button(action: {
+                        if state.activeLayerBackgroundRemoved {
+                            state.restoreActiveLayerBackground()
+                        } else {
+                            state.removeActiveLayerBackground()
+                        }
+                    }) {
+                        Label(state.activeLayerBackgroundRemoved ? "Restore Background" : "Remove Background",
+                              systemImage: state.activeLayerBackgroundRemoved ? "arrow.uturn.backward" : "scissors")
+                            .font(PlasticityFont.body)
+                            .foregroundColor(Color.text_primary)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 6)
+                            .background(Color.accent.opacity(0.15))
+                            .cornerRadius(4)
+                    }
+                    .buttonStyle(PlainButtonStyle())
+
                     // Trace Image Button
                     Button(action: {
                         state.isTracingRefImage = true
@@ -2939,12 +3035,34 @@ extension ContentView {
 
                 Toggle("Remove Background (rembg)", isOn: Binding(
                     get: { state.removeBackgroundMode },
-                    set: { state.removeBackgroundMode = $0; state.updateTracePreview() }
+                    set: { newVal in
+                        state.removeBackgroundMode = newVal
+                        // Apply the removal to the live image so the user sees the
+                        // result, not just the trace (MAS-157). Unchecking restores it.
+                        if newVal { state.removeActiveLayerBackground() }
+                        else { state.restoreActiveLayerBackground() }
+                        state.updateTracePreview()
+                    }
                 ))
                 .toggleStyle(.checkbox)
                 .font(PlasticityFont.label)
                 .foregroundColor(Color.text_primary)
-                .help("Use AI background removal (rembg) prior to tracing")
+                .help("Remove the image background (rembg) so you can see the cut-out before tracing")
+
+                // The cut-out persists after tracing/deselecting; this brings the
+                // original image back on demand (MAS-157).
+                if state.activeLayerBackgroundRemoved {
+                    Button(action: { state.restoreActiveLayerBackground() }) {
+                        Label("Restore Background", systemImage: "arrow.uturn.backward")
+                            .font(PlasticityFont.label)
+                            .foregroundColor(Color.text_primary)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 5)
+                            .background(Color.accent.opacity(0.15))
+                            .cornerRadius(4)
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                }
 
                 Divider()
                     .padding(.vertical, 4)
@@ -3796,9 +3914,16 @@ extension ContentView {
 
                 VStack(alignment: .leading, spacing: 0) {
                     VSplitView(
-                        top: ScrollView {
-                            activeToolOptionsPanel
-                                .padding(14)
+                        top: VStack(spacing: 0) {
+                            ScrollView {
+                                activeToolOptionsPanel
+                                    .padding(14)
+                            }
+                            // Keep the Sewing-Holes apply action pinned and always
+                            // reachable, no matter how many options are expanded.
+                            if state.currentTool == .addHoles {
+                                holesApplyFooter
+                            }
                         },
                         bottom: ScrollView {
                             layersSection
@@ -3806,7 +3931,8 @@ extension ContentView {
                         },
                         topHeight: $leftSidebarTopHeight,
                         minTopHeight: 100,
-                        minBottomHeight: 100
+                        minBottomHeight: 100,
+                        defaultTopFraction: 2.0 / 3.0
                     )
                 }
                 .frame(maxWidth: .infinity)
@@ -3989,9 +4115,14 @@ struct VSplitView<Top: View, Bottom: View>: View {
     @Binding var topHeight: CGFloat
     let minTopHeight: CGFloat
     let minBottomHeight: CGFloat
-    
+    /// Fraction of the available height the top pane should occupy the first time
+    /// the split is laid out (MAS-157: layers panel defaults to ~1/3, leaving the
+    /// rest for the active-tool options). nil keeps the supplied `topHeight`.
+    var defaultTopFraction: CGFloat? = nil
+
     @State private var isHoveringDivider = false
-    
+    @State private var didApplyDefault = false
+
     var body: some View {
         GeometryReader { geo in
             VStack(spacing: 0) {
@@ -4020,6 +4151,18 @@ struct VSplitView<Top: View, Bottom: View>: View {
                 
                 bottom
                     .frame(maxHeight: .infinity)
+            }
+            .onAppear {
+                if let frac = defaultTopFraction, !didApplyDefault, geo.size.height > 0 {
+                    topHeight = max(minTopHeight, min(geo.size.height * frac, geo.size.height - minBottomHeight))
+                    didApplyDefault = true
+                }
+            }
+            .onChange(of: geo.size.height) { h in
+                if let frac = defaultTopFraction, !didApplyDefault, h > 0 {
+                    topHeight = max(minTopHeight, min(h * frac, h - minBottomHeight))
+                    didApplyDefault = true
+                }
             }
         }
     }

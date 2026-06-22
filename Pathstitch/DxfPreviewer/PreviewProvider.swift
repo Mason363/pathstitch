@@ -38,6 +38,19 @@ class PreviewViewController: NSViewController, QLPreviewingController {
         let isAccessing = url.startAccessingSecurityScopedResource()
         if ext == "step" || ext == "stp" {
             let points = parseStepPointCloud(url: url)
+            // If the point cloud is too sparse to render in 3D, fall back to the
+            // static isometric bitmap so the preview is never a blank white box
+            // (MAS-157).
+            if points.count < 2 {
+                let size = CGSize(width: 1200, height: 800)
+                let image = renderStepToImage(url: url, size: size)
+                if isAccessing { url.stopAccessingSecurityScopedResource() }
+                DispatchQueue.main.async {
+                    self.installImageView(cgImage: image, size: size)
+                    handler(nil)
+                }
+                return
+            }
             if isAccessing { url.stopAccessingSecurityScopedResource() }
             DispatchQueue.main.async {
                 self.installSceneView(points: points)
@@ -118,26 +131,28 @@ class PreviewViewController: NSViewController, QLPreviewingController {
         var zMin = Float.greatestFiniteMagnitude, zMax = -Float.greatestFiniteMagnitude
         for v in normalized { zMin = min(zMin, v.z); zMax = max(zMax, v.z) }
         let zSpan = max(zMax - zMin, 1e-6)
-        var colors: [SCNVector3] = []
-        colors.reserveCapacity(normalized.count)
+        // Pack colors as 32-bit floats. SceneKit's color source expects
+        // single-precision components; feeding it 8-byte CGFloat (the size of
+        // SCNVector3's fields on macOS) made it misread the buffer and render
+        // nothing — i.e. a blank white preview (MAS-157).
+        var colorFloats: [Float] = []
+        colorFloats.reserveCapacity(normalized.count * 3)
         for v in normalized {
-            let t = CGFloat((v.z - zMin) / zSpan)        // 0 (far) … 1 (near)
-            // Dark slate → lighter blue-grey with depth.
-            let r = 0.12 + 0.30 * t
-            let g = 0.14 + 0.32 * t
-            let b = 0.22 + 0.40 * t
-            colors.append(SCNVector3(r, g, b))
+            let t = (v.z - zMin) / zSpan                 // 0 (far) … 1 (near)
+            colorFloats.append(0.12 + 0.30 * t)          // r — dark slate → blue-grey
+            colorFloats.append(0.14 + 0.32 * t)          // g
+            colorFloats.append(0.22 + 0.40 * t)          // b
         }
-        let colorData = Data(bytes: colors, count: colors.count * MemoryLayout<SCNVector3>.size)
+        let colorData = colorFloats.withUnsafeBufferPointer { Data(buffer: $0) }
         let colorSource = SCNGeometrySource(
             data: colorData,
             semantic: .color,
-            vectorCount: colors.count,
+            vectorCount: normalized.count,
             usesFloatComponents: true,
             componentsPerVector: 3,
-            bytesPerComponent: MemoryLayout<CGFloat>.size,
+            bytesPerComponent: MemoryLayout<Float>.size,
             dataOffset: 0,
-            dataStride: MemoryLayout<SCNVector3>.size
+            dataStride: 3 * MemoryLayout<Float>.size
         )
 
         let indices = (0..<UInt32(vertices.count)).map { $0 }

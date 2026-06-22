@@ -170,6 +170,31 @@ private func deBoor(u: Double, degree p: Int,
     return CGPoint(x: dx[p] / dw[p], y: dy[p] / dw[p])
 }
 
+/// Index range of the DXF `ENTITIES` section's group-code pairs (the modelspace
+/// geometry), or nil when the file has no such section (MAS-157). The returned
+/// range starts just after the `2 / ENTITIES` marker and ends at the section's
+/// closing `0 / ENDSEC`.
+private func entitiesSectionRange(in pairs: [(code: Int, value: Substring)]) -> Range<Int>? {
+    var i = 0
+    while i + 1 < pairs.count {
+        // A section opens with `0 / SECTION` then `2 / <name>`.
+        if pairs[i].code == 0, pairs[i].value.uppercased() == "SECTION",
+           pairs[i + 1].code == 2, pairs[i + 1].value.uppercased() == "ENTITIES" {
+            let start = i + 2
+            var j = start
+            while j < pairs.count {
+                if pairs[j].code == 0, pairs[j].value.uppercased() == "ENDSEC" {
+                    return start < j ? start..<j : nil
+                }
+                j += 1
+            }
+            return start < pairs.count ? start..<pairs.count : nil
+        }
+        i += 1
+    }
+    return nil
+}
+
 public struct DXFParser {
     public static func parse(url: URL) -> [PreviewEntity] {
         let isAccessing = url.startAccessingSecurityScopedResource()
@@ -217,6 +242,16 @@ public struct DXFParser {
             } else {
                 i += 1
             }
+        }
+
+        // Restrict to the ENTITIES section when the file has the standard section
+        // structure. Scanning the whole file also walked TABLES/BLOCKS, so block
+        // *definitions* (and other non-modelspace geometry) leaked into the
+        // preview — showing stray lines or, when paired with unexpanded INSERTs,
+        // dropping the real geometry (MAS-157). Falls back to the full stream for
+        // section-less / entities-only fragments.
+        if let entRange = entitiesSectionRange(in: pairs) {
+            pairs = Array(pairs[entRange])
         }
 
         var index = 0

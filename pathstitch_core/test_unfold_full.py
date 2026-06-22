@@ -368,16 +368,22 @@ class TestCurvedInNet(unittest.TestCase):
 
     def test_sphere_body_connected_unfolds_no_skips(self):
         out = os.path.join(self.d, "sphere_net.dxf")
-        res = op_unfold_connected({
+        base_args = {
             "input": self.sphere, "output": out, "whole_body": True,
             "mode": "spanning", "decoration": "none",
-            "distortion_mode": "conformal"})
+            "distortion_mode": "conformal"}
+        res = op_unfold_connected(base_args)
         self.assertEqual(res.get("status"), "ok", msg=res)
         self.assertGreaterEqual(res["data"]["faces_unfolded"], 1)
         self.assertEqual(res["data"].get("skipped_faces"), [])
+        # By default the distortion-heatmap facelets are NOT written, so the DXF
+        # stays a clean set of cut/crease lines for a DXF reader (MAS-157).
         counts = _dxf_layer_counts(out)
-        # Curved faces emit a distortion heatmap fill on the DISTORTION layer.
-        self.assertIn("DISTORTION", counts)
+        self.assertNotIn("DISTORTION", counts)
+        # Opt-in restores the heatmap facelets.
+        res2 = op_unfold_connected({**base_args, "include_distortion": True})
+        self.assertEqual(res2.get("status"), "ok", msg=res2)
+        self.assertIn("DISTORTION", _dxf_layer_counts(out))
 
     def test_cone_apex_unfolds(self):
         out = os.path.join(self.d, "cone_net.dxf")

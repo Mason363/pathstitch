@@ -202,6 +202,11 @@ struct HistoryState {
     // 3D body move offsets, so the 3D translate gizmo / nudge / reset are
     // undoable (MAS-143).
     let bodyOffsets: [Int: [Double]]
+    // The layer list travels with history so undo/redo restore the exact set of
+    // layers. Without this, reloadDXF's append-only layer sync leaves orphan
+    // empty layers behind after undo (e.g. a SEWING_HOLES layer whose geometry
+    // was undone but whose layer row lingered in the panel).
+    let layers: [DXFLayer]
 }
 
 /// One parametric corner modifier on a shape (MAS-62).
@@ -272,6 +277,10 @@ struct DXFEntity: Identifiable, Codable, Equatable, Hashable {
     var italic: Bool? = nil
     var underline: Bool? = nil
     var charSpacing: Double? = nil  // extra per-character tracking, in mm
+    // Horizontal stretch factor for TEXT (MAS-157). 1 = natural width; >1 / <1
+    // warp the glyphs wider / narrower so text can be fitted to a bounding box.
+    // Maps to the DXF TEXT width factor. nil = 1.0.
+    var widthFactor: Double? = nil
     // Fill primitive (MAS-146). A HATCH surfaces with `filled == true`; `vertices`
     // holds its outer boundary, `fillLoops` every boundary loop (outer + holes)
     // for hole-aware fill rendering. Absent on plain strokes (decodes to nil).
@@ -388,6 +397,7 @@ struct DXFEntity: Identifiable, Codable, Equatable, Hashable {
         italic = other.italic
         underline = other.underline
         charSpacing = other.charSpacing
+        widthFactor = other.widthFactor
     }
 
     /// Non-mutating variant of `copyTextStyle` for use in `map` expressions.
@@ -492,7 +502,12 @@ struct DXFLayer: Identifiable, Hashable, Codable {
     var refImageOpacity: Double = 0.5
     var refImageCalibrationDistance: Double = 100.0
     var locked: Bool = false
-    
+    // Background removal (MAS-157): when the user removes the background, the
+    // displayed `refImageBase64` is swapped for the cut-out PNG and the original
+    // is stashed here so "Restore Background" can bring it back.
+    var refImageOriginalBase64: String? = nil
+    var backgroundRemoved: Bool = false
+
     var color: Color {
         get { Color(hex: colorHex) }
         set { colorHex = newValue.toHex() }
@@ -520,6 +535,7 @@ struct DXFLayer: Identifiable, Hashable, Codable {
         case refImageScaleX, refImageScaleY, refImageWidth, refImageHeight, refImageRotation
         case refImageDepth, refImageOpacity, refImageCalibrationDistance, locked
         case refImagePixelWidth, refImagePixelHeight
+        case refImageOriginalBase64, backgroundRemoved
     }
     
     init(from decoder: Decoder) throws {
@@ -545,7 +561,9 @@ struct DXFLayer: Identifiable, Hashable, Codable {
         refImageOpacity = try container.decodeIfPresent(Double.self, forKey: .refImageOpacity) ?? 0.5
         refImageCalibrationDistance = try container.decodeIfPresent(Double.self, forKey: .refImageCalibrationDistance) ?? 100.0
         locked = try container.decodeIfPresent(Bool.self, forKey: .locked) ?? false
-        
+        refImageOriginalBase64 = try container.decodeIfPresent(String.self, forKey: .refImageOriginalBase64)
+        backgroundRemoved = try container.decodeIfPresent(Bool.self, forKey: .backgroundRemoved) ?? false
+
         if refImagePixelWidth == 0.0 { refImagePixelWidth = refImageWidth }
         if refImagePixelHeight == 0.0 { refImagePixelHeight = refImageHeight }
     }
@@ -751,6 +769,40 @@ class AppState {
     var editingTextInsert: CGPoint = .zero
     var editingTextHeight: Double = 5.0
     var editingTextWidth: Double = 0.0  // model-space width of the drawn text box
+    var editingTextBoxHeight: Double = 0.0 // model-space height of the drawn text box
+    var editingTextWidthFactor: Double = 1.0 // horizontal warp carried while editing
+    // How text is fitted to its drawn bounding box (MAS-157):
+    //  - "none":   font height = box height (no horizontal warp; legacy behavior).
+    //  - "height": uniform scale so the text block height fills the box.
+    //  - "width":  uniform scale so the longest line fills the box width.
+    //  - "both":   non-uniform warp so the text fills the box in both directions.
+    var textFitMode: String = "none"
+
+    /// Computes the font height and horizontal width-factor for the text being
+    /// edited, honoring `textFitMode` and the drawn box (MAS-157). Falls back to
+    /// the legacy "font height = box height" when no box / fit mode is set.
+    func fittedTextMetrics() -> (height: Double, widthFactor: Double) {
+        let boxW = editingTextWidth
+        let boxH = editingTextBoxHeight > 0 ? editingTextBoxHeight : editingTextHeight
+        let lines = editingTextString.isEmpty ? ["Label"] : editingTextString.components(separatedBy: "\n")
+        let lineCount = max(1, lines.count)
+        let longest = max(1, lines.map { $0.count }.max() ?? 1)
+        let charAspect = 0.6  // average glyph advance ÷ height
+        guard boxW > 1e-6, boxH > 1e-6 else { return (editingTextHeight, 1.0) }
+        switch textFitMode {
+        case "height":
+            return (boxH / Double(lineCount), 1.0)
+        case "width":
+            return (boxW / (Double(longest) * charAspect), 1.0)
+        case "both":
+            let h = boxH / Double(lineCount)
+            let naturalW = Double(longest) * charAspect * h
+            let wf = naturalW > 1e-6 ? boxW / naturalW : 1.0
+            return (h, wf)
+        default:
+            return (boxH, 1.0)
+        }
+    }
     // Live styling for the text currently being typed (MAS-134/135). Seeded from
     // the tool defaults below on a new text, or from the entity when re-editing.
     var editingTextFont: String = ""        // "" = system default
@@ -840,8 +892,10 @@ class AppState {
             if currentTool == .offset {
                 // Entering Offset: always start at a predictable 12 mm rather than
                 // inheriting the last session's distance, so the tool behaves the
-                // same every time you pick it up.
+                // same every time you pick it up. Outward is the default side so
+                // small shapes don't collapse when offset inward (MAS-157).
                 offsetDistance = 12.0
+                offsetSide = "outer"
                 // Chain-select defaults ON when nothing is loaded, so a click grabs
                 // the whole connected profile; an existing selection is kept and
                 // previewed immediately (MAS-109).
@@ -892,8 +946,24 @@ class AppState {
     var gizmoAccumulatedRotation: Double = 0
     var entities: [DXFEntity] = []
     var previewEntities: [DXFEntity] = []
-    var layers: [DXFLayer] = []
+    var layers: [DXFLayer] = [] {
+        didSet { ensureActiveLayerValid() }
+    }
     var layerFolders: [DXFLayerFolder] = []
+
+    /// There must always be an active layer whenever any layer exists, because new
+    /// geometry is created on the active layer (MAS-157). Keep the current one if
+    /// it still exists; otherwise fall back to the first drawable (non-reference-
+    /// image) layer, or the first layer if all are reference images.
+    private func ensureActiveLayerValid() {
+        guard !layers.isEmpty else {
+            if activeLayerId != nil { activeLayerId = nil }
+            return
+        }
+        if let lid = activeLayerId, layers.contains(where: { $0.id == lid }) { return }
+        let preferred = layers.first(where: { !$0.isReferenceImageLayer }) ?? layers.first
+        activeLayerId = preferred?.id
+    }
     var activeLayerId: String? = nil {
         didSet {
             if let lid = activeLayerId {
@@ -939,6 +1009,14 @@ class AppState {
     /// (e.g. after a multi-file distribute import). The canvas owns the view
     /// size, so it computes the actual fit — see `DxfCanvasView.fitToContent`.
     var fitRequestToken: Int = 0
+    /// Bumped to request a step zoom centered on the viewport. `zoomStepFactor`
+    /// carries the multiplier (>1 zooms in, <1 zooms out). The canvas owns the
+    /// view size and applies the center-preserving math — see `DxfCanvasView`.
+    var zoomStepToken: Int = 0
+    var zoomStepFactor: CGFloat = 1.0
+    /// Step-zoom helpers used by the View menu (Zoom In / Zoom Out).
+    func zoomIn()  { zoomStepFactor = 1.25; zoomStepToken += 1 }
+    func zoomOut() { zoomStepFactor = 0.8;  zoomStepToken += 1 }
     /// Bumped to request opening the Documentation window from a non-View
     /// context (e.g. the search palette). ContentView observes it.
     var openDocsToken: Int = 0
@@ -950,9 +1028,16 @@ class AppState {
     // Offset always starts at 12 mm — reset on entering the tool (see currentTool
     // didSet) so it never inherits the previous session's distance.
     var offsetDistance: Double = 12.0
-    var offsetSide: String = "left"
+    // Default to an outward offset: inward by default confuses users when the
+    // shape is smaller than the 12 mm distance (MAS-157).
+    var offsetSide: String = "outer"
     
     var holeOffsetDistance: Double = 2.0
+    /// True while the user is dragging the sewing-margin handle. During the drag
+    /// the live preview shows an instant native offset path instead of running
+    /// the (slow) two-call Python hole pipeline on every frame; the accurate hole
+    /// pattern is computed once when the drag ends.
+    var isDraggingHoleOffset: Bool = false
     var holeDiameter: Double = 1.0
     var holeSpacing: Double = 4.0
     // Distribution: "spacing" fills the contour at a fixed pitch (variable spacing
@@ -1068,6 +1153,24 @@ class AppState {
     var patternCountY: Int = 1
     var patternSpacingX: Double = 20
     var patternSpacingY: Double = 20
+    // How the linear distance is specified (MAS-157):
+    //  - "spacing": the gap between adjacent copies (patternSpacingX/Y).
+    //  - "extent":  the total span from the first to the last copy
+    //               (patternExtentX/Y); spacing is derived as extent/(count-1).
+    var patternDistanceMode: String = "spacing"  // "spacing" | "extent"
+    var patternExtentX: Double = 40
+    var patternExtentY: Double = 40
+
+    /// Effective X spacing for the grid, honoring the distance mode (MAS-157).
+    var effectivePatternSpacingX: Double {
+        guard patternDistanceMode == "extent" else { return patternSpacingX }
+        return patternCountX > 1 ? patternExtentX / Double(patternCountX - 1) : 0
+    }
+    /// Effective Y spacing for the grid, honoring the distance mode (MAS-157).
+    var effectivePatternSpacingY: Double {
+        guard patternDistanceMode == "extent" else { return patternSpacingY }
+        return patternCountY > 1 ? patternExtentY / Double(patternCountY - 1) : 0
+    }
     var patternCircCount: Int = 6
     var patternCircAngle: Double = 360
     var patternPivotModel: CGPoint? = nil      // nil = selection bbox center
@@ -1594,6 +1697,15 @@ class AppState {
     /// faintly snap to 90° increments. Indicators only show when this is on.
     var snapEnabled: Bool = true
 
+    /// True while the Shift key is held down. Holding Shift momentarily inverts
+    /// snapping (off→on or on→off) for as long as it's held, without changing the
+    /// persistent `snapEnabled` setting (MAS-157).
+    var shiftSnapHeld: Bool = false
+
+    /// The snapping state the canvas should actually honor right now: the
+    /// persistent setting, inverted while Shift is held (MAS-157).
+    var snapActive: Bool { shiftSnapHeld ? !snapEnabled : snapEnabled }
+
     /// §6: when on, measurement/ruler lines are baked into exports as dashed
     /// construction lines (CONSTRUCTION layer, no dimension text). Persisted
     /// per-project in `.stch`; off by default for new projects.
@@ -2065,7 +2177,22 @@ class AppState {
     // Status/Progress
     var isProcessing: Bool = false
     var progress: Double = 0.0
-    var errorMessage: String?
+    // The floating error banner auto-dismisses 10s after it appears so a stale
+    // error never lingers over the canvas (MAS-157). Each new message restarts
+    // the timer; manually clearing it cancels the pending dismissal.
+    private var errorDismissWorkItem: DispatchWorkItem?
+    var errorMessage: String? {
+        didSet {
+            errorDismissWorkItem?.cancel()
+            errorDismissWorkItem = nil
+            guard errorMessage != nil else { return }
+            let work = DispatchWorkItem { [weak self] in
+                self?.errorMessage = nil
+            }
+            errorDismissWorkItem = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 10, execute: work)
+        }
+    }
     
     // History & Parametric Selection
     var undoStack: [HistoryState] = []
@@ -2092,7 +2219,8 @@ class AppState {
             parametricShapes: parametricShapes,
             cornerSnapPoints: cornerSnapPoints,
             penPaths: penPaths,
-            bodyOffsets: bodyOffsets
+            bodyOffsets: bodyOffsets,
+            layers: layers
         )
         undoStack.append(state)
         redoStack.removeAll()
@@ -2121,7 +2249,8 @@ class AppState {
             parametricShapes: parametricShapes,
             cornerSnapPoints: cornerSnapPoints,
             penPaths: penPaths,
-            bodyOffsets: bodyOffsets
+            bodyOffsets: bodyOffsets,
+            layers: layers
         )
         redoStack.append(currentState)
 
@@ -2132,6 +2261,10 @@ class AppState {
         self.parametricShapes = previousState.parametricShapes
         self.cornerSnapPoints = previousState.cornerSnapPoints
         self.penPaths = previousState.penPaths
+        // Restore the layer list before reloadDXF runs. reloadDXF only *appends*
+        // layers it finds in the DXF, so without this an operation-created layer
+        // (e.g. SEWING_HOLES) would linger after its geometry is undone.
+        self.layers = previousState.layers
         self.selectedMeasurement = nil
         self.applyRestoredBodyOffsets(previousState.bodyOffsets)
         self.hasUnsavedChanges = true
@@ -2176,7 +2309,8 @@ class AppState {
             parametricShapes: parametricShapes,
             cornerSnapPoints: cornerSnapPoints,
             penPaths: penPaths,
-            bodyOffsets: bodyOffsets
+            bodyOffsets: bodyOffsets,
+            layers: layers
         )
         undoStack.append(currentState)
 
@@ -2187,6 +2321,7 @@ class AppState {
         self.parametricShapes = nextState.parametricShapes
         self.cornerSnapPoints = nextState.cornerSnapPoints
         self.penPaths = nextState.penPaths
+        self.layers = nextState.layers
         self.selectedMeasurement = nil
         self.applyRestoredBodyOffsets(nextState.bodyOffsets)
         self.hasUnsavedChanges = true
@@ -3849,6 +3984,12 @@ class AppState {
         guard index >= 0 && index < verts.count else { return }
         verts[index] = [Double(point.x), Double(point.y)]
         entities[idx] = entities[idx].withVertices(verts)
+        // Keep a co-located parametric base in lock-step so its corner handles
+        // track the drag instead of lingering at the pre-drag position (MAS-157).
+        if var model = parametricShapes[handle], model.base.count == verts.count {
+            model.base[index] = [Double(point.x), Double(point.y)]
+            parametricShapes[handle] = model
+        }
         hasUnsavedChanges = true
     }
 
@@ -3922,6 +4063,14 @@ class AppState {
         }
         if let sm = selectedMeasurement, let h = sm.entityHandle, rectHandles.contains(h) {
             selectedMeasurement = nil
+        }
+        // Drop the parametric metadata too (MAS-157). Otherwise the corner boxes
+        // keep being drawn from the stale parametric `base` (so a dragged corner
+        // leaves its box behind), and a later fillet click rebuilds from that old
+        // base — snapping the freely-edited shape back into a rectangle.
+        for h in rectHandles {
+            parametricShapes.removeValue(forKey: h)
+            cornerSnapPoints.removeValue(forKey: h)
         }
         hasUnsavedChanges = true
         logEntries.append(LogEntry(action: "Expand", details: "Converted rectangle to editable polyline"))
@@ -4102,6 +4251,7 @@ class AppState {
         self.parametricShapes = state.parametricShapes
         self.cornerSnapPoints = state.cornerSnapPoints
         self.penPaths = state.penPaths
+        self.layers = state.layers
         self.selectedMeasurement = nil
         self.hasUnsavedChanges = true
         Task {
@@ -4277,7 +4427,13 @@ class AppState {
 
     /// Flip the offset to the other side of the source geometry (MAS-109).
     func flipOffsetDirection() {
-        offsetSide = (offsetSide == "left") ? "right" : "left"
+        // Outward ↔ inward. Tolerate legacy "left"/"right" values too (MAS-157).
+        switch offsetSide {
+        case "outer": offsetSide = "inner"
+        case "inner": offsetSide = "outer"
+        case "left": offsetSide = "right"
+        default: offsetSide = "outer"
+        }
         updateLivePreview()
     }
 
@@ -4829,6 +4985,19 @@ class AppState {
             return
         }
 
+        // While the margin handle is being dragged, skip the slow Python hole
+        // pipeline and show an instant native offset path so the ghost tracks the
+        // handle in real time. The full hole pattern is computed on drag-end.
+        if isDraggingHoleOffset {
+            let selected = entities.filter { selectedHandles.contains($0.handle) }
+            self.previewEntities = OffsetGeometry.preview(
+                selected: selected,
+                distance: holeOffsetDistance,
+                side: holeSide
+            )
+            return
+        }
+
         previewTask = Task {
             do {
                 let tempDir = sessionTempDirectory
@@ -4964,7 +5133,75 @@ class AppState {
         decodedImageCache[layer.id] = image
         return image
     }
-    
+
+    // MARK: - Reference image background removal (MAS-157)
+
+    /// Whether the active reference-image layer currently has its background
+    /// removed (drives the Restore Background button's visibility).
+    var activeLayerBackgroundRemoved: Bool {
+        activeLayer?.isReferenceImageLayer == true && (activeLayer?.backgroundRemoved ?? false)
+    }
+
+    /// Removes the background from the active reference image *in place* so the
+    /// user sees the cut-out on the canvas. The original is stashed so it can be
+    /// restored later. Safe to call repeatedly (re-runs on the original).
+    func removeActiveLayerBackground() {
+        guard let activeL = activeLayer, activeL.isReferenceImageLayer,
+              let lid = activeLayer?.id,
+              let layerIdx = layers.firstIndex(where: { $0.id == lid }) else { return }
+        // Always operate on the pristine original so toggling never compounds.
+        let original = activeL.refImageOriginalBase64 ?? activeL.refImageBase64
+        guard let original, let imgData = Data(base64Encoded: original) else { return }
+
+        let tempDir = sessionTempDirectory
+        let inURL = tempDir.appendingPathComponent("bgrm_in_\(lid).png")
+        let outURL = tempDir.appendingPathComponent("bgrm_out_\(lid).png")
+        isProcessing = true
+        Task {
+            defer { Task { @MainActor in self.isProcessing = false } }
+            do {
+                try imgData.write(to: inURL)
+                let res = try await PythonBridge.shared.run(
+                    module: "dxf_ops", op: "remove_bg_image",
+                    args: ["input": inURL.path, "output": outURL.path]
+                )
+                guard res["status"] as? String == "ok",
+                      let outData = try? Data(contentsOf: outURL) else {
+                    await MainActor.run { self.errorMessage = "Background removal failed." }
+                    return
+                }
+                let b64 = outData.base64EncodedString()
+                await MainActor.run {
+                    guard let idx = self.layers.firstIndex(where: { $0.id == lid }) else { return }
+                    if self.layers[idx].refImageOriginalBase64 == nil {
+                        self.layers[idx].refImageOriginalBase64 = original
+                    }
+                    self.layers[idx].refImageBase64 = b64
+                    self.layers[idx].backgroundRemoved = true
+                    self.decodedImageCache.removeValue(forKey: lid)
+                    self.hasUnsavedChanges = true
+                    self.logEntries.append(LogEntry(action: "Remove Background", details: "Removed background on \(self.layers[idx].name)"))
+                }
+                try? FileManager.default.removeItem(at: inURL)
+                try? FileManager.default.removeItem(at: outURL)
+            } catch {
+                await MainActor.run { self.errorMessage = "Background removal failed: \(error.localizedDescription)" }
+            }
+        }
+    }
+
+    /// Puts the original (with-background) reference image back (MAS-157).
+    func restoreActiveLayerBackground() {
+        guard let lid = activeLayer?.id,
+              let idx = layers.firstIndex(where: { $0.id == lid }),
+              let original = layers[idx].refImageOriginalBase64 else { return }
+        layers[idx].refImageBase64 = original
+        layers[idx].backgroundRemoved = false
+        decodedImageCache.removeValue(forKey: lid)
+        hasUnsavedChanges = true
+        logEntries.append(LogEntry(action: "Restore Background", details: "Restored background on \(layers[idx].name)"))
+    }
+
     func clearDecodedImageCache() {
         decodedImageCache.removeAll()
     }
@@ -7895,6 +8132,8 @@ class AppState {
         self.editingTextInsert = insert
         self.editingTextHeight = height
         self.editingTextWidth = width
+        self.editingTextBoxHeight = height
+        self.editingTextWidthFactor = 1.0
         // Seed the live styling from the Text tool's current defaults so the new
         // text inherits the font/B/I/U the user picked in the panel (MAS-134/135).
         self.editingTextFont = textToolFont
@@ -7917,6 +8156,11 @@ class AppState {
         self.editingTextItalic = entity.italic ?? false
         self.editingTextUnderline = entity.underline ?? false
         self.editingTextCharSpacing = entity.charSpacing ?? 0.0
+        self.editingTextWidthFactor = entity.widthFactor ?? 1.0
+        // Re-editing has no freshly-drawn box; fall back to legacy sizing unless a
+        // fit mode is explicitly chosen (MAS-157).
+        self.editingTextBoxHeight = 0.0
+        self.textFitMode = "none"
         // Estimate the box width from the longest line (cf. AGENTS Rule 3).
         let longest = (entity.text ?? "").components(separatedBy: "\n").map { $0.count }.max() ?? 0
         self.editingTextWidth = Double(longest) * (entity.height ?? 5.0) * 0.6
@@ -7932,7 +8176,11 @@ class AppState {
         guard isEditingText else { return }
         let text = editingTextString.isEmpty ? "Label" : editingTextString
         let insert = editingTextInsert
-        let height = editingTextHeight
+        // Fit the text to its drawn bounding box per the chosen mode; "none"
+        // keeps the legacy sizing and preserves any existing warp (MAS-157).
+        let metrics = fittedTextMetrics()
+        let height = textFitMode == "none" ? editingTextHeight : metrics.height
+        let widthFactor = textFitMode == "none" ? editingTextWidthFactor : metrics.widthFactor
         let handle = editingTextHandle
         // Snapshot the live styling so the entity and Python args stay in sync.
         let font = editingTextFont
@@ -7949,6 +8197,7 @@ class AppState {
             e.italic = italic ? true : nil
             e.underline = underline ? true : nil
             e.charSpacing = charSpacing != 0 ? charSpacing : nil
+            e.widthFactor = abs(widthFactor - 1.0) > 1e-6 ? widthFactor : nil
             return e
         }
         let styleArgs: [String: Any] = [
@@ -7956,7 +8205,8 @@ class AppState {
             "bold": bold,
             "italic": italic,
             "underline": underline,
-            "char_spacing": charSpacing
+            "char_spacing": charSpacing,
+            "width_factor": widthFactor
         ]
 
         self.isEditingText = false

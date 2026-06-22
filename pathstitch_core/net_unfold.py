@@ -873,6 +873,11 @@ def op_unfold_connected(args: Dict[str, Any]) -> Dict[str, Any]:
     whole_body = bool(args.get("whole_body", False))
     anchor_arg = args.get("anchor") or {}
     distortion_mode = args.get("distortion_mode", "conformal")
+    # The curved-face distortion heatmap is drawn as a dense mesh of filled
+    # triangles on the DISTORTION layer. Those "facelet" triangles clutter the
+    # exported cut file when opened in a DXF reader, so they are excluded by
+    # default and only emitted when explicitly requested (MAS-157).
+    include_distortion = bool(args.get("include_distortion", False))
     forced_seams_list = args.get("forced_seams") or []
     forbidden_seams_list = args.get("forbidden_seams") or []
 
@@ -976,6 +981,10 @@ def op_unfold_connected(args: Dict[str, Any]) -> Dict[str, Any]:
                 msp.add_circle((cx + start_x, cy + start_y), r,
                                dxfattribs={"layer": layer})
             elif kind == "solid":
+                # Distortion facelet triangles: skip unless explicitly requested
+                # so the DXF stays a clean set of cut/crease lines (MAS-157).
+                if not include_distortion:
+                    continue
                 pts, aci = payload
                 translated = [(x + start_x, y + start_y) for (x, y) in pts]
                 msp.add_solid(translated, dxfattribs={"layer": layer, "color": aci})

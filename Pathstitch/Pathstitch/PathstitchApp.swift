@@ -342,6 +342,23 @@ struct PathstitchApp: App {
                 .disabled((NSApp.activeAppState?.selectedHandles.isEmpty ?? true))
             }
 
+            // View ▸ Zoom controls. The 2D canvas owns the view size, so these
+            // bump request tokens it observes (zoom about the viewport center,
+            // or fit-all). No `.disabled` here: NSApp.activeAppState isn't an
+            // observable source, so the command builder can't track it — it reads
+            // nil at build time and the items would render permanently greyed.
+            // The actions resolve activeAppState at click time and no-op without
+            // a document, matching the Tools/Modify menu pattern.
+            CommandGroup(before: .sidebar) {
+                Button("Zoom In") { NSApp.activeAppState?.zoomIn() }
+                    .keyboardShortcut("=", modifiers: [.command])
+                Button("Zoom Out") { NSApp.activeAppState?.zoomOut() }
+                    .keyboardShortcut("-", modifiers: [.command])
+                Button("Zoom to Fit") { NSApp.activeAppState?.fitRequestToken += 1 }
+                    .keyboardShortcut("0", modifiers: [.command])
+                Divider()
+            }
+
             // Custom item to toggle logs & learn mode
             CommandGroup(after: .sidebar) {
                 Button(NSApp.activeAppState?.isLogTrayExpanded == true ? "Hide Logs" : "Show Logs") {

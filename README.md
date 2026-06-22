@@ -321,3 +321,11 @@ Issues and ideas are welcome via the tracker.
 Built with ❤️ by **Mason Chen**.
 
 <sub>If Pathstitch saves you time, you can [buy me a coffee](https://buymeacoffee.com/masonchen). ☕</sub>
+---
+
+## License
+
+Pathstitch is licensed under the **GNU General Public License v3.0** — see [LICENSE](LICENSE).
+
+It uses [Potrace](https://potrace.sourceforge.net/) (GPL) for raster-to-vector tracing, which is why
+Pathstitch as a whole is distributed under the GPLv3.

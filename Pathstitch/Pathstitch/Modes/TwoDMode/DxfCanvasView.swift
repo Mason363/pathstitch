@@ -16,6 +16,12 @@ struct PenAnchor: Equatable {
 struct DxfCanvasView: View {
     var state: AppState
 
+    /// Screen-space pick radius (pt) for clicking a thin stroke to select it,
+    /// shared by single-click select and the right-click context menu so both
+    /// feel equally forgiving. Interior clicks on closed shapes are additionally
+    /// covered by findNearestEntity's containment fallback (MAS-116).
+    static let selectionHitTolerance: CGFloat = 20.0
+
     // Pen tool (MAS-94): anchors placed so far, plus whether the current
     // press is dragging out a smooth handle.
     @State private var penAnchors: [PenAnchor] = []
@@ -205,6 +211,21 @@ struct DxfCanvasView: View {
                 .onChange(of: state.fitRequestToken) { _, _ in
                     fitToContent(viewSize: geo.size)
                 }
+                .onChange(of: state.zoomStepToken) { _, _ in
+                    // Step zoom from the View menu — zoom about the viewport
+                    // center, reusing the same offset math as the pinch handler.
+                    let oldScale = state.canvasScale
+                    let newScale = max(0.01, min(500.0, oldScale * state.zoomStepFactor))
+                    guard newScale != oldScale else { return }
+                    let center = CGPoint(x: geo.size.width / 2, y: geo.size.height / 2)
+                    let mPt = toModel(point: center, size: geo.size, bounds: modelBounds)
+                    let scaleDiff = newScale - oldScale
+                    state.canvasScale = newScale
+                    state.canvasOffset = CGSize(
+                        width: state.canvasOffset.width - mPt.x * scaleDiff,
+                        height: state.canvasOffset.height + mPt.y * scaleDiff
+                    )
+                }
                 .onChange(of: state.isEditingText) { _, editing in
                     isTextEditorFocused = editing
                 }
@@ -364,7 +385,7 @@ struct DxfCanvasView: View {
                         onRightClick: { pt in
                             // Select the shape under the cursor, then open the menu (MAS-62).
                             let modelPt = toModel(point: pt, size: geo.size, bounds: modelBounds)
-                            if let nearest = findNearestEntity(modelPt: modelPt, maxDistanceScreen: 16.0, size: geo.size, bounds: modelBounds) {
+                            if let nearest = findNearestEntity(modelPt: modelPt, maxDistanceScreen: Self.selectionHitTolerance, size: geo.size, bounds: modelBounds) {
                                 if !state.selectedHandles.contains(nearest.handle) {
                                     state.selectedHandles = [nearest.handle]
                                 }
@@ -405,6 +426,7 @@ struct DxfCanvasView: View {
                 
                 canvasOverlays(size: geo.size, modelBounds: modelBounds)
                 coordinatesOverlay()
+                activeToolPill()
                 editingTextFieldsOverlay(size: geo.size, modelBounds: modelBounds)
             }
             .coordinateSpace(name: "canvas")
@@ -773,12 +795,21 @@ struct DxfCanvasView: View {
                     .gesture(
                         DragGesture(coordinateSpace: .named("canvas"))
                             .onChanged { val in
+                                // Fast path: show an instant native offset ghost
+                                // while dragging instead of the slow Python hole
+                                // pipeline (see updateLivePreview).
+                                state.isDraggingHoleOffset = true
                                 let modelPt = toModel(point: val.location, size: viewSize, bounds: modelBounds)
                                 let vecX = modelPt.x - handleInfo.basePoint.x
                                 let vecY = modelPt.y - handleInfo.basePoint.y
                                 let proj = vecX * handleInfo.normal.x + vecY * handleInfo.normal.y
                                 state.holeOffsetDistance = max(0.0, abs(proj))
                                 state.holeSide = proj >= 0 ? "left" : "right"
+                                state.updateLivePreview()
+                            }
+                            .onEnded { _ in
+                                // Drag finished — compute the accurate hole pattern once.
+                                state.isDraggingHoleOffset = false
                                 state.updateLivePreview()
                             }
                     )
@@ -909,6 +940,34 @@ struct DxfCanvasView: View {
                 }
             }
         }
+    }
+
+    /// Always-on pill naming the active tool, pinned to the canvas top-left, so
+    /// the current operation is identifiable at a glance (the toolbar only shows
+    /// icons). Non-interactive so it never intercepts canvas input.
+    @ViewBuilder
+    private func activeToolPill() -> some View {
+        VStack {
+            HStack {
+                HStack(spacing: 5) {
+                    Image(systemName: state.currentTool.icon)
+                        .font(.system(size: 10, weight: .semibold))
+                    Text(state.currentTool.rawValue.uppercased())
+                        .font(PlasticityFont.label)
+                        .tracking(0.5)
+                }
+                .foregroundColor(.text_secondary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Color.bg_panel.opacity(0.9))
+                .cornerRadius(4)
+                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_subtle, lineWidth: 1))
+                Spacer()
+            }
+            Spacer()
+        }
+        .padding(12)
+        .allowsHitTesting(false)
     }
 
     @ViewBuilder
@@ -1320,7 +1379,7 @@ struct DxfCanvasView: View {
             let snapped = snappedMouseLocation(size: size, bounds: modelBounds)
             let endModel = snapped.point
             let r = Double(hypot(centerModel.x - endModel.x, centerModel.y - endModel.y))
-            let rot = Double(atan2(endModel.y - centerModel.y, endModel.x - centerModel.x))
+            let rot = snappedPolygonRotation(Double(atan2(endModel.y - centerModel.y, endModel.x - centerModel.x)), sides: state.polygonSides)
             let pts = polygonPoints(center: centerModel, radius: r, rotation: rot, sides: state.polygonSides)
             if pts.count >= 3 {
                 var path = SwiftUI.Path()
@@ -1449,7 +1508,7 @@ struct DxfCanvasView: View {
         }
 
         // Draw Snapping Hover Indicator (only when snapping is on)
-        if state.snapEnabled, let hover = hoverCoords {
+        if state.snapActive, let hover = hoverCoords {
             let hoverScreen = toScreen(dx: Double(hover.x), dy: Double(hover.y), size: size, bounds: modelBounds)
             if let snap = getSnappedPoint(for: hoverScreen, size: size, bounds: modelBounds) {
                 let snapPt = snap.snappedScreenPt
@@ -2535,7 +2594,7 @@ struct DxfCanvasView: View {
                     } else {
                         // First click: set the start point and wait for the second.
                         let startPt = val.startLocation
-                        if state.snapEnabled, let snap = getSnappedPoint(for: startPt, size: size, bounds: modelBounds) {
+                        if state.snapActive, let snap = getSnappedPoint(for: startPt, size: size, bounds: modelBounds) {
                             sketchStartPoint = snap.snappedModelPt
                         } else {
                             sketchStartPoint = toModel(point: startPt, size: size, bounds: modelBounds)
@@ -2561,7 +2620,7 @@ struct DxfCanvasView: View {
             // reshape a bezier handle (parametric pen lines).
             if let ai = penEditDragAnchor, ai < penAnchors.count {
                 var mp = toModel(point: val.location, size: size, bounds: modelBounds)
-                if state.snapEnabled, let snap = getSnappedPoint(for: val.location, size: size, bounds: modelBounds) {
+                if state.snapActive, let snap = getSnappedPoint(for: val.location, size: size, bounds: modelBounds) {
                     mp = snap.snappedModelPt
                 }
                 let old = penAnchors[ai].point
@@ -2593,7 +2652,7 @@ struct DxfCanvasView: View {
             // Rectangles don't deform — they stay rectangular until Expand (MAS-62).
             if !editingVertexIsRect {
                 var modelPt = toModel(point: val.location, size: size, bounds: modelBounds)
-                if state.snapEnabled, let snap = getSnappedPoint(for: val.location, size: size, bounds: modelBounds) {
+                if state.snapActive, let snap = getSnappedPoint(for: val.location, size: size, bounds: modelBounds) {
                     modelPt = snap.snappedModelPt
                 }
                 state.setEntityVertexLocal(handle: vHandle, index: editingVertexIndex, to: modelPt)
@@ -2976,7 +3035,7 @@ struct DxfCanvasView: View {
                     } else if state.currentTool == .sketchPolygon {
                         // Bake the polygon as a closed, editable LWPOLYLINE (MAS-118).
                         let r = Double(hypot(start.x - end.x, start.y - end.y))
-                        let rot = Double(atan2(end.y - start.y, end.x - start.x))
+                        let rot = snappedPolygonRotation(Double(atan2(end.y - start.y, end.x - start.x)), sides: state.polygonSides)
                         let pts = polygonPoints(center: start, radius: r, rotation: rot, sides: state.polygonSides)
                         if pts.count >= 3 {
                             let coords = pts.map { [Double($0.x), Double($0.y)] }
@@ -3105,7 +3164,7 @@ struct DxfCanvasView: View {
                 } else {
                     state.selectedMeasurement = nil
 
-                    if let nearest = findNearestEntity(modelPt: clickedModelPt, maxDistanceScreen: 12.0, size: size, bounds: modelBounds) {
+                    if let nearest = findNearestEntity(modelPt: clickedModelPt, maxDistanceScreen: Self.selectionHitTolerance, size: size, bounds: modelBounds) {
                         if state.chainSelectionEnabled {
                             state.triggerChainSelect(seedHandle: nearest.handle)
                         } else {
@@ -4137,12 +4196,12 @@ struct DxfCanvasView: View {
     
     func snappedMouseLocation(size: CGSize, bounds: CGRect) -> (point: CGPoint, snap: SnapResult?) {
         // A real geometry snap (endpoint/midpoint/centre) under the cursor wins.
-        if state.snapEnabled, let snap = getSnappedPoint(for: mouseLocation, size: size, bounds: bounds) {
+        if state.snapActive, let snap = getSnappedPoint(for: mouseLocation, size: size, bounds: bounds) {
             return (snap.snappedModelPt, snap)
         }
         var modelPt = toModel(point: mouseLocation, size: size, bounds: bounds)
         // Otherwise faintly snap a line/ruler segment to 90° increments.
-        if state.snapEnabled, let ref = orthoReferencePoint() {
+        if state.snapActive, let ref = orthoReferencePoint() {
             modelPt = orthoConstrained(from: ref, to: modelPt)
         }
         return (modelPt, nil)
@@ -4173,11 +4232,11 @@ struct DxfCanvasView: View {
     /// Snapped model point for a screen click (placement), honouring `snapEnabled`
     /// and ortho relative to an optional reference (e.g. the ruler's first point).
     private func snappedModelPoint(forScreen point: CGPoint, ref: CGPoint?, size: CGSize, bounds: CGRect) -> CGPoint {
-        if state.snapEnabled, let s = getSnappedPoint(for: point, size: size, bounds: bounds) {
+        if state.snapActive, let s = getSnappedPoint(for: point, size: size, bounds: bounds) {
             return s.snappedModelPt
         }
         var m = toModel(point: point, size: size, bounds: bounds)
-        if state.snapEnabled, let ref = ref {
+        if state.snapActive, let ref = ref {
             m = orthoConstrained(from: ref, to: m)
         }
         return m
@@ -4543,10 +4602,17 @@ struct DxfCanvasView: View {
                 // downward from the insert point.
                 let ascender = nsFont.ascender
                 let rotDeg = ent.rotation ?? 0.0
-                if abs(rotDeg) > 0.001 {
+                // Horizontal warp: stretch glyphs about the insert point (MAS-157).
+                let wf = CGFloat(ent.widthFactor ?? 1.0)
+                if abs(rotDeg) > 0.001 || abs(wf - 1.0) > 0.001 {
                     context.drawLayer { ctx in
                         ctx.translateBy(x: sc.x, y: sc.y)
-                        ctx.rotate(by: Angle(degrees: -rotDeg))  // CCW (DXF) → screen (Y-down)
+                        if abs(rotDeg) > 0.001 {
+                            ctx.rotate(by: Angle(degrees: -rotDeg))  // CCW (DXF) → screen (Y-down)
+                        }
+                        if abs(wf - 1.0) > 0.001 {
+                            ctx.scaleBy(x: wf, y: 1.0)
+                        }
                         ctx.draw(resolvedText, at: CGPoint(x: 0, y: -ascender), anchor: .topLeading)
                     }
                 } else {
@@ -4752,9 +4818,9 @@ struct DxfCanvasView: View {
 
         if state.patternMode == "rectangular" {
             let nx = max(1, state.patternCountX), ny = max(1, state.patternCountY)
-            let sx = state.patternSpacingX * Double(state.canvasScale)
+            let sx = state.effectivePatternSpacingX * Double(state.canvasScale)
             // Screen Y is inverted relative to model Y, so a +Y model step moves up.
-            let sy = -state.patternSpacingY * Double(state.canvasScale)
+            let sy = -state.effectivePatternSpacingY * Double(state.canvasScale)
             for i in 0..<nx {
                 for j in 0..<ny {
                     if i == 0 && j == 0 { continue }
@@ -4917,6 +4983,15 @@ struct DxfCanvasView: View {
 
     /// Vertices of a regular polygon (MAS-118): `sides` points on a circle of
     /// `radius` about `center`, with the first vertex at angle `rotation`.
+    /// When snapping is on, snap a polygon's orientation to its natural rotational
+    /// increment (360° / sides) so it lands on "straight" angles instead of any
+    /// arbitrary tilt the cursor produces (MAS-157).
+    private func snappedPolygonRotation(_ rot: Double, sides: Int) -> Double {
+        guard state.snapActive, sides >= 3 else { return rot }
+        let inc = (2.0 * Double.pi) / Double(sides)
+        return (rot / inc).rounded() * inc
+    }
+
     private func polygonPoints(center: CGPoint, radius: Double, rotation: Double, sides: Int) -> [CGPoint] {
         let n = max(3, min(64, sides))
         guard radius > 1e-6 else { return [] }

@@ -392,6 +392,10 @@ def op_list_entities(args: Dict[str, Any]) -> Dict[str, Any]:
                 data["start"] = [ent.dxf.insert.x, ent.dxf.insert.y]
                 data["height"] = ent.dxf.height
                 data["rotation"] = float(getattr(ent.dxf, "rotation", 0.0) or 0.0)
+                # Horizontal warp factor (MAS-157): native DXF TEXT width factor.
+                wf = float(getattr(ent.dxf, "width", 1.0) or 1.0)
+                if abs(wf - 1.0) > 1e-6:
+                    data["widthFactor"] = wf
                 # Rich styling (font/B/I/U/spacing/multiline) lives in XDATA so it
                 # survives the .dxf round-trip and .stch saves (MAS-134/135).
                 xd = _get_text_xdata(ent)
@@ -3216,6 +3220,41 @@ def op_trace_raster(args: Dict[str, Any]) -> Dict[str, Any]:
     except Exception as e:
         return {"status": "error", "message": f"Failed to trace image: {str(e)}"}
 
+def op_remove_bg_image(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Produce a background-removed copy of a raster image (RGBA PNG with a
+    transparent background) so the UI can show the user what the removal looks
+    like. Uses rembg when available; falls back to a white/near-white chroma key
+    so the feature still does something useful without the model (MAS-157)."""
+    input_path = args.get("input")
+    output_path = args.get("output")
+    if not input_path or not os.path.exists(input_path):
+        return {"status": "error", "message": f"Input file not found: {input_path}"}
+    if not output_path:
+        return {"status": "error", "message": "Output path must be specified."}
+    try:
+        from PIL import Image
+        import numpy as np
+        img = Image.open(input_path).convert("RGBA")
+        used_rembg = False
+        try:
+            import rembg
+            img = rembg.remove(img).convert("RGBA")
+            used_rembg = True
+        except Exception as e:
+            import sys
+            sys.stderr.write(f"Warning: rembg unavailable, using chroma fallback: {str(e)}\n")
+            # Fallback: knock out near-white border-connected background.
+            arr = np.array(img)
+            rgb = arr[:, :, :3].astype(np.int32)
+            near_white = (rgb[:, :, 0] > 240) & (rgb[:, :, 1] > 240) & (rgb[:, :, 2] > 240)
+            arr[near_white, 3] = 0
+            img = Image.fromarray(arr, "RGBA")
+        img.save(output_path, "PNG")
+        return {"status": "ok", "used_rembg": used_rembg}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to remove background: {str(e)}"}
+
+
 def op_commit_trace(args: Dict[str, Any]) -> Dict[str, Any]:
     input_path = args.get("input")
     output_path = args.get("output")
@@ -3908,6 +3947,7 @@ def op_add_text(args: Dict[str, Any]) -> Dict[str, Any]:
     italic = bool(args.get("italic", False))
     underline = bool(args.get("underline", False))
     char_spacing = float(args.get("char_spacing", 0.0) or 0.0)
+    width_factor = float(args.get("width_factor", 1.0) or 1.0)
     has_style = bool(font or bold or italic or underline or char_spacing or ("\n" in text))
 
     if not input_path or not os.path.exists(input_path):
@@ -3927,6 +3967,8 @@ def op_add_text(args: Dict[str, Any]) -> Dict[str, Any]:
         flat = text.replace("\n", " ")
         txt_ent = msp.add_text(flat, dxfattribs={"height": height, "layer": layer})
         txt_ent.dxf.insert = (float(insert[0]), float(insert[1]))
+        if abs(width_factor - 1.0) > 1e-6:
+            txt_ent.dxf.width = width_factor
         if has_style:
             _set_text_xdata(txt_ent, doc, font=font, bold=bold, italic=italic,
                             underline=underline, char_spacing=char_spacing, text=text)
@@ -3970,6 +4012,8 @@ def op_update_text(args: Dict[str, Any]) -> Dict[str, Any]:
             ent.dxf.text = text.replace("\n", " ")
             if height is not None:
                 ent.dxf.height = float(height)
+            if args.get("width_factor") is not None:
+                ent.dxf.width = float(args.get("width_factor") or 1.0)
             if has_style:
                 _set_text_xdata(ent, doc, font=font, bold=bold, italic=italic,
                                 underline=underline, char_spacing=char_spacing, text=text)
@@ -5841,6 +5885,7 @@ OPERATIONS = {
     "export_pdf": op_export_pdf,
     "import_pdf": op_import_pdf,
     "trace_raster": op_trace_raster,
+    "remove_bg_image": op_remove_bg_image,
     "commit_trace": op_commit_trace,
     "parse_psd": op_parse_psd,
     "translate_entities": op_translate_entities,
