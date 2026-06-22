@@ -1329,6 +1329,20 @@ class AppState {
     /// Boolean combine is offered when 2+ qualifying closed paths are selected.
     var selectionCanBoolean: Bool { watertightSelectionCount >= 2 }
 
+    // MARK: - Explode compound paths (MAS-145)
+
+    /// Explode is offered when the selection contains a closed polyline — the
+    /// only entity that can encode multiple loops (a self-crossing figure-eight
+    /// or a self-touching shape-with-hole). The backend splits genuine compounds
+    /// and reports a friendly no-op for simple single loops.
+    var selectionHasClosedPolyline: Bool {
+        entities.contains {
+            selectedHandles.contains($0.handle) &&
+            ["LWPOLYLINE", "POLYLINE"].contains($0.type.uppercased()) &&
+            $0.closed == true
+        }
+    }
+
     // MARK: - Convert Lines (MAS-58)
 
     /// The seven supported line styles, in menu order.
@@ -6675,6 +6689,59 @@ class AppState {
                     self.reloadDXF()
                     self.selectedHandles = Set(newHandles)
                     self.logAction("Combine", details: "\(operation.capitalized) of \(handlesSnapshot.count) paths")
+                }
+            } catch {
+                await MainActor.run {
+                    self.errorMessage = error.localizedDescription
+                    self.isProcessing = false
+                }
+            }
+        }
+    }
+
+    /// Explode the selected compound path(s) into individual closed loops
+    /// (MAS-145) — the inverse of Union. Each multi-loop closed polyline is
+    /// split into one closed polyline per ring; simple single loops are left
+    /// alone with a friendly message.
+    func explodeSelectedCompound() {
+        guard let url = currentFilePath else { return }
+        let candidates = entities.filter {
+            selectedHandles.contains($0.handle) &&
+            ["LWPOLYLINE", "POLYLINE"].contains($0.type.uppercased()) && $0.closed == true
+        }
+        guard !candidates.isEmpty else {
+            errorMessage = "Select a closed path to explode."
+            return
+        }
+        saveToHistory()
+        isProcessing = true
+        let handlesSnapshot = candidates.map { $0.handle }
+        Task {
+            do {
+                let activeDxfURL = sessionTempDirectory.appendingPathComponent("active.dxf")
+                let res = try await PythonBridge.shared.run(
+                    module: "dxf_ops",
+                    op: "explode_compound",
+                    args: [
+                        "input": url.path,
+                        "output": activeDxfURL.path,
+                        "handles": handlesSnapshot
+                    ]
+                )
+                await MainActor.run {
+                    if let status = res["status"] as? String, status != "ok" {
+                        self.errorMessage = (res["message"] as? String) ?? "Explode failed."
+                        self.isProcessing = false
+                        return
+                    }
+                    let data = res["data"] as? [String: Any]
+                    let newHandles = data?["new_handles"] as? [String] ?? []
+                    let kept = data?["kept_handles"] as? [String] ?? []
+                    let exploded = data?["exploded"] as? Int ?? 0
+                    self.currentFilePath = activeDxfURL
+                    self.reloadDXF()
+                    self.selectedHandles = Set(newHandles + kept)
+                    self.logAction("Explode", details: "Split \(exploded) compound path\(exploded == 1 ? "" : "s") into \(newHandles.count) loops")
                 }
             } catch {
                 await MainActor.run {

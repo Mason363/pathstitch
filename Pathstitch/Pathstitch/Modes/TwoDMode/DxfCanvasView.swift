@@ -2084,6 +2084,15 @@ struct DxfCanvasView: View {
                         }
                     }
 
+                    // Explode compound path into individual loops (MAS-145) —
+                    // the counterpart to Union, sits beside Combine.
+                    if state.selectionHasClosedPolyline {
+                        contextMenuDivider()
+                        contextMenuButton("Explode", systemImage: "square.split.diagonal") {
+                            state.explodeSelectedCompound(); contextMenuScreenPos = nil
+                        }
+                    }
+
                     if hasMirrorLink {
                         contextMenuDivider()
                         contextMenuButton("Break Mirror Link", systemImage: "link.badge.plus") {

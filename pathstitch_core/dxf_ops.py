@@ -18,7 +18,7 @@ import ezdxf.colors
 from ezdxf.math import Matrix44
 from ezdxf.path import make_path, Path
 from shapely.geometry import LineString, LinearRing, MultiLineString, Polygon, MultiPolygon, Point as ShapelyPoint
-from shapely.ops import linemerge, unary_union
+from shapely.ops import linemerge, unary_union, polygonize
 
 # --- Text styling persistence (MAS-134 / MAS-135) -------------------------
 # DXF TEXT entities only natively carry a value, height, rotation and a style
@@ -5444,6 +5444,105 @@ def op_boolean(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"status": "error", "message": f"Boolean operation failed: {str(e)}"}
 
 
+def op_explode_compound(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Explode compound paths into individual closed loops (MAS-145) — the
+    inverse of Union. A single closed path whose region resolves to multiple
+    rings (a self-intersecting figure-eight, or a self-touching shape-with-hole)
+    is split into one closed LWPOLYLINE per ring: every exterior shell plus every
+    hole becomes its own independent loop on the same layer. Simple single-loop
+    paths are left untouched and reported as kept.
+    """
+    input_path = args.get("input")
+    output_path = args.get("output")
+    handles = args.get("handles", []) or []
+
+    if not input_path or not os.path.exists(input_path):
+        return {"status": "error", "message": f"Input file not found: {input_path}"}
+    if not output_path:
+        return {"status": "error", "message": "Output path must be specified."}
+    if not handles:
+        return {"status": "error", "message": "Select a compound path to explode."}
+
+    try:
+        doc = ezdxf.readfile(input_path)
+        msp = doc.modelspace()
+        new_handles: List[str] = []
+        kept_handles: List[str] = []
+        exploded = 0
+
+        for h in handles:
+            try:
+                ent = doc.entitydb[h]
+            except KeyError:
+                continue
+            is_closed = bool(getattr(ent, "closed", False) or getattr(ent, "is_closed", False))
+            if ent.dxftype() not in ("LWPOLYLINE", "POLYLINE") or not is_closed:
+                kept_handles.append(h)
+                continue
+
+            geom = entity_to_shapely(ent)
+            if not isinstance(geom, LinearRing):
+                kept_handles.append(h)
+                continue
+
+            # Node the ring at its self-intersections and rebuild the distinct
+            # faces. `buffer(0)` is unsuitable here — it silently drops one lobe
+            # of a self-crossing (figure-eight) ring. polygonize over the noded
+            # linework recovers every closed face instead.
+            faces = list(polygonize(unary_union(LineString(geom.coords))))
+            if not faces:
+                kept_handles.append(h)
+                continue
+
+            rings: List[List[Tuple[float, float]]] = []
+            seen: List[Polygon] = []
+
+            def _add_ring(coords: List[Tuple[float, float]]) -> None:
+                if len(coords) < 4:
+                    return
+                try:
+                    rp = Polygon(coords)
+                except Exception:
+                    return
+                if rp.is_empty:
+                    return
+                for s in seen:
+                    if rp.equals(s):  # shared boundary appears in two faces
+                        return
+                seen.append(rp)
+                rings.append(coords)
+
+            for f in faces:
+                _add_ring(list(f.exterior.coords))
+                for it in f.interiors:
+                    _add_ring(list(it.coords))
+
+            # Only a genuine compound (2+ distinct loops) is worth exploding.
+            if len(rings) <= 1:
+                kept_handles.append(h)
+                continue
+
+            layer = ent.dxf.layer
+            for ring in rings:
+                if len(ring) >= 4:
+                    ne = msp.add_lwpolyline([(c[0], c[1]) for c in ring][:-1],
+                                            dxfattribs={"layer": layer, "closed": True})
+                    new_handles.append(ne.dxf.handle)
+            try:
+                msp.delete_entity(ent)
+            except Exception:
+                pass
+            exploded += 1
+
+        if exploded == 0:
+            return {"status": "error", "message": "Nothing to explode — the selection is a single loop, not a compound path."}
+
+        doc.saveas(output_path)
+        return {"status": "ok", "data": {"new_handles": new_handles, "kept_handles": kept_handles, "exploded": exploded}}
+    except Exception as e:
+        return {"status": "error", "message": f"Explode failed: {str(e)}"}
+
+
 OPERATIONS = {
     "list_entities": op_list_entities,
     "offset_lines": op_offset_lines,
@@ -5490,6 +5589,7 @@ OPERATIONS = {
     "join_lines": op_join_lines,
     "trim_segment": op_trim_segment,
     "boolean": op_boolean,
+    "explode_compound": op_explode_compound,
 }
 
 
