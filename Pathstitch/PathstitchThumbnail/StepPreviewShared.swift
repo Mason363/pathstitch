@@ -29,15 +29,16 @@ func renderStepToImage(url: URL, size: CGSize) -> CGImage? {
     let c30 = cos(Double.pi / 6), s30 = sin(Double.pi / 6)
     var projected: [(x: Double, y: Double)] = []
     projected.reserveCapacity(points.count)
-    var minX = Double.greatestFiniteMagnitude, minY = Double.greatestFiniteMagnitude
-    var maxX = -Double.greatestFiniteMagnitude, maxY = -Double.greatestFiniteMagnitude
     for p in points {
         let sx = (p.x - p.y) * c30
         let sy = (p.x + p.y) * s30 - p.z
         projected.append((sx, sy))
-        minX = min(minX, sx); minY = min(minY, sy)
-        maxX = max(maxX, sx); maxY = max(maxY, sy)
     }
+    // Frame on robust (percentile) bounds so a few stray reference/origin points
+    // in the STEP file don't blow up the extent and shrink the real part into a
+    // corner (the old min/max framing did exactly that) — MAS-157.
+    let (minX, maxX) = robustRange(projected.map { $0.x })
+    let (minY, maxY) = robustRange(projected.map { $0.y })
 
     let w = Int(size.width), h = Int(size.height)
     guard w > 0, h > 0,
@@ -55,8 +56,9 @@ func renderStepToImage(url: URL, size: CGSize) -> CGImage? {
     let offX = (size.width - spanX * scale) / 2.0
     let offY = (size.height - spanY * scale) / 2.0
 
-    ctx.setFillColor(CGColor(red: 0.12, green: 0.14, blue: 0.2, alpha: 0.85))
-    let r: CGFloat = max(1.0, CGFloat(min(w, h)) / 600.0)
+    ctx.setFillColor(CGColor(red: 0.12, green: 0.14, blue: 0.2, alpha: 0.95))
+    // Larger dots so a sparse control-point cloud still reads as a solid form.
+    let r: CGFloat = max(2.0, CGFloat(min(w, h)) / 260.0)
     for pt in projected {
         let px = offX + (pt.x - minX) * scale
         let py = offY + (pt.y - minY) * scale
@@ -64,6 +66,20 @@ func renderStepToImage(url: URL, size: CGSize) -> CGImage? {
     }
 
     return ctx.makeImage()
+}
+
+/// Robust [min, max] of `values` using the 2nd–98th percentile, so a handful of
+/// outlier coordinates (stray origin/reference points common in STEP files)
+/// don't dominate the framing (MAS-157). Falls back to the true range when there
+/// are too few points to clip.
+private func robustRange(_ values: [Double]) -> (Double, Double) {
+    guard values.count >= 12 else {
+        return (values.min() ?? 0, values.max() ?? 1)
+    }
+    let sorted = values.sorted()
+    let lo = sorted[Int(0.02 * Double(sorted.count - 1))]
+    let hi = sorted[Int(0.98 * Double(sorted.count - 1))]
+    return hi > lo ? (lo, hi) : (sorted.first!, sorted.last!)
 }
 
 /// Extracts the (x, y, z) of every CARTESIAN_POINT in a STEP file. Tolerant of

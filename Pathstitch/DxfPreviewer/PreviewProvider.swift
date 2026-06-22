@@ -111,11 +111,20 @@ class PreviewViewController: NSViewController, QLPreviewingController {
     private func makePointCloudNode(points: [SIMD3<Float>]) -> SCNNode? {
         guard !points.isEmpty else { return nil }
 
-        var minB = points[0], maxB = points[0]
-        for p in points {
-            minB = simd_min(minB, p)
-            maxB = simd_max(maxB, p)
+        // Robust per-axis bounds (2nd–98th percentile) so stray origin/reference
+        // points in the STEP file don't shrink the real part to a dot (MAS-157).
+        func robust(_ vals: [Float]) -> (Float, Float) {
+            guard vals.count >= 12 else { return (vals.min() ?? 0, vals.max() ?? 1) }
+            let s = vals.sorted()
+            let lo = s[Int(0.02 * Float(s.count - 1))]
+            let hi = s[Int(0.98 * Float(s.count - 1))]
+            return hi > lo ? (lo, hi) : (s.first!, s.last!)
         }
+        let (minX, maxX) = robust(points.map { $0.x })
+        let (minY, maxY) = robust(points.map { $0.y })
+        let (minZ, maxZ) = robust(points.map { $0.z })
+        let minB = SIMD3<Float>(minX, minY, minZ)
+        let maxB = SIMD3<Float>(maxX, maxY, maxZ)
         let center = (minB + maxB) * 0.5
         let extent = maxB - minB
         let maxExtent = max(extent.x, max(extent.y, extent.z))
