@@ -490,6 +490,15 @@
 		74B6C7E82FD0B0E00025AB94 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/../native/step_mesh/lib",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lstep_mesh",
+				);
+				SWIFT_OBJC_BRIDGING_HEADER = "$(SRCROOT)/../native/step_mesh/include/StepMesh-Bridging.h";
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
@@ -526,6 +535,15 @@
 		74B6C7E92FD0B0E00025AB94 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/../native/step_mesh/lib",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lstep_mesh",
+				);
+				SWIFT_OBJC_BRIDGING_HEADER = "$(SRCROOT)/../native/step_mesh/include/StepMesh-Bridging.h";
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
@@ -584,6 +602,15 @@
 		74B6C8102FD0B0DF0025AB94 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/../native/step_mesh/lib",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lstep_mesh",
+				);
+				SWIFT_OBJC_BRIDGING_HEADER = "$(SRCROOT)/../native/step_mesh/include/StepMesh-Bridging.h";
 				CODE_SIGN_ENTITLEMENTS = DxfPreviewer/DxfPreviewer.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
@@ -615,6 +642,15 @@
 		74B6C8112FD0B0DF0025AB94 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/../native/step_mesh/lib",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lstep_mesh",
+				);
+				SWIFT_OBJC_BRIDGING_HEADER = "$(SRCROOT)/../native/step_mesh/include/StepMesh-Bridging.h";
 				CODE_SIGN_ENTITLEMENTS = DxfPreviewer/DxfPreviewer.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
@@ -646,6 +682,15 @@
 		74B7C8102FD0B0DF0025AB94 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/../native/step_mesh/lib",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lstep_mesh",
+				);
+				SWIFT_OBJC_BRIDGING_HEADER = "$(SRCROOT)/../native/step_mesh/include/StepMesh-Bridging.h";
 				CODE_SIGN_ENTITLEMENTS = PathstitchThumbnail/PathstitchThumbnail.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
@@ -677,6 +722,15 @@
 		74B7C8112FD0B0DF0025AB94 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/../native/step_mesh/lib",
+				);
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lstep_mesh",
+				);
+				SWIFT_OBJC_BRIDGING_HEADER = "$(SRCROOT)/../native/step_mesh/include/StepMesh-Bridging.h";
 				CODE_SIGN_ENTITLEMENTS = PathstitchThumbnail/PathstitchThumbnail.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;

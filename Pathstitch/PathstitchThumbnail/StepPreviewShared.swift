@@ -2,6 +2,106 @@ import CoreGraphics
 import Foundation
 import simd
 
+// MARK: - STEP B-rep mesh (foxtrot) — MAS-157
+
+/// A triangle mesh tessellated from a STEP file by the bundled foxtrot
+/// tessellator (`step_mesh` Rust FFI). Positions + per-vertex normals are
+/// interleaved (6 floats per vertex); `indices` are triangle indices.
+public struct StepMeshData {
+    public var interleaved: [Float]   // px,py,pz,nx,ny,nz per vertex
+    public var indices: [UInt32]
+    public var vertexCount: Int
+}
+
+/// Tessellates a STEP file into a real triangle mesh, or nil when foxtrot can't
+/// (bad file, or a fully-closed primitive surface it won't flatten) — callers
+/// then fall back to the lightweight point cloud. This replaces the old
+/// CARTESIAN_POINT scraping, which couldn't tell surface points from stray
+/// origin/axis/reference points and so rendered a noisy cloud (MAS-157).
+public func loadStepMesh(url: URL) -> StepMeshData? {
+    return url.path.withCString { cstr -> StepMeshData? in
+        guard let mp = step_mesh_load(cstr) else { return nil }
+        defer { step_mesh_free(mp) }
+        let m = mp.pointee
+        guard let vptr = m.verts, let iptr = m.indices,
+              m.vertex_count > 0, m.index_count > 0 else { return nil }
+        let interleaved = Array(UnsafeBufferPointer(start: vptr, count: m.vertex_count * 6))
+        let indices = Array(UnsafeBufferPointer(start: iptr, count: m.index_count))
+        return StepMeshData(interleaved: interleaved, indices: indices, vertexCount: m.vertex_count)
+    }
+}
+
+/// Renders a tessellated STEP mesh as a flat-shaded isometric bitmap — used for
+/// Finder thumbnails and as the still fallback when SceneKit isn't available
+/// (MAS-157). Painter's algorithm, soft directional light, dark-on-white.
+public func renderStepMeshToImage(_ mesh: StepMeshData, size: CGSize) -> CGImage? {
+    let triCount = mesh.indices.count / 3
+    guard triCount > 0 else { return nil }
+    let w = Int(size.width), h = Int(size.height)
+    guard w > 0, h > 0,
+          let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8,
+                              bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+    ctx.setFillColor(CGColor(gray: 1.0, alpha: 1.0))
+    ctx.fill(CGRect(origin: .zero, size: size))
+
+    let v = mesh.interleaved
+    func pos(_ i: Int) -> (Double, Double, Double) {
+        let b = i * 6; return (Double(v[b]), Double(v[b+1]), Double(v[b+2]))
+    }
+    let c30 = cos(Double.pi / 6), s30 = sin(Double.pi / 6)
+    func iso(_ p: (Double, Double, Double)) -> (Double, Double) {
+        ((p.0 - p.1) * c30, (p.0 + p.1) * s30 - p.2)
+    }
+
+    // Bounds in iso space.
+    var minX = Double.greatestFiniteMagnitude, minY = Double.greatestFiniteMagnitude
+    var maxX = -Double.greatestFiniteMagnitude, maxY = -Double.greatestFiniteMagnitude
+    for vi in 0..<mesh.vertexCount {
+        let s = iso(pos(vi))
+        minX = min(minX, s.0); maxX = max(maxX, s.0)
+        minY = min(minY, s.1); maxY = max(maxY, s.1)
+    }
+    let span = max(max(maxX - minX, maxY - minY), 1e-6)
+    let margin = 0.08 * min(size.width, size.height)
+    let scale = (min(size.width, size.height) - 2 * margin) / span
+    let ox = size.width / 2 - (minX + maxX) / 2 * scale
+    let oy = size.height / 2 + (minY + maxY) / 2 * scale
+
+    // Painter's algorithm: sort triangles back-to-front along the view diagonal.
+    var order = Array(0..<triCount)
+    func depth(_ t: Int) -> Double {
+        let a = Int(mesh.indices[t*3]), b = Int(mesh.indices[t*3+1]), c = Int(mesh.indices[t*3+2])
+        let pa = pos(a), pb = pos(b), pc = pos(c)
+        return (pa.0+pb.0+pc.0) + (pa.1+pb.1+pc.1) + (pa.2+pb.2+pc.2)
+    }
+    order.sort { depth($0) < depth($1) }
+
+    let lx = 0.3, ly = 0.4, lz = 0.85
+    let ll = (lx*lx + ly*ly + lz*lz).squareRoot()
+    for t in order {
+        let ia = Int(mesh.indices[t*3]), ib = Int(mesh.indices[t*3+1]), ic = Int(mesh.indices[t*3+2])
+        let a = pos(ia), b = pos(ib), c = pos(ic)
+        // Face normal for flat shading.
+        let ux = b.0-a.0, uy = b.1-a.1, uz = b.2-a.2
+        let wx = c.0-a.0, wy = c.1-a.1, wz = c.2-a.2
+        var nx = uy*wz - uz*wy, ny = uz*wx - ux*wz, nz = ux*wy - uy*wx
+        let nl = (nx*nx + ny*ny + nz*nz).squareRoot()
+        if nl > 0 { nx /= nl; ny /= nl; nz /= nl }
+        let shade = abs((nx*lx + ny*ly + nz*lz) / ll)
+        let g = CGFloat(0.30 + shade * 0.62)
+        ctx.setFillColor(CGColor(red: g, green: g, blue: min(1.0, g + 0.03), alpha: 1.0))
+        let pa = iso(a), pb = iso(b), pc = iso(c)
+        ctx.beginPath()
+        ctx.move(to: CGPoint(x: ox + pa.0 * scale, y: oy - pa.1 * scale))
+        ctx.addLine(to: CGPoint(x: ox + pb.0 * scale, y: oy - pb.1 * scale))
+        ctx.addLine(to: CGPoint(x: ox + pc.0 * scale, y: oy - pc.1 * scale))
+        ctx.closePath()
+        ctx.fillPath()
+    }
+    return ctx.makeImage()
+}
+
 /// Reads every CARTESIAN_POINT from a STEP file as a 3D point cloud, for the
 /// interactive SceneKit preview (MAS-124). Returns model-space coordinates;
 /// the view controller handles centering/scaling.

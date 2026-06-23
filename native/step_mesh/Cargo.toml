@@ -1,0 +1,22 @@
+[package]
+name = "step_mesh"
+version = "0.1.0"
+edition = "2021"
+description = "C FFI wrapping Formlabs/foxtrot: tessellate a STEP file into a triangle mesh for the Pathstitch QuickLook previews."
+
+[lib]
+# Static lib so it links straight into the (sandboxed) QuickLook app extensions
+# with no runtime dependency to ship.
+crate-type = ["staticlib"]
+
+[dependencies]
+# Foxtrot's STEP parser + B-rep tessellator (MIT/Apache-2.0), pinned to a commit.
+step = { git = "https://github.com/Formlabs/foxtrot", rev = "69fb37688892246e670fc08eb60b7d3a92d70d3f" }
+triangulate = { git = "https://github.com/Formlabs/foxtrot", rev = "69fb37688892246e670fc08eb60b7d3a92d70d3f" }
+
+[profile.release]
+opt-level = 3
+codegen-units = 1
+panic = "unwind"
+strip = true
+lto = true

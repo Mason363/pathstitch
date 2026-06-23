@@ -329,3 +329,13 @@ Pathstitch is licensed under the **GNU General Public License v3.0** — see [LI
 
 It uses [Potrace](https://potrace.sourceforge.net/) (GPL) for raster-to-vector tracing, which is why
 Pathstitch as a whole is distributed under the GPLv3.
+
+### Native STEP preview (foxtrot)
+
+The Finder QuickLook preview/thumbnail for `.step` files tessellates the B-rep
+into a triangle mesh using [foxtrot](https://github.com/Formlabs/foxtrot)
+(MIT/Apache-2.0), wrapped as a small Rust static library in
+[`native/step_mesh`](native/step_mesh). A prebuilt `lib/libstep_mesh.a` is
+checked in so the Xcode build needs no Rust toolchain. To rebuild it (e.g. after
+bumping the foxtrot pin), install [Rust](https://rustup.rs) and run
+`native/step_mesh/build.sh`.

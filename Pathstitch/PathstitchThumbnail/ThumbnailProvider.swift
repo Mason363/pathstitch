@@ -30,7 +30,13 @@ class ThumbnailProvider: QLThumbnailProvider {
         let ext = fileURL.pathExtension.lowercased()
         let image: CGImage?
         if ext == "step" || ext == "stp" {
-            image = renderStepToImage(url: fileURL, size: renderSize)
+            // Real tessellated mesh (foxtrot) when possible; fall back to the
+            // lightweight point-cloud bitmap otherwise (MAS-157).
+            if let mesh = loadStepMesh(url: fileURL) {
+                image = renderStepMeshToImage(mesh, size: renderSize)
+            } else {
+                image = renderStepToImage(url: fileURL, size: renderSize)
+            }
         } else {
             image = renderFileToImage(url: fileURL, size: renderSize)
         }

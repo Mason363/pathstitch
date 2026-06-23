@@ -37,10 +37,19 @@ class PreviewViewController: NSViewController, QLPreviewingController {
 
         let isAccessing = url.startAccessingSecurityScopedResource()
         if ext == "step" || ext == "stp" {
+            // Prefer a real tessellated B-rep mesh (foxtrot). It's a genuine solid
+            // — no stray reference points — and stays light (tens of ms). Fall
+            // back to the legacy point cloud, then a static bitmap, so the preview
+            // is never blank (MAS-157).
+            if let mesh = loadStepMesh(url: url) {
+                if isAccessing { url.stopAccessingSecurityScopedResource() }
+                DispatchQueue.main.async {
+                    self.installMeshSceneView(mesh: mesh)
+                    handler(nil)
+                }
+                return
+            }
             let points = parseStepPointCloud(url: url)
-            // If the point cloud is too sparse to render in 3D, fall back to the
-            // static isometric bitmap so the preview is never a blank white box
-            // (MAS-157).
             if points.count < 2 {
                 let size = CGSize(width: 1200, height: 800)
                 let image = renderStepToImage(url: url, size: size)
@@ -104,6 +113,77 @@ class PreviewViewController: NSViewController, QLPreviewingController {
         }
 
         replaceContent(with: scnView)
+    }
+
+    // MARK: - STEP (interactive 3D triangle mesh, foxtrot) — MAS-157
+
+    private func installMeshSceneView(mesh: StepMeshData) {
+        let scnView = SCNView(frame: view.bounds)
+        scnView.autoresizingMask = [.width, .height]
+        scnView.allowsCameraControl = true          // drag to rotate / scroll to zoom
+        scnView.autoenablesDefaultLighting = true
+        scnView.backgroundColor = .white
+        scnView.antialiasingMode = .multisampling4X
+
+        let scene = SCNScene()
+        scnView.scene = scene
+
+        if let node = makeMeshNode(mesh: mesh) {
+            scene.rootNode.addChildNode(node)
+            let cameraNode = SCNNode()
+            cameraNode.camera = SCNCamera()
+            cameraNode.position = SCNVector3(0, 0, 4.0)
+            scene.rootNode.addChildNode(cameraNode)
+            scnView.pointOfView = cameraNode
+        }
+        replaceContent(with: scnView)
+    }
+
+    /// Builds an SCNGeometry from the tessellated mesh (positions + normals +
+    /// triangle indices), recentered and unit-scaled so the camera frames it.
+    private func makeMeshNode(mesh: StepMeshData) -> SCNNode? {
+        let vc = mesh.vertexCount
+        guard vc > 0, mesh.indices.count >= 3 else { return nil }
+
+        var minB = SIMD3<Float>(repeating: .greatestFiniteMagnitude)
+        var maxB = SIMD3<Float>(repeating: -.greatestFiniteMagnitude)
+        for i in 0..<vc {
+            let b = i * 6
+            let p = SIMD3<Float>(mesh.interleaved[b], mesh.interleaved[b + 1], mesh.interleaved[b + 2])
+            minB = simd_min(minB, p); maxB = simd_max(maxB, p)
+        }
+        let center = (minB + maxB) * 0.5
+        let extent = maxB - minB
+        let maxExtent = max(extent.x, max(extent.y, extent.z))
+        let scale = maxExtent > 1e-6 ? 2.0 / maxExtent : 1.0
+
+        var positions = [SCNVector3](); positions.reserveCapacity(vc)
+        var normals = [SCNVector3](); normals.reserveCapacity(vc)
+        for i in 0..<vc {
+            let b = i * 6
+            let p = SIMD3<Float>(mesh.interleaved[b], mesh.interleaved[b + 1], mesh.interleaved[b + 2])
+            let q = (p - center) * scale
+            positions.append(SCNVector3(CGFloat(q.x), CGFloat(q.y), CGFloat(q.z)))
+            normals.append(SCNVector3(CGFloat(mesh.interleaved[b + 3]),
+                                      CGFloat(mesh.interleaved[b + 4]),
+                                      CGFloat(mesh.interleaved[b + 5])))
+        }
+
+        let vertexSource = SCNGeometrySource(vertices: positions)
+        let normalSource = SCNGeometrySource(normals: normals)
+        let element = SCNGeometryElement(indices: mesh.indices, primitiveType: .triangles)
+        let geometry = SCNGeometry(sources: [vertexSource, normalSource], elements: [element])
+
+        let material = SCNMaterial()
+        material.diffuse.contents = NSColor(white: 0.78, alpha: 1.0)
+        material.lightingModel = .blinn
+        material.isDoubleSided = true
+        geometry.materials = [material]
+
+        let node = SCNNode(geometry: geometry)
+        // Slight iso-ish tilt so it doesn't open edge-on.
+        node.eulerAngles = SCNVector3(-CGFloat.pi / 7, CGFloat.pi / 5, 0)
+        return node
     }
 
     /// Builds a recentered, unit-scaled point-cloud geometry with subtle
