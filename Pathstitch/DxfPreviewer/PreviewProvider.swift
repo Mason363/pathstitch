@@ -165,17 +165,27 @@ class PreviewViewController: NSViewController, QLPreviewingController {
         let maxExtent = max(extent.x, max(extent.y, extent.z))
         let scale = maxExtent > 1e-6 ? 2.0 / maxExtent : 1.0
 
+        var raw = [SIMD3<Float>](); raw.reserveCapacity(vc)
         var positions = [SCNVector3](); positions.reserveCapacity(vc)
-        var normals = [SCNVector3](); normals.reserveCapacity(vc)
         for i in 0..<vc {
             let b = i * 6
             let p = SIMD3<Float>(mesh.interleaved[b], mesh.interleaved[b + 1], mesh.interleaved[b + 2])
+            raw.append(p)
             let q = (p - center) * scale
             positions.append(SCNVector3(CGFloat(q.x), CGFloat(q.y), CGFloat(q.z)))
-            normals.append(SCNVector3(CGFloat(mesh.interleaved[b + 3]),
-                                      CGFloat(mesh.interleaved[b + 4]),
-                                      CGFloat(mesh.interleaved[b + 5])))
         }
+
+        // Recompute smooth normals instead of using foxtrot's per-vertex normals.
+        // Foxtrot tessellates each B-rep face as its own patch and DUPLICATES the
+        // vertices along shared seams, giving the two sides different normals
+        // (measured: 1000+ coincident vertices disagreeing by up to 90°). SceneKit
+        // interpolates those per fragment, so every seam — even one running across
+        // a smooth curved face — shows up as a hard crease/stripe. Welding
+        // coincident vertices and averaging incident face normals erases the seam;
+        // a crease threshold keeps genuinely sharp edges (e.g. 90° box faces) crisp
+        // by only blending faces whose orientation actually agrees.
+        let smooth = Self.smoothNormals(positions: raw, indices: mesh.indices, creaseDegrees: 50)
+        let normals = smooth.map { SCNVector3(CGFloat($0.x), CGFloat($0.y), CGFloat($0.z)) }
 
         let vertexSource = SCNGeometrySource(vertices: positions)
         let normalSource = SCNGeometrySource(normals: normals)
@@ -272,6 +282,54 @@ class PreviewViewController: NSViewController, QLPreviewingController {
         return node
     }
 
+    /// Crease-thresholded smooth normals. Welds vertices that share a position
+    /// and averages the face normals around each weld, but only blends faces whose
+    /// normals are within `creaseDegrees` of the vertex's own faces — so smooth
+    /// surfaces (including foxtrot's intra-face seams) become seamless while real
+    /// hard edges stay sharp. O(verts) with small constant factors.
+    static func smoothNormals(positions pos: [SIMD3<Float>], indices: [UInt32],
+                              creaseDegrees: Float) -> [SIMD3<Float>] {
+        let triCount = indices.count / 3
+        var faceN = [SIMD3<Float>](repeating: SIMD3<Float>(0, 0, 1), count: triCount)
+        for t in 0..<triCount {
+            let a = pos[Int(indices[t*3])], b = pos[Int(indices[t*3+1])], c = pos[Int(indices[t*3+2])]
+            let n = simd_cross(b - a, c - a)
+            let len = simd_length(n)
+            if len > 1e-12 { faceN[t] = n / len }
+        }
+        // Triangles touching each vertex index, and a position hash → indices map
+        // so we can find the coincident vertices foxtrot split apart.
+        var triOfIndex = [[Int]](repeating: [], count: pos.count)
+        for t in 0..<triCount {
+            for k in 0..<3 { triOfIndex[Int(indices[t*3+k])].append(t) }
+        }
+        func key(_ p: SIMD3<Float>) -> Int64 {
+            let qx = Int64((p.x * 1000).rounded()), qy = Int64((p.y * 1000).rounded()), qz = Int64((p.z * 1000).rounded())
+            return (qx &* 73856093) ^ (qy &* 19349663) ^ (qz &* 83492791)
+        }
+        var byPos = [Int64: [Int]]()
+        for vi in 0..<pos.count where !triOfIndex[vi].isEmpty {
+            byPos[key(pos[vi]), default: []].append(vi)
+        }
+        let cosThresh = cos(creaseDegrees * .pi / 180)
+        var out = [SIMD3<Float>](repeating: SIMD3<Float>(0, 0, 1), count: pos.count)
+        for vi in 0..<pos.count {
+            let own = triOfIndex[vi]
+            if own.isEmpty { continue }
+            var ref = SIMD3<Float>.zero
+            for t in own { ref += faceN[t] }
+            let rl = simd_length(ref)
+            ref = rl > 1e-12 ? ref / rl : faceN[own[0]]
+            var acc = SIMD3<Float>.zero
+            for cvi in byPos[key(pos[vi])] ?? [vi] {
+                for t in triOfIndex[cvi] where simd_dot(faceN[t], ref) >= cosThresh { acc += faceN[t] }
+            }
+            let al = simd_length(acc)
+            out[vi] = al > 1e-12 ? acc / al : ref
+        }
+        return out
+    }
+
     // MARK: - Lighting
 
     /// Ambient floor + key/fill directional lights for the STEP mesh scene. The
@@ -282,17 +340,20 @@ class PreviewViewController: NSViewController, QLPreviewingController {
         func light(_ type: SCNLight.LightType, _ white: CGFloat) -> SCNLight {
             let l = SCNLight(); l.type = type; l.color = NSColor(white: white, alpha: 1.0); return l
         }
+        // Modest ambient (just a safety floor against any residual edge-on
+        // triangle) plus a strong key and a softer fill, so the part keeps clear
+        // light-to-shadow falloff and reads as solid 3D rather than flat grey.
         let ambient = SCNNode()
-        ambient.light = light(.ambient, 0.55)
+        ambient.light = light(.ambient, 0.28)
         scene.rootNode.addChildNode(ambient)
 
         let key = SCNNode()
-        key.light = light(.directional, 0.55)
+        key.light = light(.directional, 0.85)
         key.eulerAngles = SCNVector3(-CGFloat.pi / 4, CGFloat.pi / 6, 0)
         scene.rootNode.addChildNode(key)
 
         let fill = SCNNode()
-        fill.light = light(.directional, 0.28)
+        fill.light = light(.directional, 0.40)
         fill.eulerAngles = SCNVector3(CGFloat.pi / 3, -CGFloat.pi / 3, 0)
         scene.rootNode.addChildNode(fill)
     }
