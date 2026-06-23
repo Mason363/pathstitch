@@ -52,18 +52,93 @@ rsync -a \
   --exclude 'libLLVM*' --exclude 'libclang*' \
   --exclude 'qt6/' --exclude 'libQt6*' \
   --exclude 'libopenvino*' --exclude 'openvino*' \
-  --exclude 'libvtk*' \
+  --exclude 'libvtk*' --exclude 'vtkmodules/' --exclude 'libviskores*' \
   --exclude 'libav*' --exclude 'libpostproc*' --exclude 'libswscale*' --exclude 'libswresample*' --exclude 'ffmpeg' \
+  --exclude 'tests/' \
   "$CONDA_ENV/" "$RES/pyenv/"
+# Notes on the additions above (all proven safe — see scripts/dmg/README.md):
+#  • vtkmodules/ + libviskores* — VTK's own dylibs (libvtk*) are already dropped,
+#    so its Python package and the VTK-m accelerator are dead weight. Nothing in
+#    the app's import closure (pathstitch_core.worker → OCC / ezdxf / shapely /
+#    numpy / scipy / PIL / rembg→pymatting→numba+skimage) imports VTK.
+#  • tests/ — package test suites are never imported at runtime (~80 MB).
+# The post-sign smoke test below fails the build if any of this broke an import.
 
 # ---- 3. bundle the geometry engine ------------------------------------------
 echo "▶ Bundling pathstitch_core …"
 rsync -a --exclude '__pycache__/' "$REPO/pathstitch_core/" "$RES/pathstitch_core/"
 
-# ---- 4. ad-hoc sign (no Developer ID; hardened runtime stays off) -----------
-echo "▶ Ad-hoc signing (this is the slow part) …"
+# ---- 3b. strip symbols from bundled native libraries ------------------------
+# `strip -x` removes only local symbols; exported/global symbols (PyInit_*, dylib
+# externals, every dlsym target) are preserved, so modules still load and link.
+# This is the same strip PyInstaller applies by default. It trims ~150–250 MB off
+# heavy binaries (onnxruntime −38%, llvmlite −13%, OCC bindings, numpy/scipy).
+# Done BEFORE codesign so the ad-hoc signatures match the stripped files. The
+# smoke test in step 4b then proves nothing was broken before any DMG is built.
+echo "▶ Stripping local symbols from native libs (lossless) …"
+find "$RES/pyenv" \( -name '*.so' -o -name '*.dylib' \) -type f -print0 \
+  | xargs -0 -n1 -P4 strip -x 2>/dev/null || true
+
+# ---- 4. re-sign stripped libraries (so the smoke test can load them) --------
+# Stripping invalidates the ad-hoc signatures conda ships on every arm64
+# .so/.dylib, and on Apple Silicon the kernel SIGKILLs ("Killed: 9") any process
+# that loads an invalidly-signed library. Re-sign every stripped Mach-O
+# individually so the runtime smoke test below can dlopen them. The bundle is
+# sealed LAST (step 4c), after the test, so the final CodeResources seal covers
+# the exact tree we ship.
+echo "▶ Re-signing stripped libraries …"
+find "$RES/pyenv" \( -name '*.so' -o -name '*.dylib' \) -type f -print0 \
+  | xargs -0 -n1 -P4 codesign --force --sign - 2>/dev/null || true
+
+# ---- 4b. verify the trimmed+stripped runtime still imports everything -------
+# Faithful to runtime: same interpreter, PYTHONHOME unset, PYTHONPATH=Resources
+# (see PythonBridge.swift). Imports the app's full dependency closure — including
+# rembg→pymatting→numba+skimage, which exercise the most aggressively stripped
+# libs. A single failure aborts packaging so a broken bundle can never ship.
+# The test must not mutate the bundle: -B/PYTHONDONTWRITEBYTECODE suppress .pyc,
+# and NUMBA_CACHE_DIR/PYTHONPYCACHEPREFIX redirect numba's .nbi/.nbc caches (it
+# JIT-compiles pymatting's cache=True kernels on import) to a throwaway dir.
+echo "▶ Smoke-testing bundled Python runtime …"
+SMOKE_CACHE="$(mktemp -d)"
+PYTHONHOME= PYTHONDONTWRITEBYTECODE=1 PYTHONPYCACHEPREFIX="$SMOKE_CACHE" \
+  NUMBA_CACHE_DIR="$SMOKE_CACHE" PYTHONPATH="$RES" \
+  "$RES/pyenv/bin/python3.11" -B - <<'PY'
+import importlib, sys
+mods = [
+    "pathstitch_core",
+    "OCC.Core.STEPControl", "OCC.Core.BRepMesh", "OCC.Core.TopoDS", "OCC.Core.gp",
+    "ezdxf", "shapely.geometry", "numpy", "scipy", "scipy.sparse", "scipy.spatial",
+    "PIL.Image", "svgwrite", "potrace", "pdfplumber", "matplotlib",
+    "psd_tools", "rembg", "pymatting", "numba", "skimage",
+]
+bad = []
+for m in mods:
+    try:
+        importlib.import_module(m)
+    except Exception as e:
+        bad.append(f"{m}: {type(e).__name__}: {e}")
+if bad:
+    sys.stderr.write("✗ import failures after trim/strip:\n")
+    for b in bad:
+        sys.stderr.write("    " + b + "\n")
+    sys.exit(1)
+print(f"✓ all {len(mods)} critical modules import cleanly")
+PY
+rm -rf "$SMOKE_CACHE"
+
+# ---- 4c. seal the bundle LAST, over a pristine tree -------------------------
+# Remove any __pycache__/numba caches that slipped in (belt-and-suspenders), then
+# apply the final ad-hoc signature. Verify is strict and NOT ignored: a broken
+# seal aborts packaging so no mis-sealed bundle can ever reach a DMG.
+echo "▶ Sealing the app bundle (final signature) …"
+find "$APP_OUT" -name '__pycache__' -type d -prune -exec rm -rf {} + 2>/dev/null || true
+# Drop dangling symlinks (e.g. pyenv/bin/qmake6 → the excluded qt6/ dir). They are
+# dead cruft, and `codesign --deep` nondeterministically tries to sign them and
+# fails with "No such file or directory". Removing them makes sealing reliable.
+find "$APP_OUT" -type l ! -exec test -e {} \; -delete 2>/dev/null || true
 codesign --force --deep --sign - "$APP_OUT"
-codesign --verify --verbose=1 "$APP_OUT" || true
+codesign --verify --deep --strict --verbose=1 "$APP_OUT"
+echo "  ✓ bundle signature valid"
 
 # ---- 5. build the drag-install .dmg -----------------------------------------
 # A styled window (leather background + positioned icons + Applications arrow)
@@ -96,6 +171,18 @@ build_plain_dmg() {
 build_styled_dmg() {
   mkdir -p "$STAGE/.background"
   cp "$DMG_BG" "$STAGE/.background/background.png" || return 1
+
+  # Finder draws a background picture at (image_px × 72 / dpi) points, NOT scaled
+  # to the window. A too-high DPI (e.g. 600) renders the image tiny in a corner
+  # instead of filling the window. Force the DPI so the PNG maps exactly onto the
+  # WIN_W×WIN_H-pt window at full pixel resolution (1000 px ÷ 500 pt → 144 dpi).
+  local bg_px
+  bg_px=$(sips -g pixelWidth "$STAGE/.background/background.png" 2>/dev/null | awk '/pixelWidth/{print $2}')
+  if [ -n "$bg_px" ] && [ "$bg_px" -gt 0 ]; then
+    sips -s dpiWidth  "$(( bg_px * 72 / WIN_W ))" \
+         -s dpiHeight "$(( bg_px * 72 / WIN_H ))" \
+         "$STAGE/.background/background.png" >/dev/null 2>&1 || true
+  fi
 
   local rw="$DIST/Pathstitch-rw.dmg"
   rm -f "$rw"

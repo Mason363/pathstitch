@@ -370,9 +370,11 @@ struct ContentView: View {
         .onChange(of: state.holeDistribution) { _ in state.updateLivePreview() }
         .onChange(of: state.holeCount) { _ in state.updateLivePreview() }
         .onChange(of: state.holePattern) { _ in state.updateLivePreview() }
-        .onChange(of: state.holeCornerBehavior) { _ in state.updateLivePreview() }
+        .onChange(of: state.holeCornerHoles) { _ in state.updateLivePreview() }
         .onChange(of: state.holeSide) { _ in state.updateLivePreview() }
         .onChange(of: state.holeRowSpacing) { _ in state.updateLivePreview() }
+        .onChange(of: state.holeSaddleSpacing) { _ in state.updateLivePreview() }
+        .onChange(of: state.holeOffsetCornerFillet) { _ in state.updateLivePreview() }
         .onChange(of: state.holeEnableVariableSpacing) { _ in state.updateLivePreview() }
         .onChange(of: state.holeEnableProximityFilter) { _ in state.updateLivePreview() }
         .onChange(of: state.holeEnableCornerInterpolation) { _ in state.updateLivePreview() }
@@ -1442,20 +1444,26 @@ extension ContentView {
                             .help("Choose between a single row or double-row saddle stitch hole pattern")
                         }
                         
+                        Toggle("Hole at Corners", isOn: $state.holeCornerHoles)
+                            .toggleStyle(.checkbox)
+                            .font(PlasticityFont.label)
+                            .foregroundColor(Color.text_primary)
+                            .help("Place a stitch on — or as near as possible to — every corner sharper than ~45°, flexing the spacing between holes so one lands on each corner. On by default.")
+
                         HStack {
-                            Text("Corner Behavior")
+                            Text("Offset Corners")
                                 .font(PlasticityFont.label)
                                 .foregroundColor(Color.text_primary)
                             Spacer()
-                            Picker("", selection: $state.holeCornerBehavior) {
-                                Text("Keep").tag("keep")
-                                Text("Step").tag("step")
+                            Picker("", selection: $state.holeOffsetCornerFillet) {
+                                Text("Sharp").tag(false)
+                                Text("Rounded").tag(true)
                             }
                             .pickerStyle(SegmentedPickerStyle())
-                            .frame(width: 120)
-                            .help("Select corner spacing behavior: keep original spacing or step layout to corner")
+                            .frame(width: 140)
+                            .help("Corner treatment of the offset stitch line: Sharp keeps crisp corners (default); Rounded fillets them so holes follow a smooth arc.")
                         }
-                        
+
                         HStack {
                             Text("Side")
                                 .font(PlasticityFont.label)
@@ -1470,23 +1478,25 @@ extension ContentView {
                             .frame(width: 180)
                             .help("Choose the side(s) of the path to distribute holes (left, right, or both)")
                         }
-                        
-                        HStack {
-                            Text("Row Spacing (mm)")
-                                .font(PlasticityFont.label)
-                                .foregroundColor(Color.text_primary)
-                            Spacer()
-                            TextField("Row Spacing", value: $state.holeRowSpacing, format: .number)
-                                .textFieldStyle(PlainTextFieldStyle())
-                                .padding(4)
-                                .frame(width: 80)
-                                .background(Color.bg_input)
-                                .cornerRadius(4)
-                                .foregroundColor(Color.text_primary)
-                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                                .help("Row offset spacing in millimeters for double-row saddle stitch holes")
+
+                        if state.holePattern == "saddle" {
+                            HStack {
+                                Text("Saddle Row Distance (mm)")
+                                    .font(PlasticityFont.label)
+                                    .foregroundColor(Color.text_primary)
+                                Spacer()
+                                TextField("Distance", value: $state.holeSaddleSpacing, format: .number)
+                                    .textFieldStyle(PlainTextFieldStyle())
+                                    .padding(4)
+                                    .frame(width: 80)
+                                    .background(Color.bg_input)
+                                    .cornerRadius(4)
+                                    .foregroundColor(Color.text_primary)
+                                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+                                    .help("Distance in millimeters between the two staggered rows of a saddle stitch")
+                            }
                         }
-                        
+
                         Toggle("Variable Spacing", isOn: $state.holeEnableVariableSpacing)
                             .toggleStyle(.checkbox)
                             .font(PlasticityFont.label)
@@ -3725,6 +3735,26 @@ extension ContentView {
                                                 onActivate: { showMoreTools = false })
                                 .padding(10)
                         }
+                    } else if state.activeMode == .threeD {
+                        // 3D tools live in this same leftmost sidebar (like 2D),
+                        // not a separate strip inside the 3D editor.
+                        let moveActive = state.bodyMoveToolActive
+                        let planeActive = state.isPlaneSelectionActive
+                        threeDToolButton(icon: "cursorarrow", active: !moveActive && !planeActive,
+                                         help: "Select — orbit / select faces (no active tool)") {
+                            if state.bodyMoveToolActive { state.toggleBodyMoveTool() }
+                            if state.isPlaneSelectionActive { state.cancelPlaneSelection() }
+                        }
+                        threeDToolButton(icon: "move.3d", active: moveActive,
+                                         help: "Move — select a body and translate it") {
+                            if state.isPlaneSelectionActive { state.cancelPlaneSelection() }
+                            if !state.bodyMoveToolActive { state.toggleBodyMoveTool() }
+                        }
+                        threeDToolButton(icon: "square.dashed", active: planeActive,
+                                         help: "Plane — define a projection plane") {
+                            if state.bodyMoveToolActive { state.toggleBodyMoveTool() }
+                            if !state.isPlaneSelectionActive { state.startPlaneSelection() }
+                        }
                     }
 
                     Spacer()
@@ -3765,6 +3795,24 @@ extension ContentView {
                 )
         }
     }
+
+    /// One 3D-mode tool button for the leftmost sidebar, styled to match the 2D
+    /// tool buttons (full-width hit area, accent highlight when active).
+    private func threeDToolButton(icon: String, active: Bool, help: String,
+                                  action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 14))
+                .frame(width: 24, height: 24)
+                .padding(10)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(PlainButtonStyle())
+        .background(active ? Color.bg_selected : Color.clear)
+        .foregroundColor(active ? Color.accent : Color.text_secondary)
+        .help(help)
+    }
+
     @ViewBuilder
     private var twoDEditorView: some View {
         HStack(spacing: 0) {

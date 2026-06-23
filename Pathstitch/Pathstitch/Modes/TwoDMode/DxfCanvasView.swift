@@ -4062,6 +4062,7 @@ struct DxfCanvasView: View {
         
         enum SnapType: String {
             case endpoint = "Endpoint"
+            case intersection = "Intersection"
             case midpoint = "Midpoint"
             case center = "Center"
             case coincident = "Coincident"
@@ -4209,9 +4210,45 @@ struct DxfCanvasView: View {
                 }
             }
         }
+
+        // Intersection snaps: where two straight edges actually cross. Gather all
+        // visible straight segments, then add the true crossing point of every
+        // pair (skipping points that merely coincide with a shared endpoint —
+        // those are already endpoint snaps).
+        var segs: [(CGPoint, CGPoint)] = []
+        for ent in state.entities {
+            let matched = ent.layerId.flatMap { layerLookup[$0] } ?? layerLookup[ent.layer]
+            if !(matched?.visible ?? true) { continue }
+            if ent.type == "LINE", let s = ent.start, let e = ent.end {
+                segs.append((CGPoint(x: s[0], y: s[1]), CGPoint(x: e[0], y: e[1])))
+            } else if let vertices = ent.vertices, vertices.count >= 2 {
+                let pts = vertices.map { CGPoint(x: $0[0], y: $0[1]) }
+                for i in 0..<(pts.count - 1) { segs.append((pts[i], pts[i + 1])) }
+                if ent.closed == true { segs.append((pts[pts.count - 1], pts[0])) }
+            }
+        }
+        // O(n²) over segments — cap to keep mouse-move cheap on dense outlines.
+        if segs.count <= 600 {
+            let eps: CGFloat = 1e-4
+            for i in 0..<segs.count {
+                let a = segs[i]
+                for j in (i + 1)..<segs.count {
+                    let b = segs[j]
+                    guard let t = segIntersectParam(a.0, a.1, b.0, b.1) else { continue }
+                    let pt = CGPoint(x: a.0.x + CGFloat(t) * (a.1.x - a.0.x),
+                                     y: a.0.y + CGFloat(t) * (a.1.y - a.0.y))
+                    // Skip crossings that sit on a shared endpoint of either edge.
+                    let onEndpoint = [a.0, a.1, b.0, b.1].contains {
+                        hypot(pt.x - $0.x, pt.y - $0.y) < eps
+                    }
+                    if onEndpoint { continue }
+                    list.append(SnapCandidate(modelPoint: pt, type: .intersection))
+                }
+            }
+        }
         return list
     }
-    
+
     func getSnappedPoint(for screenPt: CGPoint, size: CGSize, bounds: CGRect) -> SnapResult? {
         let queryModelPt = toModel(point: screenPt, size: size, bounds: bounds)
         let candidates = getSnapCandidates(for: queryModelPt)
@@ -4246,9 +4283,10 @@ struct DxfCanvasView: View {
     private func getPriority(_ type: SnapResult.SnapType) -> Int {
         switch type {
         case .endpoint: return 0
-        case .midpoint: return 1
-        case .center: return 2
-        case .coincident: return 3
+        case .intersection: return 1
+        case .midpoint: return 2
+        case .center: return 3
+        case .coincident: return 4
         }
     }
     
@@ -5171,8 +5209,10 @@ struct ScrollWheelModifier: NSViewRepresentable {
                 onZoom?(event, swiftUiPt, zoomFactor)
             } else if event.hasPreciseScrollingDeltas {
                 let dx = event.scrollingDeltaX
-                let dy = event.scrollingDeltaY
-                // Invert touchpad vertical scroll direction for Pan gesture
+                // Invert the vertical so a scroll/swipe up pans the view up (the
+                // raw scrollingDeltaY is the opposite sign, which read as a
+                // reversed vertical pan). Horizontal already matches.
+                let dy = -event.scrollingDeltaY
                 onPanOffset?(CGSize(width: dx, height: dy))
             } else {
                 let zoomFactor: CGFloat = event.deltaY > 0 ? 1.15 : 0.85

@@ -1054,8 +1054,17 @@ class AppState {
     // selection (MAS-152). "keep" — preserve spacing through corners — is the
     // least-surprising default.
     var holeCornerBehavior: String = "keep"
+    // Place a stitch on (or as near as possible to) every corner sharper than
+    // ~45°, flexing the spacing to land on it. On by default.
+    var holeCornerHoles: Bool = true
     var holeSide: String = "left"
     var holeRowSpacing: Double = 3.0
+    // Distance between the two staggered rows of a saddle stitch (only used when
+    // holePattern == "saddle"). Separate from the legacy single-pattern spacing.
+    var holeSaddleSpacing: Double = 3.0
+    // Corner treatment of the offset stitch line: false = sharp (mitre, default),
+    // true = filleted (rounded) corners on the offset.
+    var holeOffsetCornerFillet: Bool = false
     var holeEnableVariableSpacing: Bool = true
     var holeEnableProximityFilter: Bool = true
     var holeEnableCornerInterpolation: Bool = true
@@ -3453,33 +3462,11 @@ class AppState {
                     _ = try await PythonBridge.shared.run(
                         module: "dxf_ops",
                         op: "add_holes",
-                        args: [
-                            "input": item.fileURL.path,
-                            "output": item.fileURL.path,
-                            "handles": [] as [String],
-                            "offset_distance": holeOffsetDistance,
-                            "hole_diameter": holeDiameter,
-                            "hole_spacing": holeSpacing,
-                            "distribution": holeDistribution,
-                            "hole_count": holeCount,
-                            "pattern": holePattern,
-                            "corner_behavior": holeCornerBehavior,
-                            "side": holeSide,
-                            "row_spacing": holeRowSpacing,
-                            "enable_variable_spacing": holeEnableVariableSpacing,
-                            "enable_proximity_filter": holeEnableProximityFilter,
-                            "enable_corner_interpolation": holeEnableCornerInterpolation,
-                            "enable_line_proximity_filter": holeEnableLineProximityFilter,
-                            "line_proximity_threshold": holeLineProximityThreshold,
-                            "proximity_filter_distance": holeProximityDistance,
-                            "variable_spacing_min": holeVariableSpacingMin,
-                            "variable_spacing_max": holeVariableSpacingMax,
-                            "enable_avoidance": holeEnableAvoidance,
-                            "avoidance_radius": holeAvoidanceRadius,
-                            "keepout_handles": Array(sewingKeepoutHandles)
-                        ]
+                        args: sewingHoleArgs(input: item.fileURL.path,
+                                             output: item.fileURL.path,
+                                             handles: [])
                     )
-                    
+
                     let svgURL = tempDir.appendingPathComponent("\(UUID().uuidString).svg")
                     _ = try await PythonBridge.shared.run(
                         module: "dxf_ops",
@@ -4307,27 +4294,61 @@ class AppState {
         let n = model.base.count
         guard n >= 3 else { return nil }
         let isChamfer = (currentTool == .chamfer)
-        var maxVal = Double.greatestFiniteMagnitude
-        for c in model.corners where group.contains(c.index) {
-            let i = c.index
-            guard i >= 0, i < n else { continue }
+
+        // Interior half-angle θ/2 at base vertex `i` (the angle between its two
+        // edges). Used to convert a fillet radius to a tangent setback and back.
+        func halfAngle(at i: Int) -> Double {
             let cur = model.base[i]
             let prev = model.base[(i - 1 + n) % n]
             let nxt = model.base[(i + 1) % n]
             let aLen = hypot(prev[0] - cur[0], prev[1] - cur[1])
             let bLen = hypot(nxt[0] - cur[0], nxt[1] - cur[1])
-            let halfEdge = Swift.min(aLen, bLen) / 2.0   // never pass the edge midpoint
-            guard halfEdge > 1e-6 else { return 0 }
+            guard aLen > 1e-9, bLen > 1e-9 else { return .pi / 2 }
+            let d1x = (prev[0] - cur[0]) / aLen, d1y = (prev[1] - cur[1]) / aLen
+            let d2x = (nxt[0] - cur[0]) / bLen, d2y = (nxt[1] - cur[1]) / bLen
+            let cosT = Swift.max(-1.0, Swift.min(1.0, d1x * d2x + d1y * d2y))
+            return acos(cosT) / 2.0
+        }
+
+        // How far a neighbouring corner's blend eats into the edge it shares with
+        // `i` (the tangent setback measured along the edge). Zero when the
+        // neighbour carries no fillet/chamfer.
+        var cornerByIndex: [Int: CornerMod] = [:]
+        for c in model.corners { cornerByIndex[c.index] = c }
+        func neighbourSetback(at j: Int) -> Double {
+            guard let m = cornerByIndex[j], m.value > 1e-9 else { return 0 }
+            if m.kind == "chamfer" { return m.value }      // setback is along-edge
+            let t = tan(halfAngle(at: j))
+            return t > 1e-9 ? m.value / t : 0              // fillet: t = r / tan(θ/2)
+        }
+
+        var maxVal = Double.greatestFiniteMagnitude
+        for c in model.corners where group.contains(c.index) {
+            let i = c.index
+            guard i >= 0, i < n else { continue }
+            let cur = model.base[i]
+            let prevIdx = (i - 1 + n) % n
+            let nextIdx = (i + 1) % n
+            let prev = model.base[prevIdx]
+            let nxt = model.base[nextIdx]
+            let aLen = hypot(prev[0] - cur[0], prev[1] - cur[1])   // edge to prev
+            let bLen = hypot(nxt[0] - cur[0], nxt[1] - cur[1])     // edge to next
+
+            // Available run along each adjacent edge. Only limit where this corner
+            // meets *another* blend on the same edge: when the neighbour is in the
+            // active group both ends are driven to the same value, so they split
+            // the edge (half each); when it's a fixed neighbour, subtract its
+            // actual setback; otherwise the whole edge is free (single fillet).
+            let availA = group.contains(prevIdx) ? aLen / 2.0 : Swift.max(0, aLen - neighbourSetback(at: prevIdx))
+            let availB = group.contains(nextIdx) ? bLen / 2.0 : Swift.max(0, bLen - neighbourSetback(at: nextIdx))
+            let avail = Swift.min(availA, availB)
+            guard avail > 1e-6 else { return 0 }
+
             if isChamfer {
-                maxVal = Swift.min(maxVal, halfEdge)
+                maxVal = Swift.min(maxVal, avail)
             } else {
-                // Fillet radius from the max tangent setback: t = r / tan(θ/2),
-                // so r_max = halfEdge · tan(θ/2) where θ is the interior angle.
-                let d1x = (prev[0] - cur[0]) / aLen, d1y = (prev[1] - cur[1]) / aLen
-                let d2x = (nxt[0] - cur[0]) / bLen, d2y = (nxt[1] - cur[1]) / bLen
-                let cosT = Swift.max(-1.0, Swift.min(1.0, d1x * d2x + d1y * d2y))
-                let theta = acos(cosT)
-                maxVal = Swift.min(maxVal, halfEdge * tan(theta / 2.0))
+                // r_max = (available run) · tan(θ/2) where θ is the interior angle.
+                maxVal = Swift.min(maxVal, avail * tan(halfAngle(at: i)))
             }
         }
         return maxVal == Double.greatestFiniteMagnitude ? nil : Swift.max(0, maxVal)
@@ -4718,6 +4739,40 @@ class AppState {
         }
     }
 
+    /// Single source of truth for the `add_holes` arguments. The batch, preview,
+    /// and apply paths all build the same payload — only input/output/handles
+    /// differ — so they share this builder to stay in lockstep.
+    func sewingHoleArgs(input: String, output: String, handles: [String]) -> [String: Any] {
+        return [
+            "input": input,
+            "output": output,
+            "handles": handles,
+            "offset_distance": holeOffsetDistance,
+            "hole_diameter": holeDiameter,
+            "hole_spacing": holeSpacing,
+            "distribution": holeDistribution,
+            "hole_count": holeCount,
+            "pattern": holePattern,
+            "corner_behavior": holeCornerBehavior,
+            "corner_holes": holeCornerHoles,
+            "side": holeSide,
+            "row_spacing": holeRowSpacing,
+            "saddle_spacing": holeSaddleSpacing,
+            "offset_corner_fillet": holeOffsetCornerFillet,
+            "enable_variable_spacing": holeEnableVariableSpacing,
+            "enable_proximity_filter": holeEnableProximityFilter,
+            "enable_corner_interpolation": holeEnableCornerInterpolation,
+            "enable_line_proximity_filter": holeEnableLineProximityFilter,
+            "line_proximity_threshold": holeLineProximityThreshold,
+            "proximity_filter_distance": holeProximityDistance,
+            "variable_spacing_min": holeVariableSpacingMin,
+            "variable_spacing_max": holeVariableSpacingMax,
+            "enable_avoidance": holeEnableAvoidance,
+            "avoidance_radius": holeAvoidanceRadius,
+            "keepout_handles": Array(sewingKeepoutHandles)
+        ]
+    }
+
     func applySewingHoles() {
         saveToHistory()
         guard let url = currentFilePath else { return }
@@ -4731,31 +4786,9 @@ class AppState {
                 _ = try await PythonBridge.shared.run(
                     module: "dxf_ops",
                     op: "add_holes",
-                    args: [
-                        "input": url.path,
-                        "output": activeDxfURL.path,
-                        "handles": Array(selectedHandles),
-                        "offset_distance": holeOffsetDistance,
-                        "hole_diameter": holeDiameter,
-                        "hole_spacing": holeSpacing,
-                        "distribution": holeDistribution,
-                        "hole_count": holeCount,
-                        "pattern": holePattern,
-                        "corner_behavior": holeCornerBehavior,
-                        "side": holeSide,
-                        "row_spacing": holeRowSpacing,
-                        "enable_variable_spacing": holeEnableVariableSpacing,
-                        "enable_proximity_filter": holeEnableProximityFilter,
-                        "enable_corner_interpolation": holeEnableCornerInterpolation,
-                        "enable_line_proximity_filter": holeEnableLineProximityFilter,
-                        "line_proximity_threshold": holeLineProximityThreshold,
-                        "proximity_filter_distance": holeProximityDistance,
-                        "variable_spacing_min": holeVariableSpacingMin,
-                        "variable_spacing_max": holeVariableSpacingMax,
-                        "enable_avoidance": holeEnableAvoidance,
-                        "avoidance_radius": holeAvoidanceRadius,
-                        "keepout_handles": Array(sewingKeepoutHandles)
-                    ]
+                    args: sewingHoleArgs(input: url.path,
+                                         output: activeDxfURL.path,
+                                         handles: Array(selectedHandles))
                 )
 
                 await MainActor.run {
@@ -5187,31 +5220,9 @@ class AppState {
                 _ = try await PythonBridge.shared.run(
                     module: "dxf_ops",
                     op: "add_holes",
-                    args: [
-                        "input": url.path,
-                        "output": previewDxf.path,
-                        "handles": Array(selectedHandles),
-                        "offset_distance": holeOffsetDistance,
-                        "hole_diameter": holeDiameter,
-                        "hole_spacing": holeSpacing,
-                        "distribution": holeDistribution,
-                        "hole_count": holeCount,
-                        "pattern": holePattern,
-                        "corner_behavior": holeCornerBehavior,
-                        "side": holeSide,
-                        "row_spacing": holeRowSpacing,
-                        "enable_variable_spacing": holeEnableVariableSpacing,
-                        "enable_proximity_filter": holeEnableProximityFilter,
-                        "enable_corner_interpolation": holeEnableCornerInterpolation,
-                        "enable_line_proximity_filter": holeEnableLineProximityFilter,
-                        "line_proximity_threshold": holeLineProximityThreshold,
-                        "proximity_filter_distance": holeProximityDistance,
-                        "variable_spacing_min": holeVariableSpacingMin,
-                        "variable_spacing_max": holeVariableSpacingMax,
-                        "enable_avoidance": holeEnableAvoidance,
-                        "avoidance_radius": holeAvoidanceRadius,
-                        "keepout_handles": Array(sewingKeepoutHandles)
-                    ]
+                    args: sewingHoleArgs(input: url.path,
+                                         output: previewDxf.path,
+                                         handles: Array(selectedHandles))
                 )
 
                 try Task.checkCancellation()

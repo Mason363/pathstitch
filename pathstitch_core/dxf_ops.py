@@ -222,15 +222,26 @@ def find_corners(coords: List[Tuple[float, float]], angle_threshold_deg: float =
     Angles are calculated between consecutive segments.
     """
     corners = []
+    coords = list(coords)
     n = len(coords)
     if n < 3:
         return corners
 
     threshold_rad = math.radians(angle_threshold_deg)
-    
+
     # Check loop state
     is_loop = coords[0] == coords[-1] or math.hypot(coords[0][0] - coords[-1][0], coords[0][1] - coords[-1][1]) < 1e-5
-    
+
+    # A closed ring usually repeats its first point as the last. Drop that
+    # duplicate so the modular wrap below doesn't create a zero-length segment at
+    # the seam — which would otherwise hide the corner sitting on the seam vertex.
+    if is_loop and n >= 4 and math.hypot(coords[0][0] - coords[-1][0],
+                                         coords[0][1] - coords[-1][1]) < 1e-9:
+        coords = coords[:-1]
+        n = len(coords)
+        if n < 3:
+            return corners
+
     start_idx = 0 if is_loop else 1
     end_idx = n if is_loop else n - 1
 
@@ -291,7 +302,8 @@ def sample_path(path: LineString, spacing: float, is_closed: bool, shift: float 
                     points.append((pt.x, pt.y))
     return points
 
-def get_offset_geometry(geom: LineString, distance: float, side: str) -> Optional[Any]:
+def get_offset_geometry(geom: LineString, distance: float, side: str,
+                        join_style: str = "mitre") -> Optional[Any]:
     """Offsets a curve, expanding/shrinking closed shapes and side-offsetting open
     ones. Uses polygon ``buffer`` for closed rings (robust expand/shrink that never
     self-intersects into a "shifted" copy) and ``offset_curve`` for open lines —
@@ -302,6 +314,8 @@ def get_offset_geometry(geom: LineString, distance: float, side: str) -> Optiona
       * ``left`` / ``right``  — offset toward the first edge's left / right normal,
         which is what the on-canvas drag handle uses. Mapped to expand/shrink via
         the ring winding so dragging the handle outward always grows the shape.
+    ``join_style`` selects the corner treatment of the offset: ``"mitre"`` keeps
+    sharp corners (the default), ``"round"`` fillets them, ``"bevel"`` chamfers.
     Returns a ``LinearRing`` (closed), ``LineString``/``MultiLineString`` (open),
     ``MultiLineString`` (closed result that split), or ``None`` (e.g. shrunk away).
     """
@@ -310,6 +324,9 @@ def get_offset_geometry(geom: LineString, distance: float, side: str) -> Optiona
     if abs(distance) < 1e-5:
         return geom
 
+    # mitre_limit only matters for mitre joins; a large limit keeps sharp corners
+    # sharp instead of beveling them, while round/bevel ignore it.
+    mlimit = 4.0
     dist = abs(distance)
     is_closed = geom.is_closed or isinstance(geom, LinearRing)
 
@@ -332,7 +349,17 @@ def get_offset_geometry(geom: LineString, distance: float, side: str) -> Optiona
                 toward_inside = (side == "left") == ring.is_ccw
                 d = -dist if toward_inside else dist
 
-            result = poly.buffer(d, join_style="mitre", mitre_limit=4.0)
+            if join_style == "round" and d < 0:
+                # Eroding a polygon keeps its convex corners sharp — a plain round
+                # join only rounds reflex corners on the way in. To actually fillet
+                # the inner offset's corners we open the shape: erode by 2·dist then
+                # dilate back by dist (round), which rounds the convex corners with
+                # radius `dist` while keeping the straight runs at the right offset.
+                opened = poly.buffer(2.0 * d, join_style="round").buffer(-d, join_style="round")
+                result = opened if (opened is not None and not opened.is_empty) \
+                    else poly.buffer(d, join_style="round")
+            else:
+                result = poly.buffer(d, join_style=join_style, mitre_limit=mlimit)
             if result.is_empty:
                 return None
             if isinstance(result, MultiPolygon):
@@ -344,7 +371,7 @@ def get_offset_geometry(geom: LineString, distance: float, side: str) -> Optiona
     else:
         try:
             d = dist if side in ("left", "outer") else -dist
-            oc = geom.offset_curve(d, join_style="mitre", mitre_limit=4.0)
+            oc = geom.offset_curve(d, join_style=join_style, mitre_limit=mlimit)
             return None if oc.is_empty else oc
         except Exception:
             return None
@@ -2288,7 +2315,10 @@ def op_add_holes(args: Dict[str, Any]) -> Dict[str, Any]:
     
     enable_variable_spacing = args.get("enable_variable_spacing", True)
     enable_proximity_filter = args.get("enable_proximity_filter", True)
-    enable_corner_interpolation = args.get("enable_corner_interpolation", True)
+    # Accepted for backward compatibility but no longer used: corner handling is
+    # now governed by the real offset curve (join style) and the Keep/Step corner
+    # behaviour, which replaced the old per-step normal-interpolation hack.
+    _ = args.get("enable_corner_interpolation", True)
 
     # Distribution mode (MAS-59): "spacing" fills the contour at a fixed pitch;
     # "count" places a fixed number of evenly-spaced holes per contour (the pitch
@@ -2312,6 +2342,25 @@ def op_add_holes(args: Dict[str, Any]) -> Dict[str, Any]:
     keepout_handles = args.get("keepout_handles", []) or []
     enable_avoidance = bool(args.get("enable_avoidance", False))
     avoidance_radius = float(args.get("avoidance_radius", 3.0))
+
+    # Offset corner treatment: sharp (mitre, the default) keeps crisp corners on
+    # the offset stitch line; filleted (round) rounds them. Maps straight to the
+    # buffer/offset_curve join style.
+    offset_corner_fillet = bool(args.get("offset_corner_fillet", False))
+    join_style = "round" if offset_corner_fillet else "mitre"
+
+    # Saddle row distance: the gap between the two staggered rows of a saddle
+    # stitch (falls back to the legacy row_spacing when not supplied).
+    saddle_spacing = float(args.get("saddle_spacing", row_spacing))
+
+    # Corner holes (on by default): drop a stitch on — or as near as possible to —
+    # every corner that turns by more than `corner_angle_threshold` degrees, and
+    # flex the pitch between corners (variable distance) so a hole lands on each
+    # one. When off, lay a single continuous even-spaced run around the contour.
+    # (The old `corner_behavior` Keep/Step arg is now vestigial.)
+    corner_holes = bool(args.get("corner_holes", True))
+    corner_angle_threshold = float(args.get("corner_angle_threshold", 45.0))
+    spacing_target = max(1e-3, hole_spacing)
 
     if not input_path or not os.path.exists(input_path):
         return {"status": "error", "message": f"Input file not found: {input_path}"}
@@ -2408,12 +2457,6 @@ def op_add_holes(args: Dict[str, Any]) -> Dict[str, Any]:
             simplified_paths.append(p)
     paths = simplified_paths
 
-    # Hard cap on samples per contour so a pathologically large contour can never
-    # wedge the worker (the 60 s bridge timeout would otherwise fire and surface
-    # as "Python worker was restarted"). For any realistic contour this leaves the
-    # 0.1 mm sampling untouched; only multi-metre contours stretch the pitch.
-    MAX_STEPS = 12000
-
     # Prepared polygons for the obstacle ("other") rings, built once. The old code
     # reconstructed Polygon(og) inside the per-candidate collision check — an
     # O(candidates × rings) cost that dominated on busy drawings.
@@ -2432,232 +2475,200 @@ def op_add_holes(args: Dict[str, Any]) -> Dict[str, Any]:
     hole_centers: List[Tuple[float, float]] = []
     hole_radius = hole_diameter / 2.0
 
-    def check_collision_with_others(p_pt, geoms_list, radius: float, og_distances: dict, og_contains_path: dict, og_is_contour: dict) -> bool:
-        for og in geoms_list:
-            # Skip only geometry that *is* part of the sewing contour (collinear
-            # overlap). Geometry that merely *crosses* the contour is a real
-            # obstacle and must still filter holes — the old `dist < 0.05` skip
-            # wrongly excluded crossing lines, so holes landed across them (MAS-106).
+    # ---- Obstacle filter -----------------------------------------------------
+    # A hole is dropped when it sits on a crossing line (line-proximity filter),
+    # within its own radius of any other edge, or inside a closed "other" entity
+    # such as a piece of hardware. Geometry that runs *along* the contour is not
+    # an obstacle — that is classified per-contour via `og_is_contour` (MAS-106).
+    def blocked_by_obstacle(p_pt, og_is_contour) -> bool:
+        for og in other_geoms:
             if og_is_contour.get(id(og), False):
                 continue
-            if enable_line_proximity_filter and og.distance(p_pt) < line_proximity_threshold:
+            try:
+                d = og.distance(p_pt)
+            except Exception:
+                continue
+            if enable_line_proximity_filter and d < line_proximity_threshold:
                 return True
-            if og.distance(p_pt) < radius:
+            if d < hole_radius:
                 return True
-            if isinstance(og, LinearRing):
+            pp = og_prepared.get(id(og))
+            if pp is not None:
                 try:
-                    if og_contains_path.get(id(og), False):
-                        continue
-                    pprep = og_prepared.get(id(og))
-                    if pprep is not None and pprep.contains(p_pt):
+                    if pp.contains(p_pt):
                         return True
                 except Exception:
                     pass
         return False
 
-    for path in paths:
-        # Precompute path-to-other-geoms distances and containment checks to avoid O(N*M) heavy calculations in the hot loop
-        og_distances = {}
-        og_contains_path = {}
-        og_is_contour = {}
-        for og in other_geoms:
+    def _iter_offset_lines(geo) -> List[LineString]:
+        """Flatten an offset result (ring / line / multi / polygon) into a list of
+        non-empty LineStrings to walk."""
+        if geo is None:
+            return []
+        out: List[LineString] = []
+        if isinstance(geo, LinearRing):
+            out.append(LineString(geo.coords))
+        elif isinstance(geo, LineString):
+            out.append(geo)
+        elif isinstance(geo, MultiLineString):
+            for g in geo.geoms:
+                out.append(LineString(g.coords) if isinstance(g, LinearRing) else g)
+        else:
             try:
-                og_distances[id(og)] = og.distance(path)
+                out.append(LineString(geo.exterior.coords))
             except Exception:
-                og_distances[id(og)] = 9999.0
+                pass
+        return [ln for ln in out if (ln is not None and not ln.is_empty and ln.length > 1e-6)]
 
-            # An "other" geometry that overlaps the contour along a length (not just
-            # a crossing point) is really part of the contour itself — skip it as an
-            # obstacle. A crossing line meets the contour at a point and is kept so
-            # holes near it are filtered (MAS-106).
+    def _even_count(length: float) -> int:
+        """Number of stitch intervals along `length` for the active spacing / count
+        / variable-spacing settings. Always >= 1 so a short run still gets a hole."""
+        if distribution == "count" and hole_count > 0:
+            return max(1, hole_count)
+        N = max(1, int(round(length / spacing_target)))
+        if enable_variable_spacing and N >= 1:
+            pitch = length / N
+            if pitch < variable_spacing_min and N > 1:
+                N = max(1, int(length / variable_spacing_min))
+            elif pitch > variable_spacing_max:
+                N = int(math.ceil(length / variable_spacing_max))
+        return max(1, N)
+
+    def sample_offset_line(line: LineString, is_loop: bool, phase: float,
+                           corner_pts) -> List[Tuple[float, float]]:
+        """Place holes at even arc length along one offset polyline. `phase` (0..1)
+        staggers the start by a fraction of the pitch (the second saddle row).
+
+        With corner holes on, a stitch lands on (or as near as possible to) every
+        corner: each run between corners is split into the whole number of steps
+        whose pitch is nearest the target, so the distance between holes flexes a
+        little to put a hole on each corner."""
+        L = line.length
+        if L < 1e-6:
+            return []
+        out: List[Tuple[float, float]] = []
+
+        stops: List[float] = []
+        if corner_holes and corner_pts:
+            for cx, cy in corner_pts:
+                try:
+                    s = line.project(ShapelyPoint(cx, cy))
+                except Exception:
+                    continue
+                if -1e-9 <= s <= L + 1e-9:
+                    stops.append(min(L, max(0.0, s)))
+            stops = sorted(set(round(s, 5) for s in stops))
+
+        if corner_holes and stops:
+            if is_loop:
+                runs = [(s, ((stops[(i + 1) % len(stops)] - s) % L) or L)
+                        for i, s in enumerate(stops)]
+            else:
+                edges = sorted(set([0.0] + stops + [L]))
+                runs = [(edges[i], edges[i + 1] - edges[i]) for i in range(len(edges) - 1)]
+            for a, run in runs:
+                if run < 1e-6:
+                    continue
+                # Variable pitch: nearest whole number of steps to the target so a
+                # hole sits on the run's start corner and the rest stay near target.
+                if distribution == "count" and hole_count > 0:
+                    n = _even_count(run)
+                else:
+                    n = max(1, int(round(run / spacing_target)))
+                for k in range(n):
+                    d = a + run * (k / n)
+                    pt = line.interpolate(d % L if is_loop else min(L, d))
+                    out.append((pt.x, pt.y))
+            if not is_loop:
+                pt = line.interpolate(L)
+                out.append((pt.x, pt.y))
+        else:
+            N = _even_count(L)
+            step = L / N
+            if is_loop:
+                for i in range(N):
+                    d = (i * step + phase * step) % L
+                    pt = line.interpolate(d)
+                    out.append((pt.x, pt.y))
+            else:
+                start = phase * step
+                i = 0
+                while True:
+                    d = start + i * step
+                    if d > L + 1e-6:
+                        break
+                    pt = line.interpolate(min(L, max(0.0, d)))
+                    out.append((pt.x, pt.y))
+                    i += 1
+        return out
+
+    for path in paths:
+        is_closed = path.is_closed or math.hypot(
+            path.coords[0][0] - path.coords[-1][0],
+            path.coords[0][1] - path.coords[-1][1]) < 0.05
+
+        # Classify each "other" geom for this contour: one that overlaps the
+        # contour for a length *is* the contour (skip), one that merely crosses is
+        # a real obstacle that filters nearby holes (MAS-106).
+        og_is_contour: Dict[int, bool] = {}
+        for og in other_geoms:
             try:
                 inter = og.intersection(path)
                 og_is_contour[id(og)] = bool(getattr(inter, "length", 0.0) > 0.5)
             except Exception:
-                og_is_contour[id(og)] = og_distances[id(og)] < 0.05
-
-            if isinstance(og, LinearRing):
-                from shapely.geometry import Polygon
                 try:
-                    poly = Polygon(og)
-                    og_contains_path[id(og)] = poly.contains(path)
+                    og_is_contour[id(og)] = og.distance(path) < 0.05
                 except Exception:
-                    og_contains_path[id(og)] = False
-            else:
-                og_contains_path[id(og)] = False
+                    og_is_contour[id(og)] = False
 
-        is_closed = path.is_closed or math.hypot(path.coords[0][0] - path.coords[-1][0], path.coords[0][1] - path.coords[-1][1]) < 0.05
-        polygon = None
-        prepared_polygon = None
-        if is_closed:
+        corner_pts: List[Tuple[float, float]] = []
+        if corner_holes:
             try:
-                polygon = Polygon(path)
-                # A self-touching imported curve yields an invalid polygon, whose
-                # `.contains` is unreliable — that is what scattered holes onto the
-                # wrong side / "all over the place" (MAS-152). buffer(0) repairs it
-                # into a valid (possibly multi-part) region.
-                if not polygon.is_valid:
-                    polygon = polygon.buffer(0)
-                if polygon.is_empty:
-                    polygon = None
-                else:
-                    prepared_polygon = prep(polygon)
+                corner_pts = find_corners(list(path.coords), corner_angle_threshold)
             except Exception:
-                polygon = None
-                prepared_polygon = None
-        offsets = []
-        if pattern == "saddle":
-            offsets.append((offset_distance - row_spacing / 2.0, 0.0))
-            offsets.append((offset_distance + row_spacing / 2.0, hole_spacing / 2.0))
-        else:
-            offsets.append((offset_distance, 0.0))
-            
-        step_size = 0.1
-        L = path.length
-        if L < 0.1:
-            continue
-        steps = min(int(math.ceil(L / step_size)), MAX_STEPS)
-        
-        for dist, shift in offsets:
-            contour_internal_candidates = []
-            contour_external_candidates = []
-            prev_pt = None
-            prev_normal = None
-            
-            for i in range(steps + 1):
-                d = (i / steps) * L
-                pt, normal = get_point_and_normal(path, d, is_closed)
-                
-                # Corner normal interpolation
-                if enable_corner_interpolation and prev_pt and prev_normal:
-                    dot = prev_normal[0]*normal[0] + prev_normal[1]*normal[1]
-                    if dot < 0.999:
-                        angle1 = math.atan2(prev_normal[1], prev_normal[0])
-                        angle2 = math.atan2(normal[1], normal[0])
-                        diff = angle2 - angle1
-                        while diff < -math.pi: diff += 2 * math.pi
-                        while diff > math.pi: diff -= 2 * math.pi
-                        if abs(diff) > 0.05:
-                            arc_steps = int(math.ceil(dist * abs(diff) / step_size))
-                            for j in range(1, arc_steps):
-                                t = j / arc_steps
-                                angle = angle1 + diff * t
-                                interp_normal = (math.cos(angle), math.sin(angle))
-                                p1 = (prev_pt[0] + interp_normal[0] * dist, prev_pt[1] + interp_normal[1] * dist)
-                                p2 = (prev_pt[0] - interp_normal[0] * dist, prev_pt[1] - interp_normal[1] * dist)
-                                for p in [p1, p2]:
-                                    p_pt = ShapelyPoint(p)
-                                    is_internal = prepared_polygon.contains(p_pt) if (is_closed and prepared_polygon) else (p == p1)
-                                    parent_dist = path.distance(p_pt)
-                                    
-                                    # Line proximity filter check for self-overlap
-                                    is_overlap = False
-                                    if enable_line_proximity_filter:
-                                        if parent_dist < line_proximity_threshold:
-                                            is_overlap = True
-                                    else:
-                                        if parent_dist < dist - 0.5:
-                                            is_overlap = True
-                                            
-                                    if is_overlap:
-                                        proj_d = path.project(p_pt)
-                                        d_diff = abs(d - proj_d)
-                                        if is_closed:
-                                            d_diff = min(d_diff, L - d_diff)
-                                        if d_diff > 3.0 * offset_distance:
-                                            continue
-                                            
-                                    if check_collision_with_others(p_pt, other_geoms, hole_radius, og_distances, og_contains_path, og_is_contour):
-                                        continue
-                                    if is_internal:
-                                        contour_internal_candidates.append(p)
-                                    else:
-                                        contour_external_candidates.append(p)
-                                        
-                # Regular candidate normal offset
-                p1 = (pt[0] + normal[0] * dist, pt[1] + normal[1] * dist)
-                p2 = (pt[0] - normal[0] * dist, pt[1] - normal[1] * dist)
-                for p in [p1, p2]:
-                    p_pt = ShapelyPoint(p)
-                    is_internal = prepared_polygon.contains(p_pt) if (is_closed and prepared_polygon) else (p == p1)
-                    parent_dist = path.distance(p_pt)
-                    
-                    # Line proximity filter check for self-overlap
-                    is_overlap = False
-                    if enable_line_proximity_filter:
-                        if parent_dist < line_proximity_threshold:
-                            is_overlap = True
-                    else:
-                        if parent_dist < dist - 0.5:
-                            is_overlap = True
-                            
-                    if is_overlap:
-                        proj_d = path.project(p_pt)
-                        d_diff = abs(d - proj_d)
-                        if is_closed:
-                            d_diff = min(d_diff, L - d_diff)
-                        if d_diff > 3.0 * offset_distance:
-                            continue
-                            
-                    if check_collision_with_others(p_pt, other_geoms, hole_radius, og_distances, og_contains_path, og_is_contour):
-                        continue
-                    if is_internal:
-                        contour_internal_candidates.append(p)
-                    else:
-                        contour_external_candidates.append(p)
-                prev_pt = pt
-                prev_normal = normal
-                
-            if distribution == "count" and hole_count > 0:
-                # Even count per contour. Seed the pitch from contour length / count,
-                # then refine: filter_by_density's ">= spacing" test overshoots a
-                # little each step, so we proportionally rescale the pitch a few
-                # times until it yields exactly the requested number of holes.
-                def _spacing_for_count(pts, target):
-                    if target <= 0 or len(pts) < 2:
-                        return hole_spacing
-                    clen = sum(math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1])
-                               for i in range(1, len(pts)))
-                    if clen <= 1e-6:
-                        return hole_spacing
-                    spacing = clen / target
-                    best_spacing, best_err = spacing, None
-                    for _ in range(12):
-                        m = len(filter_by_density(pts, spacing, 0.0))
-                        err = abs(m - target)
-                        # Keep the closest; on a tie prefer not undershooting.
-                        if best_err is None or err < best_err or (err == best_err and m > target):
-                            best_err, best_spacing = err, spacing
-                        if m == target or m == 0:
-                            break
-                        spacing *= float(m) / float(target)
-                    return max(best_spacing, 1e-6)
-                spacing_internal = _spacing_for_count(contour_internal_candidates, hole_count)
-                spacing_external = _spacing_for_count(contour_external_candidates, hole_count)
-            else:
-                spacing_internal = select_optimal_spacing(contour_internal_candidates, is_closed, hole_spacing, enable_variable_spacing, variable_spacing_min, variable_spacing_max)
-                spacing_external = select_optimal_spacing(contour_external_candidates, is_closed, hole_spacing, enable_variable_spacing, variable_spacing_min, variable_spacing_max)
-            
-            final_internal = filter_by_density(contour_internal_candidates, spacing_internal, shift)
-            final_external = filter_by_density(contour_external_candidates, spacing_external, shift)
-            
-            sides_to_use = []
-            if side in ("left", "inner"):
-                sides_to_use = [True]
-            elif side in ("right", "outer"):
-                sides_to_use = [False]
-            else:
-                sides_to_use = [True, False]
-                
-            for is_int in sides_to_use:
-                cand_list = final_internal if is_int else final_external
-                for p in cand_list:
-                    selected_pt = (p[0], p[1])
-                    # Ensure no duplicate centers
-                    if not any(math.hypot(selected_pt[0] - hc[0], selected_pt[1] - hc[1]) < 0.01 for hc in hole_centers):
-                        hole_centers.append(selected_pt)
+                corner_pts = []
 
+        # Map the panel's side to the offset side. Closed contours: left = inner
+        # (inside the shape), right = outer. Open paths keep left / right normals.
+        if is_closed:
+            side_map = {"left": ["inner"], "inner": ["inner"], "right": ["outer"],
+                        "outer": ["outer"], "both": ["inner", "outer"]}.get(side, ["inner"])
+        else:
+            side_map = {"left": ["left"], "inner": ["left"], "right": ["right"],
+                        "outer": ["right"], "both": ["left", "right"]}.get(side, ["left"])
+
+        # Saddle = two staggered rows straddling the offset by saddle_spacing.
+        if pattern == "saddle":
+            rows = [(offset_distance - saddle_spacing / 2.0, 0.0),
+                    (offset_distance + saddle_spacing / 2.0, 0.5)]
+        else:
+            rows = [(offset_distance, 0.0)]
+
+        for s in side_map:
+            for row_off, phase in rows:
+                eff_off = max(0.25, abs(row_off))   # never sit on the contour
+                geo = get_offset_geometry(path, eff_off, s, join_style=join_style)
+                for line in _iter_offset_lines(geo):
+                    is_loop = bool(getattr(line, "is_closed", False)) or is_closed
+                    for (px, py) in sample_offset_line(line, is_loop, phase, corner_pts):
+                        p_pt = ShapelyPoint(px, py)
+                        if blocked_by_obstacle(p_pt, og_is_contour):
+                            continue
+                        if not any(math.hypot(px - hc[0], py - hc[1]) < 0.05
+                                   for hc in hole_centers):
+                            hole_centers.append((px, py))
+
+    # ---- Proximity merge -----------------------------------------------------
+    # Remove holes closer than the proximity distance. A saddle stitch's two rows
+    # are deliberately close, so cap the merge distance just under the nearest
+    # legitimate neighbour there to avoid eating the pattern.
     if enable_proximity_filter and hole_centers:
+        eff_prox = proximity_filter_distance
+        if pattern == "saddle":
+            nearest_legit = min(spacing_target,
+                                math.hypot(saddle_spacing, spacing_target / 2.0))
+            eff_prox = min(eff_prox, 0.9 * nearest_legit)
         to_remove = set()
         for i in range(len(hole_centers)):
             if i in to_remove:
@@ -2665,23 +2676,22 @@ def op_add_holes(args: Dict[str, Any]) -> Dict[str, Any]:
             for j in range(i + 1, len(hole_centers)):
                 if j in to_remove:
                     continue
-                dist = math.hypot(hole_centers[i][0] - hole_centers[j][0], hole_centers[i][1] - hole_centers[j][1])
-                if dist < proximity_filter_distance:
+                dd = math.hypot(hole_centers[i][0] - hole_centers[j][0],
+                                hole_centers[i][1] - hole_centers[j][1])
+                if dd < eff_prox:
                     to_remove.add(j)
-        hole_centers = [hole_centers[idx] for idx in range(len(hole_centers)) if idx not in to_remove]
+        hole_centers = [hole_centers[idx] for idx in range(len(hole_centers))
+                        if idx not in to_remove]
 
-    # Proximity filter against existing circles
-    filtered_centers = []
-    for hc in hole_centers:
-        too_close = False
-        for cx, cy, r in existing_circles:
-            dist = math.hypot(hc[0] - cx, hc[1] - cy)
-            if dist < proximity_filter_distance:
-                too_close = True
-                break
-        if not too_close:
-            filtered_centers.append(hc)
-    hole_centers = filtered_centers
+    # Drop holes that collide with circles already in the drawing (e.g. rivets).
+    if existing_circles:
+        filtered_centers = []
+        for hc in hole_centers:
+            too_close = any(math.hypot(hc[0] - cx, hc[1] - cy) < proximity_filter_distance
+                            for cx, cy, r in existing_circles)
+            if not too_close:
+                filtered_centers.append(hc)
+        hole_centers = filtered_centers
 
     # Keep-out clearance (MAS-120 Phase 1, Gap Mode): drop any hole whose center is
     # within `avoidance_radius` (C) of a keep-out element, or inside a closed one.
