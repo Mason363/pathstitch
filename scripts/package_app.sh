@@ -80,9 +80,12 @@ VOL="Pathstitch"
 # height h mm sits at y = 500 − h·5. Constants below match the engraving spec /
 # scripts/dmg/background-template.svg.
 WIN_W=500; WIN_H=500          # window content size (points)
-APP_X=150;  APP_Y=260         # Pathstitch.app icon center  (= 30 mm, 48 mm)
-APPL_X=350; APPL_Y=260        # Applications shortcut center (= 70 mm, 48 mm)
-ICON_SIZE=100                 # 100 pt = 20 mm icon
+# Icon centers are aligned to the hand-stitched frames in the leather photo
+# (scripts/dmg/background.png), measured at fractional centers (0.301, 0.476)
+# and (0.704, 0.478) — i.e. ~y=238 in the 500-pt window, slightly above middle.
+APP_X=150;  APP_Y=238         # Pathstitch.app icon center  → left stitched frame
+APPL_X=352; APPL_Y=238        # Applications shortcut center → right stitched frame
+ICON_SIZE=100                 # 100 pt = 20 mm icon (fills the ~20 mm stitched frame)
 
 build_plain_dmg() {
   hdiutil create -volname "$VOL" -srcfolder "$STAGE" -ov -format UDZO "$DMG_OUT" >/dev/null
