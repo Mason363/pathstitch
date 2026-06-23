@@ -92,6 +92,10 @@ struct ThreeDModeView: View {
     
     var body: some View {
         HStack(spacing: 0) {
+            // Far-left tool strip (like 2D): Move and Plane are first-class tools
+            // here instead of buried toggles in the right panel.
+            threeDToolStrip
+
             // Left Panel: Solid Bodies (200px wide)
             VStack(alignment: .leading, spacing: 0) {
                 Text("SOLID BODIES")
@@ -555,6 +559,50 @@ struct ThreeDModeView: View {
                 state.setBodyOffset(index: i, x: o[0], y: o[1], z: o[2])
             }
         )
+    }
+
+    /// The far-left vertical tool strip for 3D mode. Mirrors the 2D sidebar so
+    /// Move (body translate) and Plane (projection plane) are pickable tools
+    /// rather than toggles hidden in the inspector.
+    private var threeDToolStrip: some View {
+        let moveActive = state.bodyMoveToolActive
+        let planeActive = state.isPlaneSelectionActive
+        return VStack(spacing: 6) {
+            threeDToolButton(icon: "cursorarrow", active: !moveActive && !planeActive,
+                             help: "Select — orbit/select faces (no active tool)") {
+                if state.bodyMoveToolActive { state.toggleBodyMoveTool() }
+                if state.isPlaneSelectionActive { state.cancelPlaneSelection() }
+            }
+            threeDToolButton(icon: "move.3d", active: moveActive,
+                             help: "Move — select a body and translate it") {
+                if state.isPlaneSelectionActive { state.cancelPlaneSelection() }
+                if !state.bodyMoveToolActive { state.toggleBodyMoveTool() }
+            }
+            threeDToolButton(icon: "square.dashed", active: planeActive,
+                             help: "Plane — define a projection plane") {
+                if state.bodyMoveToolActive { state.toggleBodyMoveTool() }
+                if !state.isPlaneSelectionActive { state.startPlaneSelection() }
+            }
+            Spacer()
+        }
+        .padding(.vertical, 10)
+        .frame(width: 44)
+        .background(Color.bg_panel)
+        .overlay(Rectangle().frame(width: 1).foregroundColor(Color.border_subtle), alignment: .trailing)
+    }
+
+    private func threeDToolButton(icon: String, active: Bool, help: String,
+                                  action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 16))
+                .foregroundColor(active ? Color.accent : Color.text_secondary)
+                .frame(width: 32, height: 32)
+                .background(active ? Color.accent.opacity(0.15) : Color.clear)
+                .cornerRadius(6)
+        }
+        .buttonStyle(PlainButtonStyle())
+        .help(help)
     }
 
     @ViewBuilder

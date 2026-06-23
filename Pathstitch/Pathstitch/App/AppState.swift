@@ -3098,6 +3098,78 @@ class AppState {
         }
     }
 
+    /// Imports several STEP files into one 3D workspace, **sequentially**. Each
+    /// combine builds on the previous result, so they must run in order — the old
+    /// per-file loop in `importFiles` fired them in parallel and raced on
+    /// `currentStepFilePath`, so only the last file survived (which is why
+    /// multi-import "wasn't a feature"). `op_combine_steps` spaces overlapping
+    /// bodies apart, so the models auto-distribute side by side.
+    func importStepModels(_ urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        if urls.count == 1 { importStepModel(url: urls[0]); return }
+
+        let tempDir = sessionTempDirectory
+        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+
+        // Stage every incoming file now — security-scoped access is only valid
+        // synchronously here, before the async combine chain runs.
+        var staged: [URL] = []
+        for url in urls {
+            let scoped = url.startAccessingSecurityScopedResource()
+            let ext = url.pathExtension.lowercased()
+            let dst = tempDir.appendingPathComponent("incoming_\(UUID().uuidString).\(ext)")
+            try? FileManager.default.removeItem(at: dst)
+            do { try FileManager.default.copyItem(at: url, to: dst); staged.append(dst) }
+            catch { logAction("Import 3D Models Error", details: "Could not read \(url.lastPathComponent)") }
+            if scoped { url.stopAccessingSecurityScopedResource() }
+        }
+        guard !staged.isEmpty else { return }
+
+        activeMode = .threeD
+        isProcessing = true
+        let combinedURL = tempDir.appendingPathComponent("active.step")
+        let existingBase: String? = (currentStepFilePath != nil
+            && FileManager.default.fileExists(atPath: currentStepFilePath!.path)
+            && !bodies3D.isEmpty) ? currentStepFilePath!.path : nil
+        let fileCount = staged.count
+
+        Task {
+            var basePath: String
+            var pending = staged
+            if let existing = existingBase { basePath = existing }
+            else { basePath = pending.removeFirst().path }   // seed with the first model
+            do {
+                for inc in pending {
+                    let res = try await PythonBridge.shared.run(
+                        module: "step_ops", op: "combine_steps",
+                        args: ["input": basePath, "incoming": inc.path, "output": combinedURL.path])
+                    if let status = res["status"] as? String, status != "ok" {
+                        throw NSError(domain: "Pathstitch", code: 1,
+                                      userInfo: [NSLocalizedDescriptionKey: (res["message"] as? String) ?? "combine failed"])
+                    }
+                    basePath = combinedURL.path
+                }
+                // Single surviving file (the rest failed to stage): promote it.
+                if basePath != combinedURL.path {
+                    try? FileManager.default.removeItem(at: combinedURL)
+                    try FileManager.default.copyItem(atPath: basePath, toPath: combinedURL.path)
+                }
+                await MainActor.run {
+                    self.currentStepFilePath = combinedURL
+                    self.selectedFaces3D.removeAll()
+                    self.reloadSTEP()
+                    self.logAction("Import 3D Models", details: "Loaded \(fileCount) models into the 3D workspace")
+                }
+            } catch {
+                await MainActor.run {
+                    self.errorMessage = "Failed to import 3D models: \(error.localizedDescription)"
+                    self.isProcessing = false
+                }
+            }
+            for s in staged { try? FileManager.default.removeItem(at: s) }
+        }
+    }
+
     func importFiles(_ urls: [URL], dropAt: CGPoint? = nil) {
         guard !urls.isEmpty else { return }
         if activeMode == .batch {
@@ -3127,11 +3199,16 @@ class AppState {
             WindowManager.shared.openAnyFile(url: fileURL)
         }
 
-        // Load 3D models into this same window/workspace (MAS-107). Dropping a
-        // model onto a workspace that already holds one appends it and the
-        // viewport distributes them side by side (MAS-125 — handled inside
-        // importStepModel).
-        for modelURL in stepModels {
+        // Load 3D models into this same window/workspace (MAS-107). Several files
+        // at once import sequentially into ONE workspace and auto-distribute
+        // (importStepModels); the combine engine is STEP-only, so obj/stl still
+        // go through the single-file path. Dropping onto an existing model
+        // appends and spaces them apart (MAS-125).
+        let combinable: Set<String> = ["step", "stp"]
+        let stepCombinable = stepModels.filter { combinable.contains($0.pathExtension.lowercased()) }
+        let stepOther = stepModels.filter { !combinable.contains($0.pathExtension.lowercased()) }
+        if !stepCombinable.isEmpty { importStepModels(stepCombinable) }
+        for modelURL in stepOther {
             importStepModel(url: modelURL)
         }
 
