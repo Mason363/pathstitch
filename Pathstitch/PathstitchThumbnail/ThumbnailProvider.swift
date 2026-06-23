@@ -24,7 +24,12 @@ class ThumbnailProvider: QLThumbnailProvider {
         // Render the file (.stch embedded preview, or freshly-framed DXF) to a
         // black-on-white bitmap sized generously, then blit it aspect-fit into the
         // thumbnail context so it stays crisp when downscaled to a Finder icon.
-        let renderSize = CGSize(width: 1200, height: 800)
+        //
+        // Square canvas (not the old 1200×800): Finder icon tiles are square, so a
+        // wide render got letterboxed and the part filled barely half the tile —
+        // it read as small and off-centre. A square source aspect-fits to fill the
+        // tile, so the part lands centred and as large as its own margin allows.
+        let renderSize = CGSize(width: 1024, height: 1024)
         // STEP files get the lightweight isometric point-cloud preview (MAS-63);
         // everything else uses the DXF/.stch renderer.
         let ext = fileURL.pathExtension.lowercased()

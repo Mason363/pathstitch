@@ -121,12 +121,20 @@ class PreviewViewController: NSViewController, QLPreviewingController {
         let scnView = SCNView(frame: view.bounds)
         scnView.autoresizingMask = [.width, .height]
         scnView.allowsCameraControl = true          // drag to rotate / scroll to zoom
-        scnView.autoenablesDefaultLighting = true
+        // Explicit lighting instead of `autoenablesDefaultLighting` (a single
+        // camera-mounted omni with NO ambient term). The foxtrot tessellation of
+        // curved B-rep faces leaves thin, near-edge-on triangle strips along the
+        // surface seams; under a single light those strips get ~0 diffuse and
+        // rendered as the jagged BLACK lines users saw across the part. An ambient
+        // floor guarantees no triangle goes black — matching the thumbnail
+        // renderer, which already clamps shading to a 0.30 grey floor (MAS-157).
+        scnView.autoenablesDefaultLighting = false
         scnView.backgroundColor = .white
         scnView.antialiasingMode = .multisampling4X
 
         let scene = SCNScene()
         scnView.scene = scene
+        addStudioLighting(to: scene)
 
         if let node = makeMeshNode(mesh: mesh) {
             scene.rootNode.addChildNode(node)
@@ -262,6 +270,31 @@ class PreviewViewController: NSViewController, QLPreviewingController {
         // Slight tilt so the part isn't seen perfectly edge-on initially.
         node.eulerAngles = SCNVector3(-CGFloat.pi / 8, CGFloat.pi / 8, 0)
         return node
+    }
+
+    // MARK: - Lighting
+
+    /// Ambient floor + key/fill directional lights for the STEP mesh scene. The
+    /// ambient term is what kills the black seam lines (no fragment can fall below
+    /// it); the two directionals give the part readable 3D shape from any orbit
+    /// angle. Tuned so an edge-on triangle lands around mid-grey, never black.
+    private func addStudioLighting(to scene: SCNScene) {
+        func light(_ type: SCNLight.LightType, _ white: CGFloat) -> SCNLight {
+            let l = SCNLight(); l.type = type; l.color = NSColor(white: white, alpha: 1.0); return l
+        }
+        let ambient = SCNNode()
+        ambient.light = light(.ambient, 0.55)
+        scene.rootNode.addChildNode(ambient)
+
+        let key = SCNNode()
+        key.light = light(.directional, 0.55)
+        key.eulerAngles = SCNVector3(-CGFloat.pi / 4, CGFloat.pi / 6, 0)
+        scene.rootNode.addChildNode(key)
+
+        let fill = SCNNode()
+        fill.light = light(.directional, 0.28)
+        fill.eulerAngles = SCNVector3(CGFloat.pi / 3, -CGFloat.pi / 3, 0)
+        scene.rootNode.addChildNode(fill)
     }
 
     // MARK: - Helpers
