@@ -1296,6 +1296,19 @@ class AppState {
         scaleSelected(factor: scaleFactor)   // resets scaleFactor to 1 on success
     }
 
+    /// Enter / Apply Scale: bake the staged scale and drop back to Select, the
+    /// way every other tool confirms. Resets scaleFactor *before* switching tools
+    /// so the Scale-tool's deselect hook (`commitPendingScale`) sees nothing
+    /// pending and doesn't apply the factor a second time.
+    func confirmScaleAndExit() {
+        let f = scaleFactor
+        scaleFactor = 1.0
+        if !selectedHandles.isEmpty, f > 0, abs(f - 1.0) > 0.001 {
+            scaleSelected(factor: f)
+        }
+        currentTool = .select
+    }
+
     /// Point-to-point move (MAS-80): translate the selection by (to − from),
     /// duplicating first when create-copy is on.
     func moveSelection(by dx: CGFloat, dy: CGFloat, copy: Bool) {

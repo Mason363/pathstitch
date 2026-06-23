@@ -332,7 +332,12 @@ enum AppIconManager {
         if choice == "light" || choice == "dark" {
             NSApp.applicationIconImage = currentIcon()
         } else {
-            NSApp.applicationIconImage = nil
+            // Restore the OS-managed bundle icon — the same appearance-aware
+            // AppIcon asset Finder/Spotlight use. `= nil` does NOT restore it
+            // (it blanks the Dock to a white square); loading the application
+            // icon by name gives the real multi-representation icon back without
+            // re-introducing the wrong-colour bitmap override.
+            NSApp.applicationIconImage = NSImage(named: NSImage.applicationIconName)
         }
     }
 }

@@ -13,6 +13,10 @@ struct SearchPalette: View {
     @State private var selection: Int = 0
     @FocusState private var fieldFocused: Bool
     @State private var lastMousePosition: NSPoint? = nil
+    /// Only auto-scroll the list when the selection moved via the keyboard. Hover
+    /// must never scroll: centering the hovered row shifts the list under the
+    /// cursor, which re-triggers hover and runs away (worst near top/bottom).
+    @State private var scrollOnSelectionChange = false
     /// Local key monitor for Esc / ↑ / ↓. The focused TextField's field editor
     /// swallows these before SwiftUI's `.onKeyPress`/`.onExitCommand` see them,
     /// so we intercept at the app level instead.
@@ -69,6 +73,7 @@ struct SearchPalette: View {
                                 if hovering {
                                     let currentPos = NSEvent.mouseLocation
                                     if lastMousePosition != currentPos {
+                                        scrollOnSelectionChange = false   // hover never scrolls
                                         selection = idx
                                         lastMousePosition = currentPos
                                     }
@@ -85,6 +90,12 @@ struct SearchPalette: View {
                 }
                 .frame(maxHeight: 360)
                 .onChange(of: selection) { _ in
+                    // Only auto-scroll for keyboard moves. Scrolling on a
+                    // hover-driven selection shifts the list under the cursor,
+                    // which re-fires hover and runs away — worst near the
+                    // top/bottom edges. The wheel/trackpad stays free to scroll.
+                    guard scrollOnSelectionChange else { return }
+                    scrollOnSelectionChange = false
                     guard results.indices.contains(selection) else { return }
                     withAnimation(.easeOut(duration: 0.1)) { proxy.scrollTo(results[selection].id, anchor: .center) }
                 }
@@ -131,6 +142,7 @@ struct SearchPalette: View {
 
     private func moveSelection(_ delta: Int) {
         guard !results.isEmpty else { return }
+        scrollOnSelectionChange = true   // keyboard navigation may scroll the list
         selection = max(0, min(results.count - 1, selection + delta))
     }
 

@@ -12,10 +12,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Calling this early also sets the correct Dock icon before the app finishes launching.
         ThemeManager.apply()
 
-        // Show `.help()` tooltips sooner. AppKit's default initial delay is ~2s,
-        // which feels sluggish when scrubbing across the tool sidebar; ~0.5s is
-        // noticeably quicker without being intrusive. Key is in milliseconds.
-        UserDefaults.standard.register(defaults: ["NSInitialToolTipDelay": 500])
+        // Show `.help()` tooltips sooner. AppKit reads NSInitialToolTipDelay as a
+        // fractional-second delay, so a value like 0.7 means ~0.7s — noticeably
+        // quicker than the ~2s default without being intrusive. (A large integer
+        // such as 500 is taken as 500 *seconds* and tooltips never appear.) Set
+        // rather than register so it wins over AppKit's own default.
+        UserDefaults.standard.set(0.7, forKey: "NSInitialToolTipDelay")
     }
     
     func applicationDidFinishLaunching(_ notification: Notification) {

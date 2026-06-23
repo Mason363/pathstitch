@@ -3350,13 +3350,14 @@ extension ContentView {
                 .foregroundColor(Color.text_primary)
                 .font(PlasticityFont.body)
                 .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                // Enter commits the staged/typed factor (MAS-111).
+                // Enter commits the staged/typed factor and returns to Select,
+                // the way other tools confirm (MAS-111).
                 .onSubmit {
-                    state.commitPendingScale()
+                    state.confirmScaleAndExit()
                 }
 
             Button("Apply Scale") {
-                state.commitPendingScale()
+                state.confirmScaleAndExit()
             }
             .buttonStyle(PlasticityButtonStyle(isEnabled: !state.selectedHandles.isEmpty && state.scaleFactor > 0))
             .disabled(state.selectedHandles.isEmpty || state.scaleFactor <= 0)

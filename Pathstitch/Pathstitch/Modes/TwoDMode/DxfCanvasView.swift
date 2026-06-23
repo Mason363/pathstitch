@@ -2437,30 +2437,58 @@ struct DxfCanvasView: View {
                     penDraggingHandleIdx = nil
                     return
                 }
-                
-                if let idx = nearPointIdx {
-                    // Clicking near an existing anchor
-                    if editingPenHandle != nil {
-                        if let hit = penHitTest(screen: point, size: size, modelBounds: modelBounds) {
-                            switch hit.kind {
-                            case "anchor": penEditDragAnchor = hit.idx
-                            case "handleOut": penEditDragHandle = (hit.idx, true)
-                            case "handleIn": penEditDragHandle = (hit.idx, false)
-                            default: break
-                            }
-                            penDraggingHandle = false
-                            return
+
+                // Re-editing an existing path: grab a bezier handle or an anchor
+                // directly. Handles sit away from anchor points, so this MUST run
+                // regardless of the anchor-proximity check — otherwise handles
+                // (and anchors grabbed a few px off-centre) never respond.
+                if editingPenHandle != nil {
+                    if let hit = penHitTest(screen: point, size: size, modelBounds: modelBounds) {
+                        switch hit.kind {
+                        case "handleOut": penEditDragHandle = (hit.idx, true)
+                        case "handleIn":  penEditDragHandle = (hit.idx, false)
+                        default:          penEditDragAnchor = hit.idx
                         }
-                    } else {
-                        // Creation mode: click near the first anchor closes/completes the path.
-                        let isClosedEdit = (editingPenHandle != nil && penEditingClosed)
-                        if penAnchors.count >= 2 && !isClosedEdit && idx == 0 {
-                            penClosePending = true
-                            penDraggingHandle = false
-                            return
-                        }
+                        penDraggingHandle = false
+                        return
                     }
-                    // Clicking other anchors in creation mode does nothing.
+                    if let idx = nearPointIdx {
+                        // Near an anchor but just outside the tight hit radius —
+                        // still grab it so a slightly-off press isn't dead.
+                        penEditDragAnchor = idx
+                        penDraggingHandle = false
+                        return
+                    }
+                    // Click on the path body inserts a new anchor there and drags it.
+                    if let nearest = findNearestPointOnPenPath(screenPt: point, size: size, modelBounds: modelBounds),
+                       nearest.screenDist <= 12.0 {
+                        let insertIdx = nearest.segmentIdx + 1
+                        penAnchors.insert(PenAnchor(point: nearest.modelPt), at: insertIdx)
+                        penEditDragAnchor = insertIdx
+                        penDraggingHandle = false
+                        self.mouseLocation = point
+                        self.hoverCoords = nearest.modelPt
+                        return
+                    }
+                    // Empty space: a closed path stays closed (no-op); an open
+                    // path extends with a new end anchor.
+                    if penEditingClosed { return }
+                    let modelPt = snappedModelPoint(forScreen: point, ref: penAnchors.last?.point, size: size, bounds: modelBounds)
+                    penAnchors.append(PenAnchor(point: modelPt))
+                    penDraggingHandle = true
+                    penDraggingHandleIdx = penAnchors.count - 1
+                    self.mouseLocation = point
+                    self.hoverCoords = modelPt
+                    return
+                }
+
+                if let idx = nearPointIdx {
+                    // Creation mode: clicking near the first anchor closes/completes
+                    // the path; clicking other anchors does nothing.
+                    if penAnchors.count >= 2 && idx == 0 {
+                        penClosePending = true
+                        penDraggingHandle = false
+                    }
                     return
                 } else {
                     // Not near any existing anchor. Check if near the line (path).
@@ -2824,15 +2852,16 @@ struct DxfCanvasView: View {
     /// Hit-tests the pen anchors and bezier handles under a screen point, for
     /// re-editing (parametric pen lines). Handles take priority over anchors.
     private func penHitTest(screen p: CGPoint, size: CGSize, modelBounds: CGRect) -> (kind: String, idx: Int)? {
-        let r: CGFloat = 8.0
+        let r: CGFloat = 9.0
         for (i, a) in penAnchors.enumerated() {
             guard let hOut = a.handleOut else { continue }
             let ho = toScreen(dx: hOut.x, dy: hOut.y, size: size, bounds: modelBounds)
             if hypot(p.x - ho.x, p.y - ho.y) < r { return ("handleOut", i) }
-            if let hIn = a.handleIn {
-                let hi = toScreen(dx: hIn.x, dy: hIn.y, size: size, bounds: modelBounds)
-                if hypot(p.x - hi.x, p.y - hi.y) < r { return ("handleIn", i) }
-            }
+            // The incoming handle is drawn as the mirror of handleOut about the
+            // anchor (symmetric smooth point), even when handleIn isn't stored.
+            let hIn = a.handleIn ?? CGPoint(x: 2 * a.point.x - hOut.x, y: 2 * a.point.y - hOut.y)
+            let hi = toScreen(dx: hIn.x, dy: hIn.y, size: size, bounds: modelBounds)
+            if hypot(p.x - hi.x, p.y - hi.y) < r { return ("handleIn", i) }
         }
         for (i, a) in penAnchors.enumerated() {
             let s = toScreen(dx: a.point.x, dy: a.point.y, size: size, bounds: modelBounds)
