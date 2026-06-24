@@ -3660,13 +3660,40 @@ extension ContentView {
                 Text("Rectangle").tag("rectangle")
                 Text("Centre Line").tag("centerline")
             }.pickerStyle(SegmentedPickerStyle()).labelsHidden()
-            Text("Drawn on the GUIDES layer, centred at the origin.")
+            Text("Proportion guide on a construction layer (orange, never exported).")
                 .font(.system(size: 10)).foregroundColor(Color.text_secondary)
-            numberField("Width (mm)", $state.goldenWidth)
-            if state.goldenKind != "centerline" {
-                numberField("Height (mm)", $state.goldenHeight)
-            } else {
-                numberField("Length (mm)", $state.goldenHeight)
+
+            Toggle("Fit to selection", isOn: $state.goldenFitSelection)
+                .font(PlasticityFont.label)
+                .help("Size the guide to the selected geometry's bounding box")
+            if !state.goldenFitSelection || state.selectionBoundingBox() == nil {
+                numberField("Width (mm)", $state.goldenWidth)
+                if state.goldenKind == "centerline" {
+                    numberField("Length (mm)", $state.goldenHeight)
+                } else {
+                    numberField("Height (mm)", $state.goldenHeight)
+                }
+            }
+
+            if state.goldenKind == "spiral" {
+                HStack {
+                    Text("Coil").font(PlasticityFont.label).foregroundColor(Color.text_primary)
+                    Spacer()
+                    Picker("", selection: $state.goldenHandedness) {
+                        Text("CCW").tag("ccw")
+                        Text("CW").tag("cw")
+                    }.pickerStyle(SegmentedPickerStyle()).labelsHidden().frame(width: 110)
+                }
+                Stepper("Turns: \(String(format: "%.1f", state.goldenTurns))",
+                        value: $state.goldenTurns, in: 0.5...8.0, step: 0.5)
+                    .font(PlasticityFont.label)
+                Toggle("Show golden rectangle", isOn: $state.goldenShowRect)
+                    .font(PlasticityFont.label)
+            }
+            if state.goldenKind == "rectangle" {
+                Stepper("Subdivisions: \(state.goldenSubdivisions)",
+                        value: $state.goldenSubdivisions, in: 1...12)
+                    .font(PlasticityFont.label)
             }
             toolButtons(ok: "Create") { state.applyGolden(exitAfterApply: true) }
         }
@@ -3690,8 +3717,83 @@ extension ContentView {
             numberField("Thickness (mm)", $state.jigThickness)
             Text("\(state.selectedHandles.count) region(s) selected")
                 .font(.system(size: 9)).foregroundColor(Color.text_secondary)
-            toolButtons(ok: "Export STL…") { state.exportJig(exitAfterApply: true) }
+
+            // Live isometric preview of the extruded mesh.
+            ZStack {
+                RoundedRectangle(cornerRadius: 6).fill(Color.bg_input)
+                jigPreviewCanvas
+                if state.isComputingJigPreview {
+                    ProgressView().scaleEffect(0.6)
+                } else if state.jigPreviewTris.isEmpty {
+                    Text("Select regions and press Preview")
+                        .font(.system(size: 9)).foregroundColor(Color.text_muted)
+                }
+            }
+            .frame(height: 150)
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.border_strong, lineWidth: 1))
+            if state.jigPreviewTriCount > 0 {
+                Text("\(state.jigPreviewTriCount) triangles")
+                    .font(.system(size: 9)).foregroundColor(Color.text_secondary)
+            }
+
+            HStack {
+                Button("Preview") { state.refreshJigPreview() }.buttonStyle(.bordered)
+                Button("Export STL…") { state.exportJig(exitAfterApply: true) }
+                    .buttonStyle(.borderedProminent)
+                Button("Cancel") { state.currentTool = .select }.buttonStyle(.bordered)
+                Spacer()
+            }
+            .onAppear { state.refreshJigPreview() }
+            .onChange(of: state.jigMode) { _ in state.refreshJigPreview() }
+            .onChange(of: state.jigThickness) { _ in state.refreshJigPreview() }
+            .onChange(of: state.selectedHandles) { _ in state.refreshJigPreview() }
         }
+    }
+
+    /// Isometric wireframe of the extruded jig mesh (state.jigPreviewVerts/Tris).
+    private var jigPreviewCanvas: some View {
+        Canvas { ctx, size in
+            let v = state.jigPreviewVerts
+            let t = state.jigPreviewTris
+            let nVerts = v.count / 3
+            guard nVerts >= 3, t.count >= 3 else { return }
+            // isometric projection (x right-down, y left-down, z up)
+            var proj = [CGPoint](repeating: .zero, count: nVerts)
+            var minX = Double.greatestFiniteMagnitude, minY = Double.greatestFiniteMagnitude
+            var maxX = -Double.greatestFiniteMagnitude, maxY = -Double.greatestFiniteMagnitude
+            for i in 0..<nVerts {
+                let x = v[3 * i], y = v[3 * i + 1], z = v[3 * i + 2]
+                let px = (x - y) * 0.8660254
+                let py = (x + y) * 0.5 - z
+                proj[i] = CGPoint(x: px, y: py)
+                minX = min(minX, px); maxX = max(maxX, px)
+                minY = min(minY, py); maxY = max(maxY, py)
+            }
+            let spanX = max(1e-6, maxX - minX), spanY = max(1e-6, maxY - minY)
+            let pad: CGFloat = 10
+            let scale = min((size.width - 2 * pad) / spanX, (size.height - 2 * pad) / spanY)
+            let offX = (size.width - spanX * scale) / 2
+            let offY = (size.height - spanY * scale) / 2
+            func scr(_ idx: Int) -> CGPoint {
+                let p = proj[idx]
+                return CGPoint(x: offX + (p.x - minX) * scale,
+                               y: size.height - (offY + (p.y - minY) * scale)) // flip Y up
+            }
+            var wire = SwiftUI.Path()
+            var i = 0
+            while i + 2 < t.count {
+                let a = t[i], b = t[i + 1], c = t[i + 2]
+                if a < nVerts && b < nVerts && c < nVerts {
+                    let pa = scr(a), pb = scr(b), pc = scr(c)
+                    wire.move(to: pa); wire.addLine(to: pb)
+                    wire.addLine(to: pc); wire.closeSubpath()
+                }
+                i += 3
+            }
+            ctx.fill(wire, with: .color(Color.accent.opacity(0.10)))
+            ctx.stroke(wire, with: .color(Color.accent.opacity(0.55)), lineWidth: 0.5)
+        }
+        .padding(2)
     }
 
     /// Leather Simulator — assign a preview-only material fill to the selection.

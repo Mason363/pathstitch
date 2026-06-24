@@ -1148,8 +1148,18 @@ class AppState {
     var goldenKind: String = "spiral"             // spiral | rectangle | centerline
     var goldenWidth: Double = 100.0
     var goldenHeight: Double = 60.0
+    var goldenTurns: Double = 3.0
+    var goldenHandedness: String = "ccw"          // ccw | cw
+    var goldenSubdivisions: Int = 8
+    var goldenShowRect: Bool = true
+    var goldenFitSelection: Bool = true
     var jigMode: String = "solid"                 // solid | stitch_template | corner_jig
     var jigThickness: Double = 3.0
+    // Live preview mesh of the extruded jig (flat [x,y,z,…] + triangle indices).
+    var jigPreviewVerts: [Double] = []
+    var jigPreviewTris: [Int] = []
+    var jigPreviewTriCount: Int = 0
+    var isComputingJigPreview: Bool = false
 
     // Stitching Simulator — a pure overlay that threads the stitch holes so the
     // finished seam can be previewed. Never mutates geometry.
@@ -5490,19 +5500,54 @@ class AppState {
         }
     }
 
-    /// Golden Ratio guide — spiral / phi rectangle / centre line, centred at origin.
+    /// Bounding box (x, y, w, h) of the current selection in model space, or nil.
+    func selectionBoundingBox() -> (x: Double, y: Double, w: Double, h: Double)? {
+        var minX = Double.greatestFiniteMagnitude, minY = Double.greatestFiniteMagnitude
+        var maxX = -Double.greatestFiniteMagnitude, maxY = -Double.greatestFiniteMagnitude
+        var found = false
+        func add(_ x: Double, _ y: Double) {
+            minX = min(minX, x); minY = min(minY, y); maxX = max(maxX, x); maxY = max(maxY, y); found = true
+        }
+        for h in selectedHandles {
+            guard let e = entities.first(where: { $0.handle == h }) else { continue }
+            if let s = e.start, s.count >= 2 { add(s[0], s[1]) }
+            if let en = e.end, en.count >= 2 { add(en[0], en[1]) }
+            if let c = e.center, c.count >= 2 {
+                let r = e.radius ?? 0
+                add(c[0] - r, c[1] - r); add(c[0] + r, c[1] + r)
+            }
+            if let vs = e.vertices { for v in vs where v.count >= 2 { add(v[0], v[1]) } }
+        }
+        guard found, maxX > minX, maxY > minY else { return nil }
+        return (minX, minY, maxX - minX, maxY - minY)
+    }
+
+    /// Golden Ratio guide — spiral / φ rectangle / centre line. Fits the selection's
+    /// bounding box when one exists (and the option is on), else a custom size at the
+    /// origin. Drawn on the GUIDES layer, which is auto-marked as a construction
+    /// layer (orange, excluded from export).
     func applyGolden(exitAfterApply: Bool = false) {
         saveToHistory()
         let activeDxfURL = ensureActiveDXFFileExists()
         isProcessing = true
-        let w = goldenWidth, h = goldenHeight, kind = goldenKind
+        let kind = goldenKind
+        // Resolve the placement box: selection bbox, or a custom box at the origin.
+        let box: (x: Double, y: Double, w: Double, h: Double)
+        if goldenFitSelection, let bb = selectionBoundingBox() {
+            box = bb
+        } else {
+            box = (-goldenWidth / 2.0, -goldenHeight / 2.0, goldenWidth, goldenHeight)
+        }
         var args: [String: Any] = [
-            "input": activeDxfURL.path, "output": activeDxfURL.path, "kind": kind
+            "input": activeDxfURL.path, "output": activeDxfURL.path, "kind": kind,
+            "turns": goldenTurns, "handedness": goldenHandedness,
+            "subdivisions": goldenSubdivisions, "show_rect": goldenShowRect
         ]
         if kind == "centerline" {
-            args["p1"] = [0.0, -h / 2.0]; args["p2"] = [0.0, h / 2.0]
+            args["p1"] = [box.x + box.w / 2.0, box.y]
+            args["p2"] = [box.x + box.w / 2.0, box.y + box.h]
         } else {
-            args["bbox"] = [-w / 2.0, -h / 2.0, w, h]
+            args["bbox"] = [box.x, box.y, box.w, box.h]
         }
         Task {
             do {
@@ -5510,11 +5555,54 @@ class AppState {
                 _ = try await PythonBridge.shared.run(module: "dxf_ops", op: "golden", args: args)
                 await MainActor.run {
                     self.reloadDXF()
+                    // The guides belong on a construction layer (orange, non-export).
+                    if let g = self.layers.first(where: { $0.name == "GUIDES" }) {
+                        self.setLayerConstruction(g.id, true)
+                    }
                     self.isProcessing = false
                     if exitAfterApply { self.currentTool = .select }
                 }
             } catch {
                 await MainActor.run { self.errorMessage = error.localizedDescription; self.isProcessing = false }
+            }
+        }
+    }
+
+    /// Recompute the live 3D-jig preview mesh from the current selection + settings.
+    func refreshJigPreview() {
+        let handles = Array(selectedHandles)
+        guard !handles.isEmpty, let url = currentFilePath else {
+            jigPreviewVerts = []; jigPreviewTris = []; jigPreviewTriCount = 0
+            return
+        }
+        let mode = jigMode, thickness = jigThickness
+        isComputingJigPreview = true
+        Task {
+            func nums(_ v: Any?) -> [Double] {
+                if let a = v as? [Double] { return a }
+                if let a = v as? [NSNumber] { return a.map { $0.doubleValue } }
+                if let a = v as? [Any] { return a.compactMap { ($0 as? NSNumber)?.doubleValue ?? ($0 as? Double) } }
+                return []
+            }
+            do {
+                await reconcileBufferIfNeeded()
+                let tmp = sessionTempDirectory.appendingPathComponent("jig_preview.stl")
+                let res = try await PythonBridge.shared.run(module: "jig_ops", op: "extrude_handles_to_stl", args: [
+                    "input": url.path, "handles": handles, "output": tmp.path,
+                    "mode": mode, "thickness": thickness
+                ])
+                let data = res["data"] as? [String: Any]
+                let verts = nums(data?["vertices"])
+                let tris = nums(data?["triangles"]).map { Int($0) }
+                let count = (data?["triangle_count"] as? NSNumber)?.intValue ?? tris.count / 3
+                await MainActor.run {
+                    self.jigPreviewVerts = verts
+                    self.jigPreviewTris = tris
+                    self.jigPreviewTriCount = count
+                    self.isComputingJigPreview = false
+                }
+            } catch {
+                await MainActor.run { self.isComputingJigPreview = false }
             }
         }
     }

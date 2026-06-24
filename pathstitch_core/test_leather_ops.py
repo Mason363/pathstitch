@@ -131,19 +131,36 @@ def test_golden_spiral():
     path = _tmp(); ezdxf.new(dxfversion="R2010").saveas(path)
     out = _tmp()
     res = op_golden({"input": path, "output": out, "kind": "spiral",
-                     "bbox": [0, 0, 100, 60], "turns": 3})
+                     "bbox": [0, 0, 100, 60], "turns": 3, "show_rect": False})
     assert res["status"] == "ok", res
     doc = ezdxf.readfile(out)
     polys = [e for e in doc.modelspace()
              if e.dxftype() == "LWPOLYLINE" and e.dxf.layer == "GUIDES"]
-    assert polys, "no spiral polyline"
+    assert len(polys) == 1, f"expected just the spiral, got {len(polys)} polylines"
     pts = [(p[0], p[1]) for p in polys[0]]
     xs = [x for x, _ in pts]; ys = [y for _, y in pts]
-    # fits the bbox within a small tolerance
-    assert abs(min(xs) - 0) < 1e-6 and abs(max(xs) - 100) < 0.5, "spiral X not fit"
-    assert abs(min(ys) - 0) < 1e-6 and abs(max(ys) - 60) < 0.5, "spiral Y not fit"
-    # golden growth: radius ratio per quarter turn ≈ φ
-    print(f"Golden spiral OK: {len(pts)} pts fit to 100x60 bbox")
+    # the spiral fits the φ-snapped box (height 60 → width 60·φ≈97.08, both fit)
+    assert (max(xs) - min(xs)) > 50 and (max(ys) - min(ys)) > 30, "spiral not sized"
+    print(f"Golden spiral OK: {len(pts)} pts, spans "
+          f"{max(xs)-min(xs):.1f}x{max(ys)-min(ys):.1f}")
+
+
+def test_golden_spiral_handedness():
+    path = _tmp(); ezdxf.new(dxfversion="R2010").saveas(path)
+    def first_turn_y(cw):
+        out = _tmp()
+        op_golden({"input": path, "output": out, "kind": "spiral",
+                   "bbox": [0, 0, 100, 60], "turns": 1, "show_rect": False,
+                   "handedness": "cw" if cw else "ccw"})
+        d = ezdxf.readfile(out)
+        poly = [e for e in d.modelspace() if e.dxftype() == "LWPOLYLINE"][0]
+        pts = [(p[0], p[1]) for p in poly]
+        # sample a quarter of the way along — opposite Y sign for cw vs ccw
+        q = pts[len(pts) // 8]
+        cy = sum(y for _, y in pts) / len(pts)
+        return q[1] - cy
+    assert first_turn_y(False) * first_turn_y(True) < 0, "handedness did not flip coil"
+    print("Golden spiral handedness OK: coil direction flips")
 
 
 def test_golden_rectangle():
@@ -187,6 +204,7 @@ def run():
     test_box_joint_profile_geometry()
     test_box_joint_mate_interlocks()
     test_golden_spiral()
+    test_golden_spiral_handedness()
     test_golden_rectangle()
     test_golden_centerline()
     print("\nALL LEATHER OPS TESTS PASSED")

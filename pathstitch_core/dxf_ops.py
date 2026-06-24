@@ -6278,52 +6278,63 @@ def op_golden(args: Dict[str, Any]) -> Dict[str, Any]:
         bx, by, bw, bh = [float(v) for v in bbox]
         bw = bw if abs(bw) > 1e-6 else 1.0
         bh = bh if abs(bh) > 1e-6 else 1.0
+        cw = str(args.get("handedness", "ccw")).lower() == "cw"
+        subdivisions = max(1, int(args.get("subdivisions", 8)))
 
-        if kind == "rectangle":
-            # Snap to a φ rectangle keeping the longer side, then peel squares.
-            if abs(bw) >= abs(bh):
-                w = abs(bh) * PHI * (1 if bw >= 0 else -1)
-                h = bh
-            else:
-                h = abs(bw) * PHI * (1 if bh >= 0 else -1)
-                w = bw
+        def snap_phi(w, h):
+            """Return a φ rectangle (w:h = φ:1) keeping the longer drawn side."""
+            if abs(w) >= abs(h):
+                return abs(h) * PHI * (1 if w >= 0 else -1), h
+            return w, abs(w) * PHI * (1 if h >= 0 else -1)
+
+        def draw_phi_rect(w, h):
+            """Outline + recursive square subdivision lines; returns handles."""
+            hs = []
             rect = [(bx, by), (bx + w, by), (bx + w, by + h), (bx, by + h)]
-            e = msp.add_lwpolyline(rect, close=True, dxfattribs=attr)
-            new_handles.append(e.dxf.handle)
-            # recursive square subdivision lines
+            hs.append(msp.add_lwpolyline(rect, close=True, dxfattribs=attr).dxf.handle)
             x, y, rw, rh = bx, by, w, h
-            for _ in range(8):
+            for _ in range(subdivisions):
                 if abs(rw) < 1e-3 or abs(rh) < 1e-3:
                     break
                 if abs(rw) >= abs(rh):
                     s = rh
-                    e = msp.add_line((x + s, y), (x + s, y + rh), dxfattribs=attr)
+                    hs.append(msp.add_line((x + s, y), (x + s, y + rh), dxfattribs=attr).dxf.handle)
                     x += s; rw -= s
                 else:
                     s = rw
-                    e = msp.add_line((x, y + s), (x + rw, y + s), dxfattribs=attr)
+                    hs.append(msp.add_line((x, y + s), (x + rw, y + s), dxfattribs=attr).dxf.handle)
                     y += s; rh -= s
-                new_handles.append(e.dxf.handle)
+            return hs
+
+        if kind == "rectangle":
+            w, h = snap_phi(bw, bh)
+            new_handles.extend(draw_phi_rect(w, h))
             doc.saveas(output_path)
             return {"status": "ok", "data": {"new_entities": new_handles}}
 
-        # default: true golden spiral as a finely-sampled polyline, fit to bbox.
+        # spiral: the true golden (logarithmic) spiral, fit to the φ-snapped box;
+        # `turns` controls coil count, `handedness` the coil direction, and
+        # `show_rect` overlays the golden rectangle + square subdivisions.
+        w, h = snap_phi(bw, bh)
+        if bool(args.get("show_rect", True)):
+            new_handles.extend(draw_phi_rect(w, h))
         b = math.log(PHI) / (math.pi / 2.0)   # grows by φ every quarter turn
-        turns = float(args.get("turns", 3.0))
+        turns = max(0.25, float(args.get("turns", 3.0)))
         theta_max = turns * 2.0 * math.pi
         n = max(64, int(turns * 90))
         raw = []
         for i in range(n + 1):
             th = theta_max * i / n
             r = math.exp(b * th)
-            raw.append((r * math.cos(th), r * math.sin(th)))
+            y = r * math.sin(th)
+            raw.append((r * math.cos(th), -y if cw else y))
         xs = [p[0] for p in raw]; ys = [p[1] for p in raw]
         minx, maxx = min(xs), max(xs); miny, maxy = min(ys), max(ys)
-        sx = bw / (maxx - minx if maxx > minx else 1.0)
-        sy = bh / (maxy - miny if maxy > miny else 1.0)
-        pts = [(bx + (x - minx) * sx, by + (y - miny) * sy) for x, y in raw]
-        e = msp.add_lwpolyline(pts, dxfattribs=attr)
-        new_handles.append(e.dxf.handle)
+        sx = abs(w) / (maxx - minx if maxx > minx else 1.0)
+        sy = abs(h) / (maxy - miny if maxy > miny else 1.0)
+        x0 = min(bx, bx + w); y0 = min(by, by + h)
+        pts = [(x0 + (x - minx) * sx, y0 + (yy - miny) * sy) for x, yy in raw]
+        new_handles.append(msp.add_lwpolyline(pts, dxfattribs=attr).dxf.handle)
         doc.saveas(output_path)
         return {"status": "ok", "data": {"new_entities": new_handles}}
     except Exception as e:
