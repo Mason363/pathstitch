@@ -2135,6 +2135,11 @@ class AppState {
     var triggerCameraAnimationToken: Int = 0
     /// Bumped by the 3D "Home" button to recenter/frame the camera optimally.
     var triggerHomeFrameToken: Int = 0
+    /// Bumped every time a 3D model (re)loads, so the viewport reloads its geometry
+    /// even when the file path is unchanged. Appending a STEP rewrites the same
+    /// `active.step`, so a path-only check would never refresh the viewport and the
+    /// newly imported body wouldn't appear.
+    var stepModelLoadToken: Int = 0
 
     /// Frames the 3D model optimally (Home button in 3D mode).
     func frameHome3D() {
@@ -3758,6 +3763,7 @@ class AppState {
                 await MainActor.run {
                     self.stepJsonContent = modelJsonStr
                     self.bodies3D = decodedBodies
+                    self.stepModelLoadToken += 1   // force a viewport reload even if the path is unchanged (append rewrites active.step)
                     self.isProcessing = false
                     self.hasUnsavedChanges = true   // loading a 3D model dirties the doc (MAS-75)
                 }

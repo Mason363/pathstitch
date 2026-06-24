@@ -80,6 +80,7 @@ final class DropForwardingWebView: WKWebView {
 struct ThreeDViewport: NSViewRepresentable {
     let selectedFaces3D: Set<SelectedFace>
     let stepJsonContent: String?
+    let stepModelLoadToken: Int
     let bodies3D: [Body3D]
     
     let isPlaneSelectionActive: Bool
@@ -158,6 +159,7 @@ class Coordinator: NSObject, WKScriptMessageHandler {
     
     private var isWebViewReady = false
     private var lastLoadedModelPath: String?
+    private var lastLoadedModelToken: Int = -1
     private var lastSelectedJson: String = ""
     private var lastSelectedFaces: Set<SelectedFace> = []
     private var lastBodyVisibilities: [Int: Bool] = [:]
@@ -196,6 +198,7 @@ class Coordinator: NSObject, WKScriptMessageHandler {
             DispatchQueue.main.async {
                 self.isWebViewReady = true
                 self.lastLoadedModelPath = nil // Force load
+                self.lastLoadedModelToken = -1
                 self.updateModel()
                 self.updateSelection()
                 self.updateBodyVisibilities()
@@ -374,9 +377,13 @@ class Coordinator: NSObject, WKScriptMessageHandler {
     func updateModel() {
         guard isWebViewReady, let webView = webView, let jsonStr = state.stepJsonContent else { return }
         let modelPath = state.currentStepFilePath?.path ?? ""
+        let loadToken = state.stepModelLoadToken
 
-        if lastLoadedModelPath != modelPath {
+        // Reload when the path OR the load token changes. Appending a STEP rewrites
+        // the same active.step path, so the token is what catches the new geometry.
+        if lastLoadedModelPath != modelPath || lastLoadedModelToken != loadToken {
             lastLoadedModelPath = modelPath
+            lastLoadedModelToken = loadToken
             lastBodyMoveStateToken = -1  // re-push body-move state for the new model
             lastSelectedFaces.removeAll() // Force selection update for the new model
             lastForcedSeams.removeAll()

@@ -68,10 +68,19 @@ def _dispatch(module, op, args):
 
 
 def serve():
-    # The frame channel is the *real* stdout (binary). Redirect Python-level
-    # stdout to stderr so a stray print() inside any op can never corrupt a
-    # frame — frames are the only bytes ever written to the real stdout.
-    frame_out = sys.stdout.buffer
+    # The frame channel is the *real* stdout. We must guarantee nothing else ever
+    # writes a single byte to it, or the length-prefixed frames get corrupted and
+    # the Swift side reads a bogus length and hangs forever (the STEP-import
+    # "infinite processing" bug). A Python-level `print()` is the obvious risk, but
+    # the subtler one is native C++ libraries: OpenCASCADE's STEP writer dumps a
+    # "Statistics on Transfer" banner straight to file descriptor 1, bypassing
+    # Python's sys.stdout entirely. So redirect at the OS level: dup the real
+    # stdout to a private fd used *only* for frames, then point fd 1 (and
+    # sys.stdout) at stderr so every stray write — Python or native — is harmless.
+    import os
+    real_stdout_fd = os.dup(1)
+    os.dup2(2, 1)            # fd 1 now goes to stderr → OCC/C++ output can't corrupt frames
+    frame_out = os.fdopen(real_stdout_fd, "wb")
     sys.stdout = sys.stderr
     frame_in = sys.stdin.buffer
 

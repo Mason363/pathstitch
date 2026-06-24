@@ -181,6 +181,7 @@ struct ThreeDModeView: View {
             ThreeDViewport(
                 selectedFaces3D: state.selectedFaces3D,
                 stepJsonContent: state.stepJsonContent,
+                stepModelLoadToken: state.stepModelLoadToken,
                 bodies3D: state.bodies3D,
                 isPlaneSelectionActive: state.isPlaneSelectionActive,
                 planeSelectionModeType: state.planeSelectionModeType,
