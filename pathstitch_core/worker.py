@@ -36,6 +36,10 @@ def _get_operations(module):
         from pathstitch_core import step_ops
         _MODULES[module] = step_ops.OPERATIONS
         return _MODULES[module]
+    if module == "jig_ops":
+        from pathstitch_core import jig_ops
+        _MODULES[module] = jig_ops.OPERATIONS
+        return _MODULES[module]
     return None
 
 
