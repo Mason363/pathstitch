@@ -166,7 +166,7 @@ enum AppCommands {
               defaultCombo: KeyCombo(key: "")) { $0.currentTool = .mandala },
         .init(id: "tool.boxJoint", title: "Box Joint", icon: "puzzlepiece", category: "Tools",
               defaultCombo: KeyCombo(key: "")) { $0.currentTool = .boxJoint },
-        .init(id: "tool.goldenGuide", title: "Golden Ratio Guide", icon: "spiral", category: "Tools",
+        .init(id: "tool.goldenGuide", title: "Golden Ratio Guide", icon: "hurricane", category: "Tools",
               defaultCombo: KeyCombo(key: "")) { $0.currentTool = .goldenGuide },
         .init(id: "tool.jigExport", title: "3D Pattern / Jig (STL)", icon: "cube.transparent", category: "Tools",
               defaultCombo: KeyCombo(key: "")) { $0.currentTool = .jigExport },

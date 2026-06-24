@@ -2070,10 +2070,26 @@ _DXF_VERSION_CODES = {
 }
 
 
+def _strip_excluded_layers(doc, exclude_layers) -> None:
+    """Delete every modelspace entity on an excluded layer (e.g. construction
+    layers, which must never reach the final cut export)."""
+    if not exclude_layers:
+        return
+    ex = set(exclude_layers)
+    msp = doc.modelspace()
+    for ent in list(msp):
+        try:
+            if ent.dxf.layer in ex:
+                msp.delete_entity(ent)
+        except Exception:
+            pass
+
+
 def op_export_dxf(args: Dict[str, Any]) -> Dict[str, Any]:
     input_path = args.get("input")
     output_path = args.get("output")
     handles = args.get("handles")
+    exclude_layers = args.get("exclude_layers")
     version = args.get("version")  # e.g. "R2018"; None keeps the source version.
 
     if not input_path or not os.path.exists(input_path):
@@ -2083,6 +2099,7 @@ def op_export_dxf(args: Dict[str, Any]) -> Dict[str, Any]:
 
     try:
         doc = ezdxf.readfile(input_path)
+        _strip_excluded_layers(doc, exclude_layers)
         if handles is not None:
             msp = doc.modelspace()
             for ent in list(msp):
@@ -2951,6 +2968,7 @@ def op_export_svg(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"status": "error", "message": "Output path must be specified."}
 
     doc = ezdxf.readfile(input_path)
+    _strip_excluded_layers(doc, args.get("exclude_layers"))
     msp = doc.modelspace()
 
     all_points = []
@@ -3143,8 +3161,9 @@ def op_export_pdf(args: Dict[str, Any]) -> Dict[str, Any]:
         from ezdxf.addons.drawing.matplotlib import MatplotlibBackend
         
         doc = ezdxf.readfile(input_path)
+        _strip_excluded_layers(doc, args.get("exclude_layers"))
         msp = doc.modelspace()
-        
+
         if handles is not None:
             for ent in list(msp):
                 if ent.dxf.handle not in handles:

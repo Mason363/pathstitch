@@ -97,7 +97,7 @@ enum TwoDTool: String, CaseIterable {
         case .boxStitch: return "rectangle.connected.to.line.below"
         case .mandala: return "circle.hexagongrid"
         case .boxJoint: return "puzzlepiece"
-        case .goldenGuide: return "spiral"
+        case .goldenGuide: return "hurricane"
         case .jigExport: return "cube.transparent"
         }
     }
@@ -541,6 +541,10 @@ struct DXFLayer: Identifiable, Hashable, Codable {
     // is stashed here so "Restore Background" can bring it back.
     var refImageOriginalBase64: String? = nil
     var backgroundRemoved: Bool = false
+    // Construction layer (MAS-parity): renders orange, is tagged in the Layers
+    // panel, can be hidden en-masse, and is excluded from the final export.
+    // Optional so existing .stch files (which lack the key) still decode.
+    var isConstruction: Bool? = nil
 
     var color: Color {
         get { Color(hex: colorHex) }
@@ -570,6 +574,7 @@ struct DXFLayer: Identifiable, Hashable, Codable {
         case refImageDepth, refImageOpacity, refImageCalibrationDistance, locked
         case refImagePixelWidth, refImagePixelHeight
         case refImageOriginalBase64, backgroundRemoved
+        case isConstruction
     }
     
     init(from decoder: Decoder) throws {
@@ -597,6 +602,7 @@ struct DXFLayer: Identifiable, Hashable, Codable {
         locked = try container.decodeIfPresent(Bool.self, forKey: .locked) ?? false
         refImageOriginalBase64 = try container.decodeIfPresent(String.self, forKey: .refImageOriginalBase64)
         backgroundRemoved = try container.decodeIfPresent(Bool.self, forKey: .backgroundRemoved) ?? false
+        isConstruction = try container.decodeIfPresent(Bool.self, forKey: .isConstruction)
 
         if refImagePixelWidth == 0.0 { refImagePixelWidth = refImageWidth }
         if refImagePixelHeight == 0.0 { refImagePixelHeight = refImageHeight }
@@ -984,6 +990,9 @@ class AppState {
     var gizmoAccumulatedRotation: Double = 0
     var entities: [DXFEntity] = []
     var previewEntities: [DXFEntity] = []
+    /// When on, every construction layer is hidden in the canvas (the per-layer
+    /// visibility is untouched). Toggled from the Layers panel header.
+    var hideConstructionLayers: Bool = false
     var layers: [DXFLayer] = [] {
         didSet { ensureActiveLayerValid() }
     }
@@ -1156,6 +1165,23 @@ class AppState {
         for h in selectedHandles {
             if let s = swatch { leatherFills[h] = s } else { leatherFills[h] = nil }
         }
+        // Reassigning `entities` fires the @Observable setter so the Canvas (which
+        // reads it during render) repaints with the new fill immediately.
+        let snapshot = entities
+        entities = snapshot
+    }
+
+    /// Toggle a layer's construction status. Construction layers paint orange and
+    /// are dropped from the final export.
+    func setLayerConstruction(_ layerId: String, _ on: Bool) {
+        guard let idx = layers.firstIndex(where: { $0.id == layerId }) else { return }
+        layers[idx].isConstruction = on
+        if on { layers[idx].colorHex = "#FF8C00" }   // construction orange
+    }
+
+    /// Names of all construction layers — used to exclude them from export.
+    var constructionLayerNames: [String] {
+        layers.filter { $0.isConstruction == true }.map { $0.name }
     }
 
     /// Display colour for a leather swatch id (preview only).
@@ -5089,7 +5115,9 @@ class AppState {
                 try? FileManager.default.removeItem(at: tempExportURL)
 
                 let handlesArg: [String]? = selectedOnly ? Array(selectedHandles) : nil
-                
+                // Construction layers never reach the final cut export.
+                let excludeLayers = await MainActor.run { self.constructionLayerNames }
+
                 if format == "dxf" {
                     _ = try await PythonBridge.shared.run(
                         module: "dxf_ops",
@@ -5098,13 +5126,15 @@ class AppState {
                             "input": exportInputPath,
                             "output": tempExportURL.path,
                             "handles": handlesArg as Any,
-                            "version": options.dxfVersion
+                            "version": options.dxfVersion,
+                            "exclude_layers": excludeLayers
                         ]
                     )
                 } else if format == "svg" {
                     var args: [String: Any] = [
                         "input": exportInputPath, "output": tempExportURL.path,
-                        "precision": options.svgPrecision, "stroke_width": options.svgStrokeWidth
+                        "precision": options.svgPrecision, "stroke_width": options.svgStrokeWidth,
+                        "exclude_layers": excludeLayers
                     ]
                     if let handles = handlesArg {
                         args["handles"] = handles
@@ -5115,7 +5145,8 @@ class AppState {
                         args: args
                     )
                 } else if format == "pdf" {
-                    var args: [String: Any] = ["input": exportInputPath, "output": tempExportURL.path]
+                    var args: [String: Any] = ["input": exportInputPath, "output": tempExportURL.path,
+                                               "exclude_layers": excludeLayers]
                     if let handles = handlesArg {
                         args["handles"] = handles
                     }
@@ -5130,7 +5161,8 @@ class AppState {
 
                     var args: [String: Any] = [
                         "input": exportInputPath, "output": tempSVG.path,
-                        "precision": options.svgPrecision, "stroke_width": options.svgStrokeWidth
+                        "precision": options.svgPrecision, "stroke_width": options.svgStrokeWidth,
+                        "exclude_layers": excludeLayers
                     ]
                     if let handles = handlesArg {
                         args["handles"] = handles
@@ -5393,22 +5425,55 @@ class AppState {
         }
     }
 
-    /// Box Joint — emit a finger-joint profile (and its mate) along an edge centred
-    /// at the origin, sized by the panel parameters.
+    /// The endpoints of the edge to fingerise: the selected LINE's ends, or the
+    /// longest segment of a selected polyline. Returns nil when no edge is selected.
+    private func selectedEdgeEndpoints() -> (p1: [Double], p2: [Double])? {
+        guard let h = selectedHandles.first,
+              let ent = entities.first(where: { $0.handle == h }) else { return nil }
+        if ent.type == "LINE", let s = ent.start, let e = ent.end,
+           s.count >= 2, e.count >= 2 {
+            return (s, e)
+        }
+        if let vs = ent.vertices, vs.count >= 2 {
+            // longest segment of the polyline
+            var best = (0, 1, 0.0)
+            let n = vs.count
+            let lim = (ent.closed == true) ? n : n - 1
+            for i in 0..<lim {
+                let a = vs[i], b = vs[(i + 1) % n]
+                let d = hypot(a[0] - b[0], a[1] - b[1])
+                if d > best.2 { best = (i, (i + 1) % n, d) }
+            }
+            return (vs[best.0], vs[best.1])
+        }
+        return nil
+    }
+
+    /// Box Joint — fingerise the selected edge (a line, or the longest segment of a
+    /// selected polyline) in place, optionally emitting the mating edge alongside.
     func applyBoxJoint(exitAfterApply: Bool = false) {
+        guard let edge = selectedEdgeEndpoints() else {
+            errorMessage = "Select a straight edge (a line, or a shape) to fingerise."
+            return
+        }
         saveToHistory()
         let activeDxfURL = ensureActiveDXFFileExists()
         isProcessing = true
-        let half = boxJointLength / 2.0
+        let p1 = edge.p1, p2 = edge.p2
+        // outward normal of the edge, for placing the mate alongside
+        let dx = p2[0] - p1[0], dy = p2[1] - p1[1]
+        let len = max(1e-6, (dx * dx + dy * dy).squareRoot())
+        let nx = -dy / len, ny = dx / len
+        let gap = boxJointDepth + 6.0
         var args: [String: Any] = [
             "input": activeDxfURL.path, "output": activeDxfURL.path,
-            "p1": [-half, 0.0], "p2": [half, 0.0],
+            "p1": p1, "p2": p2,
             "finger_width": boxJointFingerWidth, "depth": boxJointDepth,
             "kerf": boxJointKerf, "start_tab": true, "mate": boxJointMate
         ]
         if boxJointMate {
-            let gap = boxJointDepth + 10.0
-            args["p3"] = [-half, gap]; args["p4"] = [half, gap]
+            args["p3"] = [p1[0] + nx * gap, p1[1] + ny * gap]
+            args["p4"] = [p2[0] + nx * gap, p2[1] + ny * gap]
         }
         Task {
             do {

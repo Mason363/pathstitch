@@ -1296,6 +1296,10 @@ struct DxfCanvasView: View {
             let matchedLayer = getLayerFast(ent)
             let layerVisible: Bool = matchedLayer?.visible ?? true
             if !layerVisible { continue }
+            // Construction layers: paint orange, and hide them all when the Layers
+            // panel's "hide construction" toggle is on.
+            let isConstruction = (matchedLayer?.isConstruction == true)
+            if isConstruction && state.hideConstructionLayers { continue }
 
             // While dragging the radius arrow, the committed geometry for the
             // active shape is stale — the local blend preview (drawn below) stands
@@ -1326,6 +1330,8 @@ struct DxfCanvasView: View {
                 strokeColor = Color.orange
             } else if isHovered {
                 strokeColor = Color.accent_hover
+            } else if isConstruction {
+                strokeColor = Color.orange
             } else {
                 strokeColor = baseColor
             }
@@ -4763,6 +4769,11 @@ struct DxfCanvasView: View {
             let r = CGFloat(radius) * state.canvasScale
             let rect = CGRect(x: sc.x - r, y: sc.y - r, width: r * 2, height: r * 2)
             path.addEllipse(in: rect)
+            // Leather Simulator on a circular region.
+            if let leatherId = state.leatherFills[ent.handle],
+               let col = AppState.leatherSwatchColor(leatherId) {
+                context.fill(path, with: .color(col.opacity(0.85)))
+            }
             context.stroke(path, with: .color(strokeColor), lineWidth: strokeWidth)
         } else if ent.type == "ARC", let center = ent.center, let radius = ent.radius,
                   let sa = ent.start_angle, let ea = ent.end_angle {

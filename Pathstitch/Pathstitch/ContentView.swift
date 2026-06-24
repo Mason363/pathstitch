@@ -2754,7 +2754,16 @@ extension ContentView {
                     .tracking(0.5)
                 
                 Spacer()
-                
+
+                // Hide-all-construction-layers toggle (left of Add Layer).
+                Button(action: { state.hideConstructionLayers.toggle() }) {
+                    Image(systemName: state.hideConstructionLayers ? "ruler.fill" : "ruler")
+                        .font(.system(size: 11))
+                        .foregroundColor(state.hideConstructionLayers ? Color.text_muted : .orange)
+                }
+                .buttonStyle(PlainButtonStyle())
+                .help(state.hideConstructionLayers ? "Show construction layers" : "Hide all construction layers")
+
                 // Add Layer Button
                 Button(action: {
                     let num = state.layers.count + 1
@@ -2885,7 +2894,14 @@ extension ContentView {
                                                     renamingText = item.name
                                                 }
                                             )
-                                        
+
+                                        if state.layers.first(where: { $0.id == item.id })?.isConstruction == true {
+                                            Image(systemName: "ruler")
+                                                .font(.system(size: 9))
+                                                .foregroundColor(.orange)
+                                                .help("Construction layer — orange, and excluded from the final export")
+                                        }
+
                                         Spacer()
                                     }
                                     
@@ -2941,6 +2957,14 @@ extension ContentView {
                                                 Button("Merge Selected Layers") {
                                                     state.mergeSelectedLayers()
                                                 }
+                                            }
+                                        }
+
+                                        if !item.isFolder {
+                                            Divider()
+                                            let isC = state.layers.first(where: { $0.id == item.id })?.isConstruction == true
+                                            Button(isC ? "Make Normal Layer" : "Make Construction") {
+                                                state.setLayerConstruction(item.id, !isC)
                                             }
                                         }
 
@@ -3615,9 +3639,10 @@ extension ContentView {
     private var boxJointSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             toolHeader("puzzlepiece", "BOX JOINT")
-            Text("Emits a finger-joint edge (and its mate) at the origin. Move/rotate it onto your panels.")
+            Text("Select a straight edge (a line, or a shape — its longest side is used), then create an interlocking finger joint along it.")
                 .font(.system(size: 10)).foregroundColor(Color.text_secondary)
-            numberField("Edge length (mm)", $state.boxJointLength)
+            Text("\(state.selectedHandles.count) selected")
+                .font(.system(size: 9)).foregroundColor(Color.text_secondary)
             numberField("Finger width (mm)", $state.boxJointFingerWidth)
             numberField("Depth (mm)", $state.boxJointDepth)
             numberField("Kerf (mm)", $state.boxJointKerf)
@@ -3629,7 +3654,7 @@ extension ContentView {
     /// Golden Ratio guides — spiral / phi rectangle / centre line.
     private var goldenGuideSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            toolHeader("spiral", "GOLDEN RATIO")
+            toolHeader("hurricane", "GOLDEN RATIO")
             Picker("", selection: $state.goldenKind) {
                 Text("Spiral").tag("spiral")
                 Text("Rectangle").tag("rectangle")

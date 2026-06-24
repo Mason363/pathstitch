@@ -76,7 +76,7 @@ enum ToolbarRegistry {
         .init(id: "boxStitch", title: "Box Stitch", icon: "rectangle.connected.to.line.below",                       shapesOrigin: false, kind: .tool(.boxStitch)),
         .init(id: "mandala",   title: "Mandala",   icon: "circle.hexagongrid",                                       shapesOrigin: false, kind: .tool(.mandala)),
         .init(id: "boxJoint",  title: "Box Joint", icon: "puzzlepiece",                                              shapesOrigin: false, kind: .tool(.boxJoint)),
-        .init(id: "goldenGuide", title: "Golden Ratio", icon: "spiral",                                              shapesOrigin: false, kind: .tool(.goldenGuide)),
+        .init(id: "goldenGuide", title: "Golden Ratio", icon: "hurricane",                                              shapesOrigin: false, kind: .tool(.goldenGuide)),
         .init(id: "jigExport", title: "3D Jig",    icon: "cube.transparent",                                         shapesOrigin: false, kind: .tool(.jigExport)),
         .init(id: "flipH",     title: "Flip H",    icon: "arrow.left.and.right.righttriangle.left.righttriangle.right", shapesOrigin: false, kind: .flipH),
         .init(id: "flipV",     title: "Flip V",    icon: "arrow.up.and.down.righttriangle.up.righttriangle.down",      shapesOrigin: false, kind: .flipV),
