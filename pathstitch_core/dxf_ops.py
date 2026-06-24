@@ -2549,6 +2549,29 @@ def op_add_holes(args: Dict[str, Any]) -> Dict[str, Any]:
             return []
         out: List[Tuple[float, float]] = []
 
+        # Count mode places EXACTLY hole_count evenly-spaced holes along the whole
+        # contour. It deliberately ignores corner snapping (which subdivides the
+        # path and would otherwise place hole_count holes *per* corner run — the
+        # "Count does nothing / behaves like Fill" bug). The contract is an exact
+        # count, so corners don't get a forced stitch here.
+        if distribution == "count" and hole_count > 0:
+            n = max(1, hole_count)
+            if is_loop:
+                step = L / n
+                for i in range(n):
+                    pt = line.interpolate(((i + phase) * step) % L)
+                    out.append((pt.x, pt.y))
+            elif n == 1:
+                pt = line.interpolate(0.0)
+                out.append((pt.x, pt.y))
+            else:
+                # Open run: spread n holes end to end, a hole on each endpoint.
+                step = L / (n - 1)
+                for i in range(n):
+                    pt = line.interpolate(min(L, i * step))
+                    out.append((pt.x, pt.y))
+            return out
+
         stops: List[float] = []
         if corner_holes and corner_pts:
             for cx, cy in corner_pts:
@@ -2572,10 +2595,8 @@ def op_add_holes(args: Dict[str, Any]) -> Dict[str, Any]:
                     continue
                 # Variable pitch: nearest whole number of steps to the target so a
                 # hole sits on the run's start corner and the rest stay near target.
-                if distribution == "count" and hole_count > 0:
-                    n = _even_count(run)
-                else:
-                    n = max(1, int(round(run / spacing_target)))
+                # (Count mode never reaches here — it returns an exact count above.)
+                n = max(1, int(round(run / spacing_target)))
                 for k in range(n):
                     d = a + run * (k / n)
                     pt = line.interpolate(d % L if is_loop else min(L, d))
@@ -2663,7 +2684,11 @@ def op_add_holes(args: Dict[str, Any]) -> Dict[str, Any]:
     # Remove holes closer than the proximity distance. A saddle stitch's two rows
     # are deliberately close, so cap the merge distance just under the nearest
     # legitimate neighbour there to avoid eating the pattern.
-    if enable_proximity_filter and hole_centers:
+    # Skip in Count mode: the user asked for an exact number, so merging close
+    # neighbours (which would silently drop holes and make a higher Count look
+    # identical to a lower one) must not override that.
+    count_mode = (distribution == "count" and hole_count > 0)
+    if enable_proximity_filter and hole_centers and not count_mode:
         eff_prox = proximity_filter_distance
         if pattern == "saddle":
             nearest_legit = min(spacing_target,

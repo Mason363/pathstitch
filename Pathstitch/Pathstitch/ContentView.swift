@@ -383,8 +383,21 @@ struct ContentView: View {
         .onChange(of: state.holeRowSpacing) { _ in state.updateLivePreview() }
         .onChange(of: state.holeSaddleSpacing) { _ in state.updateLivePreview() }
         .onChange(of: state.holeOffsetCornerFillet) { _ in state.updateLivePreview() }
-        .onChange(of: state.holeEnableVariableSpacing) { _ in state.updateLivePreview() }
-        .onChange(of: state.holeVariableSpacingMin) { _ in state.updateLivePreview() }
+        .onChange(of: state.holeEnableVariableSpacing) { _ in
+            // Entering Variable mode: target the band's lower bound so the spacing
+            // matches what the slider shows.
+            if state.holeEnableVariableSpacing { state.holeSpacing = state.holeVariableSpacingMin }
+            state.updateLivePreview()
+        }
+        // In Variable Spacing mode the slider / Min field edit the band, but the
+        // hole pipeline targets `holeSpacing` (the corner-hole path uses it
+        // directly). Keep holeSpacing pinned to the band's lower bound so moving
+        // the slider actually changes the spacing — otherwise it does nothing on
+        // any part with corners.
+        .onChange(of: state.holeVariableSpacingMin) { _ in
+            if state.holeEnableVariableSpacing { state.holeSpacing = state.holeVariableSpacingMin }
+            state.updateLivePreview()
+        }
         .onChange(of: state.holeVariableSpacingMax) { _ in state.updateLivePreview() }
         .onChange(of: state.holeEnableProximityFilter) { _ in state.updateLivePreview() }
         .onChange(of: state.holeEnableCornerInterpolation) { _ in state.updateLivePreview() }
