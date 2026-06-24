@@ -199,6 +199,8 @@ enum AppCommands {
               defaultCombo: KeyCombo(key: "n"), isToggle: true) { $0.snapEnabled.toggle() },
         .init(id: "view.chainSelect", title: "Toggle Chain Selection", icon: "link", category: "View",
               defaultCombo: KeyCombo(key: "a"), isToggle: true) { $0.chainSelectionEnabled.toggle() },
+        .init(id: "view.stitchSim", title: "Toggle Stitching Simulator", icon: "scribble", category: "View",
+              defaultCombo: KeyCombo(key: ""), isToggle: true) { $0.showStitchSimulation.toggle() },
 
         .init(id: "edit.duplicate", title: "Duplicate Selection", icon: "plus.square.on.square", category: "Edit",
               defaultCombo: KeyCombo(key: "d", command: true),

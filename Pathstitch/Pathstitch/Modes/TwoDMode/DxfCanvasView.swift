@@ -498,8 +498,77 @@ struct DxfCanvasView: View {
     }
 
     @ViewBuilder
+    /// Hole centres on the SEWING_HOLES layer, in model space, greedily chained
+    /// nearest-to-nearest so the thread preview follows the seam.
+    private func orderedStitchPoints() -> [CGPoint] {
+        var pts: [CGPoint] = []
+        for e in state.entities where e.layer == "SEWING_HOLES" {
+            if let c = e.center, c.count >= 2 {
+                pts.append(CGPoint(x: c[0], y: c[1]))
+            } else if let vs = e.vertices, !vs.isEmpty {
+                let cx = vs.reduce(0.0) { $0 + $1[0] } / Double(vs.count)
+                let cy = vs.reduce(0.0) { $0 + $1[1] } / Double(vs.count)
+                pts.append(CGPoint(x: cx, y: cy))
+            }
+        }
+        guard pts.count > 1 else { return pts }
+        // greedy nearest-neighbour chain from the bottom-left-most hole
+        var remaining = pts
+        var start = remaining.min(by: { ($0.x + $0.y) < ($1.x + $1.y) }) ?? remaining[0]
+        var chain: [CGPoint] = [start]
+        remaining.removeAll { $0 == start }
+        while !remaining.isEmpty {
+            let next = remaining.min(by: {
+                hypot($0.x - start.x, $0.y - start.y) < hypot($1.x - start.x, $1.y - start.y)
+            })!
+            chain.append(next)
+            remaining.removeAll { $0 == next }
+            start = next
+        }
+        return chain
+    }
+
+    @ViewBuilder
+    private func stitchSimulationOverlay(size viewSize: CGSize, modelBounds: CGRect) -> some View {
+        let model = orderedStitchPoints()
+        if state.showStitchSimulation && model.count > 1 {
+            let screen = model.map { toScreen(dx: Double($0.x), dy: Double($0.y), size: viewSize, bounds: modelBounds) }
+            let thread = Color(red: 0.78, green: 0.63, blue: 0.39)
+            ZStack {
+                Path { p in
+                    p.move(to: screen[0])
+                    for pt in screen.dropFirst() { p.addLine(to: pt) }
+                }
+                .stroke(thread, style: StrokeStyle(lineWidth: 2.0, lineCap: .round, lineJoin: .round))
+                if state.stitchSimArrows {
+                    ForEach(Array(stride(from: 0, to: screen.count - 1, by: 3)), id: \.self) { i in
+                        let a = screen[i], b = screen[i + 1]
+                        let ang = atan2(b.y - a.y, b.x - a.x)
+                        let mid = CGPoint(x: (a.x + b.x) / 2, y: (a.y + b.y) / 2)
+                        Path { p in
+                            p.move(to: mid)
+                            p.addLine(to: CGPoint(x: mid.x - 6 * cos(ang - 0.5), y: mid.y - 6 * sin(ang - 0.5)))
+                            p.move(to: mid)
+                            p.addLine(to: CGPoint(x: mid.x - 6 * cos(ang + 0.5), y: mid.y - 6 * sin(ang + 0.5)))
+                        }
+                        .stroke(thread, lineWidth: 1.5)
+                    }
+                }
+                Text("\(model.count) stitches")
+                    .font(.system(size: 10, weight: .semibold))
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .background(thread.opacity(0.85))
+                    .foregroundColor(.white)
+                    .cornerRadius(4)
+                    .position(x: screen[0].x, y: screen[0].y - 14)
+            }
+            .allowsHitTesting(false)
+        }
+    }
+
     private func canvasOverlays(size viewSize: CGSize, modelBounds: CGRect) -> some View {
         ZStack {
+            stitchSimulationOverlay(size: viewSize, modelBounds: modelBounds)
             // Translation Gizmo Layer. Hidden while a corner tool (Fillet/Chamfer)
             // is active so the move/rotate handles don't overlap and steal grabs
             // from the per-corner radius controls (MAS-101).

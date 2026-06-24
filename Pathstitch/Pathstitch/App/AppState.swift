@@ -1142,6 +1142,11 @@ class AppState {
     var jigMode: String = "solid"                 // solid | stitch_template | corner_jig
     var jigThickness: Double = 3.0
 
+    // Stitching Simulator — a pure overlay that threads the stitch holes so the
+    // finished seam can be previewed. Never mutates geometry.
+    var showStitchSimulation: Bool = false
+    var stitchSimArrows: Bool = true
+
     var consolidateSvgStrokes: Bool = true
     // SVGs import as cuttable outlines of this width (mm). 0 = raw centerlines.
     var svgImportThickness: Double = 3.0

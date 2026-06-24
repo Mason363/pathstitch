@@ -1469,6 +1469,10 @@ extension ContentView {
                 }
             }
 
+            Toggle("Preview seam (Stitching Simulator)", isOn: $state.showStitchSimulation)
+                .font(PlasticityFont.label)
+                .help("Thread the holes to preview the finished seam — overlay only, never alters geometry")
+
             Divider().padding(.vertical, 2)
         }
         .onChange(of: state.holeShape) { _ in state.updateLivePreview() }
