@@ -334,7 +334,12 @@ struct ContentView: View {
             }
         }
         .onChange(of: state.openDocsToken) { _ in WindowManager.shared.showDocumentationWindow() }
-        .onChange(of: state.selectedHandles) { _ in state.updateLivePreview() }
+        .onChange(of: state.selectedHandles) { _ in
+            state.updateLivePreview()
+            // Keep the Holes Side picker in the right vocabulary (outer/inner vs
+            // left/right) for whatever's now selected.
+            if state.currentTool == .addHoles { state.normalizeHoleSideVocabulary() }
+        }
         // Esc unfocuses the fillet radius field so keyboard shortcuts work (MAS-91).
         .onChange(of: state.escapePressedToken) { _ in isFilletFieldFocused = false }
         // Selecting a converted-line group loads its style/settings into the
@@ -347,6 +352,9 @@ struct ContentView: View {
         }
         .onChange(of: state.currentTool) { _ in
             state.updateLivePreview()
+            // Entering the Holes tool: make sure the Side picker shows the right
+            // vocabulary (outer/inner vs left/right) for the current selection.
+            if state.currentTool == .addHoles { state.normalizeHoleSideVocabulary() }
             // Entering a corner tool starts a confirm/cancel session and (with a
             // selection) applies it to all the shape's corners at once; leaving
             // confirms the session and clears the active target (MAS-62).
@@ -376,6 +384,8 @@ struct ContentView: View {
         .onChange(of: state.holeSaddleSpacing) { _ in state.updateLivePreview() }
         .onChange(of: state.holeOffsetCornerFillet) { _ in state.updateLivePreview() }
         .onChange(of: state.holeEnableVariableSpacing) { _ in state.updateLivePreview() }
+        .onChange(of: state.holeVariableSpacingMin) { _ in state.updateLivePreview() }
+        .onChange(of: state.holeVariableSpacingMax) { _ in state.updateLivePreview() }
         .onChange(of: state.holeEnableProximityFilter) { _ in state.updateLivePreview() }
         .onChange(of: state.holeEnableCornerInterpolation) { _ in state.updateLivePreview() }
 
@@ -1413,21 +1423,76 @@ extension ContentView {
                                     .help("Exact number of evenly-spaced holes per contour")
                             }
                         } else {
-                            HStack {
-                                Text("Hole Spacing (mm)")
-                                    .font(PlasticityFont.label)
-                                    .foregroundColor(Color.text_primary)
-                                Spacer()
-                                TextField("Spacing", value: $state.holeSpacing, format: .number)
-                                    .textFieldStyle(PlainTextFieldStyle())
-                                    .padding(4)
-                                    .frame(width: 80)
-                                    .background(Color.bg_input)
-                                    .cornerRadius(4)
-                                    .foregroundColor(Color.text_primary)
-                                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                                    .help("Distance between consecutive sewing holes in millimeters")
+                            // Spacing control. A 1–20 mm slider is the primary
+                            // control. With Variable Spacing off it drives the single
+                            // hole spacing; with it on it slides BOTH the min and max
+                            // together, keeping their gap fixed. The numeric fields
+                            // edit the same values and the slider tracks them. The box
+                            // below the slider shows / edits the slider's value.
+                            let spacingSlider = Binding<Double>(
+                                get: {
+                                    state.holeEnableVariableSpacing
+                                        ? state.holeVariableSpacingMin
+                                        : state.holeSpacing
+                                },
+                                set: { raw in
+                                    let v = min(20.0, max(1.0, raw))
+                                    if state.holeEnableVariableSpacing {
+                                        let gap = max(0.0, state.holeVariableSpacingMax - state.holeVariableSpacingMin)
+                                        state.holeVariableSpacingMin = v
+                                        state.holeVariableSpacingMax = v + gap
+                                    } else {
+                                        state.holeSpacing = v
+                                    }
+                                }
+                            )
+                            if !state.holeEnableVariableSpacing {
+                                HStack {
+                                    Text("Hole Spacing (mm)")
+                                        .font(PlasticityFont.label)
+                                        .foregroundColor(Color.text_primary)
+                                    Spacer()
+                                    TextField("Spacing", value: $state.holeSpacing, format: .number)
+                                        .textFieldStyle(PlainTextFieldStyle())
+                                        .padding(4)
+                                        .frame(width: 80)
+                                        .background(Color.bg_input)
+                                        .cornerRadius(4)
+                                        .foregroundColor(Color.text_primary)
+                                        .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+                                        .help("Distance between consecutive sewing holes in millimeters")
+                                }
                             }
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack(spacing: 8) {
+                                    Text("1")
+                                        .font(PlasticityFont.label)
+                                        .foregroundColor(Color.text_muted)
+                                    Slider(value: spacingSlider, in: 1...20)
+                                    Text("20")
+                                        .font(PlasticityFont.label)
+                                        .foregroundColor(Color.text_muted)
+                                }
+                                HStack {
+                                    Spacer()
+                                    TextField("", value: spacingSlider, format: .number)
+                                        .textFieldStyle(PlainTextFieldStyle())
+                                        .multilineTextAlignment(.center)
+                                        .padding(4)
+                                        .frame(width: 64)
+                                        .background(Color.bg_input)
+                                        .cornerRadius(4)
+                                        .foregroundColor(Color.text_primary)
+                                        .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+                                    Text("mm")
+                                        .font(PlasticityFont.label)
+                                        .foregroundColor(Color.text_secondary)
+                                    Spacer()
+                                }
+                            }
+                            .help(state.holeEnableVariableSpacing
+                                  ? "Spacing slider (1–20 mm). Slides the min and max together, keeping their gap. Edit Min / Max below for fine control."
+                                  : "Spacing slider (1–20 mm). Sets the distance between holes; the field above edits the same value.")
                         }
 
                         HStack {
@@ -1470,13 +1535,22 @@ extension ContentView {
                                 .foregroundColor(Color.text_primary)
                             Spacer()
                             Picker("", selection: $state.holeSide) {
-                                Text("Left").tag("left")
-                                Text("Right").tag("right")
-                                Text("Both").tag("both")
+                                if state.holeHandleIsRadial {
+                                    // Circles / arcs / curves: outer/inner is
+                                    // unambiguous; left/right is not (and disagreed
+                                    // with the dashed preview).
+                                    Text("Outer").tag("outer")
+                                    Text("Inner").tag("inner")
+                                    Text("Both").tag("both")
+                                } else {
+                                    Text("Left").tag("left")
+                                    Text("Right").tag("right")
+                                    Text("Both").tag("both")
+                                }
                             }
                             .pickerStyle(SegmentedPickerStyle())
                             .frame(width: 180)
-                            .help("Choose the side(s) of the path to distribute holes (left, right, or both)")
+                            .help("Choose the side(s) of the path to distribute holes. Closed curves use outer / inner; open paths use left / right.")
                         }
 
                         if state.holePattern == "saddle" {

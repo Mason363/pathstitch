@@ -244,6 +244,32 @@ struct DxfCanvasView: View {
                         }
                         return
                     }
+                    // Apply-style tools: Enter runs the tool's Apply action and
+                    // returns to Select, the same as every commit-capable tool.
+                    if state.currentTool == .addHoles {
+                        if !state.selectedHandles.isEmpty { state.applySewingHoles(exitAfterApply: true) }
+                        return
+                    }
+                    if state.currentTool == .addThickness {
+                        state.addThickness(exitAfterApply: true)
+                        return
+                    }
+                    if state.currentTool == .cleanup {
+                        state.applyCleanup(exitAfterApply: true)
+                        return
+                    }
+                    if state.currentTool == .scale {
+                        state.confirmScaleAndExit()
+                        return
+                    }
+                    if state.currentTool == .mirror {
+                        state.confirmMirrorAndExit()
+                        return
+                    }
+                    if state.currentTool == .patterning {
+                        state.commitPatterningAndExit()
+                        return
+                    }
                     // Return/Enter finishes the in-progress shape at the cursor.
                     if state.currentTool == .pen {
                         finishPenPath()
@@ -789,7 +815,8 @@ struct DxfCanvasView: View {
             // previously editable only via the numeric field.
             if state.currentTool == .addHoles,
                let handleInfo = getOffsetHandleInfo() {
-                let scaleDir: CGFloat = state.holeSide == "left" ? 1.0 : -1.0
+                // "left"/"outer" sit on the +normal side, "right"/"inner" on −normal.
+                let scaleDir: CGFloat = (state.holeSide == "left" || state.holeSide == "outer") ? 1.0 : -1.0
                 let handlePt = CGPoint(
                     x: handleInfo.basePoint.x + handleInfo.normal.x * CGFloat(state.holeOffsetDistance) * scaleDir,
                     y: handleInfo.basePoint.y + handleInfo.normal.y * CGFloat(state.holeOffsetDistance) * scaleDir
@@ -814,7 +841,17 @@ struct DxfCanvasView: View {
                                 let vecY = modelPt.y - handleInfo.basePoint.y
                                 let proj = vecX * handleInfo.normal.x + vecY * handleInfo.normal.y
                                 state.holeOffsetDistance = max(0.0, abs(proj))
-                                state.holeSide = proj >= 0 ? "left" : "right"
+                                // For circles / arcs / curves the perpendicular handle
+                                // direction can't be expressed as a winding-correct
+                                // left/right, so use outer/inner (grow/shrink), which
+                                // the dashed preview and the Python hole pipeline both
+                                // interpret the same way. Straight-edged profiles keep
+                                // left/right, which already matches.
+                                if handleInfo.isRadial {
+                                    state.holeSide = proj >= 0 ? "outer" : "inner"
+                                } else {
+                                    state.holeSide = proj >= 0 ? "left" : "right"
+                                }
                                 state.updateLivePreview()
                             }
                             .onEnded { _ in
@@ -3404,6 +3441,14 @@ struct DxfCanvasView: View {
     struct OffsetHandleInfo {
         let basePoint: CGPoint // Model space
         let normal: CGPoint    // Model space
+        // True when `normal` is the radial (centre-out) fallback rather than a real
+        // edge normal — i.e. the selection is a circle / arc / curve with no
+        // straight first edge. For those, the perpendicular "left / right" handle
+        // direction is meaningless, so the drag uses winding-independent
+        // "outer / inner" instead (which the preview and Python agree on). This is
+        // what made dragged holes land on the side opposite the dashed preview,
+        // most visibly on circles.
+        var isRadial: Bool = false
     }
     
     private func getOffsetHandleInfo() -> OffsetHandleInfo? {
@@ -3434,7 +3479,7 @@ struct DxfCanvasView: View {
             }
         }
         if let center = selectionCenterModel {
-            return OffsetHandleInfo(basePoint: center, normal: CGPoint(x: 1, y: 0))
+            return OffsetHandleInfo(basePoint: center, normal: CGPoint(x: 1, y: 0), isRadial: true)
         }
         return nil
     }
@@ -5208,11 +5253,15 @@ struct ScrollWheelModifier: NSViewRepresentable {
                 let zoomFactor: CGFloat = event.scrollingDeltaY > 0 ? 1.05 : 0.95
                 onZoom?(event, swiftUiPt, zoomFactor)
             } else if event.hasPreciseScrollingDeltas {
+                // Two-finger trackpad / precise scroll pan. `scrollingDeltaX/Y`
+                // already honour the system "natural scrolling" setting, so feeding
+                // them straight in makes the canvas follow the user's OS preference
+                // like Fusion 360 (auto-detected, no per-device guessing). The
+                // optional Settings toggle flips the vertical for anyone whose
+                // hardware/preference disagrees.
+                let invert = UserDefaults.standard.bool(forKey: SettingsKeys.invertScrollPan)
                 let dx = event.scrollingDeltaX
-                // Invert the vertical so a scroll/swipe up pans the view up (the
-                // raw scrollingDeltaY is the opposite sign, which read as a
-                // reversed vertical pan). Horizontal already matches.
-                let dy = -event.scrollingDeltaY
+                let dy = (invert ? -1.0 : 1.0) * event.scrollingDeltaY
                 onPanOffset?(CGSize(width: dx, height: dy))
             } else {
                 let zoomFactor: CGFloat = event.deltaY > 0 ? 1.15 : 0.85
@@ -5253,7 +5302,10 @@ struct ScrollWheelModifier: NSViewRepresentable {
             guard let start = dragStartPoint else { return }
             let current = event.locationInWindow
             let dx = current.x - start.x
-            let dy = current.y - start.y
+            // Window coords are y-up, but canvasOffset is y-down (added straight to
+            // the SwiftUI screen Y). Negate dy so a middle-button (Fusion-style) pan
+            // grabs the canvas and moves it *with* the cursor instead of opposite.
+            let dy = -(current.y - start.y)
             onPanOffset?(CGSize(width: dx, height: dy))
             dragStartPoint = current
         }

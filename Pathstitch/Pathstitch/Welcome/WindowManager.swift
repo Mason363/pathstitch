@@ -488,13 +488,14 @@ class PathstitchDocumentWindow: NSWindow {
                 }
             }
             
-            // Return / Enter confirms the active action for commit-capable tools
-            // (Line, Pen, and Fillet/Chamfer). Text fields are already bypassed
-            // above, so this never interferes with typing/onSubmit.
+            // Return / Enter confirms the active action for every commit-capable
+            // tool (see TwoDTool.confirmsOnEnter): geometry tools finish the shape,
+            // apply-style tools (Holes, Offset, Scale, …) run their Apply and exit
+            // to Select. Text fields are already bypassed above, so this never
+            // interferes with typing / onSubmit. Dispatch lives in DxfCanvasView's
+            // commitToolToken handler.
             if event.keyCode == 36 || event.keyCode == 76 {
-                if appState.currentTool == .sketchLine || appState.currentTool == .pen
-                    || appState.currentTool == .offset
-                    || appState.currentTool.isCornerTool {
+                if appState.currentTool.confirmsOnEnter {
                     appState.commitToolToken += 1
                     return
                 }

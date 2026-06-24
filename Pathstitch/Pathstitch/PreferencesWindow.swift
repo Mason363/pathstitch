@@ -89,6 +89,7 @@ struct PreferencesView: View {
 private struct GeneralPrefsTab: View {
     @AppStorage(SettingsKeys.theme) private var themeRaw = AppTheme.dark.rawValue
     @AppStorage(SettingsKeys.icon) private var iconChoice = "auto"
+    @AppStorage(SettingsKeys.invertScrollPan) private var invertScrollPan = false
 
     // Per-format Finder preview toggles (MAS-155). Stored in the shared app-group
     // suite so the QuickLook extensions read the same flags; default on.
@@ -122,6 +123,13 @@ private struct GeneralPrefsTab: View {
                     get: { NSApp.activeAppState?.consolidateSvgStrokes ?? false },
                     set: { NSApp.activeAppState?.consolidateSvgStrokes = $0 }
                 ))
+            }
+
+            Section("Navigation") {
+                Toggle("Reverse pan direction", isOn: $invertScrollPan)
+                Text("Two-finger trackpad / scroll panning follows your macOS \u{201C}natural scrolling\u{201D} setting by default (like Fusion 360). If the canvas pans up when you expect down, turn this on to flip it.")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
             }
 
             Section("Finder Previews") {

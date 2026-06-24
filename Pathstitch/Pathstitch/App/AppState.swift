@@ -91,6 +91,20 @@ enum TwoDTool: String, CaseIterable {
 
     var isCornerTool: Bool { self == .fillet || self == .chamfer }
 
+    /// Tools whose primary action is confirmed by pressing Return/Enter, which then
+    /// returns to the Select tool. Geometry tools (Line, Pen) finish the in-progress
+    /// shape; apply-style tools (Holes, Offset, …) run their Apply action. Dispatch
+    /// for each lives in `DxfCanvasView`'s `commitToolToken` handler.
+    var confirmsOnEnter: Bool {
+        switch self {
+        case .sketchLine, .pen, .offset, .fillet, .chamfer,
+             .addHoles, .addThickness, .cleanup, .scale, .mirror, .patterning:
+            return true
+        default:
+            return false
+        }
+    }
+
     /// The keybind command id that activates this tool, so tooltips can show the
     /// live shortcut (it stays correct even after the user rebinds it).
     var commandId: String {
@@ -1315,6 +1329,33 @@ class AppState {
         if !selectedHandles.isEmpty, f > 0, abs(f - 1.0) > 0.001 {
             scaleSelected(factor: f)
         }
+        currentTool = .select
+    }
+
+    /// Enter / Apply for the Patterning tool: run the active pattern sub-mode (the
+    /// same action as its "Apply Pattern" button) and drop back to Select. A no-op
+    /// when nothing's selected (or no guide path is picked in Path mode).
+    func commitPatterningAndExit() {
+        guard !selectedHandles.isEmpty else { return }
+        switch patternMode {
+        case "circular":
+            applyPatternCircular(count: patternCircCount, angle: patternCircAngle)
+        case "path":
+            guard let handle = patternPathHandle else { return }
+            applyPatternPath(pathHandle: handle, spacing: patternPathSpacing)
+        default: // "rectangular"
+            applyPatternGrid(columns: patternCountX, rows: patternCountY,
+                             colSpacing: effectivePatternSpacingX, rowSpacing: effectivePatternSpacingY)
+        }
+        currentTool = .select
+    }
+
+    /// Enter / OK for the Mirror tool: bake the mirror (same as its OK button) and
+    /// return to Select. `confirmMirror` guards on a selection + axis, so this is a
+    /// safe no-op until the user has set both.
+    func confirmMirrorAndExit() {
+        guard !selectedHandles.isEmpty, mirrorAxisEnd != nil else { return }
+        confirmMirror()
         currentTool = .select
     }
 
@@ -4739,6 +4780,35 @@ class AppState {
         }
     }
 
+    /// True when the sewing-margin handle for the current selection is radial —
+    /// i.e. the selection has no straight first edge (a circle / arc / curve), so
+    /// the offset side is expressed as outer/inner rather than left/right. Mirrors
+    /// `getOffsetHandleInfo`'s fallback in DxfCanvasView. Drives the adaptive Side
+    /// picker and the dragged-handle direction (the holes-go-opposite-on-circles
+    /// fix).
+    var holeHandleIsRadial: Bool {
+        guard !selectedHandles.isEmpty else { return false }
+        for h in selectedHandles {
+            guard let e = entities.first(where: { $0.handle == h }) else { continue }
+            if e.type == "LINE" { return false }
+            if let v = e.vertices, v.count >= 2 { return false }
+        }
+        return true
+    }
+
+    /// Keeps `holeSide` in the vocabulary the current selection's Side picker shows:
+    /// outer/inner for radial selections (circles/curves), left/right otherwise. Run
+    /// when the selection changes so the segmented control never renders blank.
+    func normalizeHoleSideVocabulary() {
+        if holeHandleIsRadial {
+            if holeSide == "left" { holeSide = "outer" }
+            else if holeSide == "right" { holeSide = "inner" }
+        } else {
+            if holeSide == "outer" { holeSide = "left" }
+            else if holeSide == "inner" { holeSide = "right" }
+        }
+    }
+
     /// Single source of truth for the `add_holes` arguments. The batch, preview,
     /// and apply paths all build the same payload — only input/output/handles
     /// differ — so they share this builder to stay in lockstep.
@@ -4773,7 +4843,7 @@ class AppState {
         ]
     }
 
-    func applySewingHoles() {
+    func applySewingHoles(exitAfterApply: Bool = false) {
         saveToHistory()
         guard let url = currentFilePath else { return }
         isProcessing = true
@@ -4795,6 +4865,7 @@ class AppState {
                     self.currentFilePath = activeDxfURL
                     self.selectedHandles.removeAll()
                     self.reloadDXF()
+                    if exitAfterApply { self.currentTool = .select }
                 }
             } catch {
                 await MainActor.run {
@@ -4805,11 +4876,11 @@ class AppState {
         }
     }
     
-    func applyCleanup() {
+    func applyCleanup(exitAfterApply: Bool = false) {
         saveToHistory()
         guard let url = currentFilePath else { return }
         isProcessing = true
-        
+
         Task {
             do {
                 await reconcileBufferIfNeeded()
@@ -4824,11 +4895,12 @@ class AppState {
                         "tolerance": cleanupTolerance
                     ]
                 )
-                
+
                 await MainActor.run {
                     self.currentFilePath = activeDxfURL
                     self.selectedHandles.removeAll()
                     self.reloadDXF()
+                    if exitAfterApply { self.currentTool = .select }
                 }
             } catch {
                 await MainActor.run {

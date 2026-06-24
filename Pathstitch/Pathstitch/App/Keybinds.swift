@@ -322,6 +322,11 @@ final class KeybindStore {
 enum SettingsKeys {
     static let theme = "pathstitch.theme"
     static let icon = "pathstitch.iconChoice"   // "auto" | "light" | "dark"
+    // Reverse the vertical direction of two-finger trackpad / precise-scroll
+    // panning. Off by default — the canvas follows the system "natural scrolling"
+    // setting like Fusion 360 et al. Flip this if your hardware/preference pans
+    // the wrong way (MAS pan-direction fix).
+    static let invertScrollPan = "pathstitch.invertScrollPan"
 }
 
 /// Single source of truth for applying the user's appearance choice across the
