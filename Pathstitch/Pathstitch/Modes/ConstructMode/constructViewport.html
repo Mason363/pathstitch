@@ -114,7 +114,11 @@ function leatherBump(){
 function makeLeatherMaterial(hex){
   const m=new THREE.MeshStandardMaterial({
     color:hex, roughness:0.62, metalness:0.0, side:THREE.DoubleSide,
-    bumpMap:leatherBump(), bumpScale:0.5, envMapIntensity:0.7,
+    bumpMap:leatherBump(), bumpScale:0.35, envMapIntensity:0.7,
+    // Flat shading = each rigid region reads as a clean plane and every fold is a
+    // crisp crease — no normals smeared across the hinge (the "mismatched shaders"
+    // the smooth-normal mesh produced). Crease lines are drawn on top.
+    flatShading:true,
   });
   return m;
 }
@@ -356,19 +360,22 @@ function buildPanelMeshes(panel){
   panel.shell=new THREE.Mesh(sgeo, mat); panel.shell.castShadow=true; panel.shell.receiveShadow=true;
   root.add(panel.shell);
 
-  // faint wireframe of every triangle edge (reads the tessellation/curvature)
-  const wpos=new Float32Array(panel.edges.length*2*3);
+  // Clean panel outline (boundary edges only) — not the full triangulation, which
+  // read as jagged busywork. This + the crease lines = a crisp CAD wireframe.
+  const wpos=new Float32Array(Math.max(panel.boundaryEdges.length,1)*2*3);
   const wgeo=new THREE.BufferGeometry(); wgeo.setAttribute("position", new THREE.BufferAttribute(wpos,3));
-  panel.wire=new THREE.LineSegments(wgeo, new THREE.LineBasicMaterial({color:COL_WIRE, transparent:true, opacity:0.12}));
+  panel.wire=new THREE.LineSegments(wgeo, new THREE.LineBasicMaterial({color:COL_WIRE, transparent:true, opacity:0.35}));
+  panel.wire.renderOrder=1;
   root.add(panel.wire);
 
-  // fold edges highlighted + used for picking; userData.segs maps segment→foldId
+  // fold edges = crisp crease lines, drawn on top; also picked (userData.segs→foldId)
   const fsegs=[]; const segMeta=[];
   for(const h of panel.hinges){ if(h.foldId>=0){ fsegs.push([h.v0,h.v1]); segMeta.push({panelId:panel.id, foldId:h.foldId}); } }
   panel.foldSegs=fsegs;
   const fpos=new Float32Array(Math.max(fsegs.length,1)*2*3);
   const fgeo=new THREE.BufferGeometry(); fgeo.setAttribute("position", new THREE.BufferAttribute(fpos,3));
-  panel.foldLine=new THREE.LineSegments(fgeo, new THREE.LineBasicMaterial({color:COL_FOLD, linewidth:2}));
+  panel.foldLine=new THREE.LineSegments(fgeo, new THREE.LineBasicMaterial({color:COL_FOLD}));
+  panel.foldLine.renderOrder=2;
   panel.foldLine.userData.segs=segMeta; panel.foldLine.userData.panelId=panel.id;
   root.add(panel.foldLine);
 }
@@ -674,9 +681,9 @@ function writePanelGeometry(panel){
   }
   // (artwork is the panel's own albedo map — UV-locked to the surface, so it
   // rides every fold automatically; nothing extra to update here.)
-  // wire
+  // outline (boundary edges only)
   const wp=panel.wire.geometry.attributes.position.array;
-  panel.edges.forEach(([a,b],i)=>{ const A=panel.X[a],B=panel.X[b]; wp[i*6]=A[0];wp[i*6+1]=A[1];wp[i*6+2]=A[2]; wp[i*6+3]=B[0];wp[i*6+4]=B[1];wp[i*6+5]=B[2]; });
+  panel.boundaryEdges.forEach(([a,b],i)=>{ const A=panel.X[a],B=panel.X[b]; wp[i*6]=A[0];wp[i*6+1]=A[1];wp[i*6+2]=A[2]; wp[i*6+3]=B[0];wp[i*6+4]=B[1];wp[i*6+5]=B[2]; });
   panel.wire.geometry.attributes.position.needsUpdate=true;
   // fold lines
   const fp=panel.foldLine.geometry.attributes.position.array;
