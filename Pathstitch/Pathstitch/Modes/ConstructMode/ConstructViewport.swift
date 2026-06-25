@@ -18,6 +18,7 @@ struct ConstructViewport: NSViewRepresentable {
     let materialToken: Int
     let decalToken: Int
     let stampToken: Int
+    let snapActive: Bool   // mirrors the 2D snap toggle so changes re-push live
     let homeToken: Int
     var state: AppState
 
@@ -58,6 +59,7 @@ struct ConstructViewport: NSViewRepresentable {
         context.coordinator.pushMaterial()
         context.coordinator.pushDecals()
         context.coordinator.pushStamps()
+        context.coordinator.pushSnap()
         context.coordinator.pushHome()
     }
 
@@ -73,6 +75,7 @@ struct ConstructViewport: NSViewRepresentable {
         private var lastMaterialToken = -1
         private var lastDecalToken = -1
         private var lastStampToken = -1
+        private var lastSnap: Bool? = nil
         private var lastHomeToken = -1
 
         init(state: AppState) { self.state = state }
@@ -95,6 +98,7 @@ struct ConstructViewport: NSViewRepresentable {
                     self.lastMaterialToken = -1
                     self.lastDecalToken = -1
                     self.lastStampToken = -1
+                    self.lastSnap = nil
                     self.pushModel()
                     self.pushControls()
                     self.pushSeams()
@@ -102,6 +106,7 @@ struct ConstructViewport: NSViewRepresentable {
                     self.pushMaterial()
                     self.pushDecals()
                     self.pushStamps()
+                    self.pushSnap()
                 }
             case "selectFold":
                 let panelId = json["panelId"] as? Int ?? 0
@@ -187,6 +192,14 @@ struct ConstructViewport: NSViewRepresentable {
             lastStampToken = state.constructStampToken
             let esc = Self.escape(state.constructStampsJSON)
             webView.evaluateJavaScript("setConstructStamps(\"\(esc)\");", completionHandler: nil)
+        }
+
+        func pushSnap() {
+            guard ready, let webView = webView else { return }
+            let on = state.snapActive   // mirrors the 2D snap toggle (n / dot.scope)
+            guard lastSnap != on else { return }
+            lastSnap = on
+            webView.evaluateJavaScript("setConstructSnap(\(on));", completionHandler: nil)
         }
 
         func pushControls() {

@@ -18,6 +18,7 @@ struct ConstructModeView: View {
                     materialToken: state.constructMaterialToken,
                     decalToken: state.constructDecalToken,
                     stampToken: state.constructStampToken,
+                    snapActive: state.snapActive,
                     homeToken: state.triggerConstructHomeToken,
                     state: state
                 )

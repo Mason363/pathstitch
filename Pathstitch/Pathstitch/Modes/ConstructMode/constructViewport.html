@@ -19,6 +19,7 @@
 <body>
 <canvas id="c"></canvas>
 <div id="hud">construct · drop a .dxf / .stch, or fold the active sketch</div>
+<div id="snaptag" style="position:absolute;pointer-events:none;display:none;font:11px -apple-system,sans-serif;color:#0b0c0e;background:rgba(255,255,255,0.92);padding:1px 5px;border-radius:3px;transform:translate(12px,12px);white-space:nowrap;z-index:5;"></div>
 <script>
 "use strict";
 
@@ -146,6 +147,8 @@ let SELECTED_CHAIN=-1;    // chain the user has picked (first half of a stitch)
 let CREASE_PT=null;       // first clicked point of a new fold being drawn in 3D
 let creaseMark=null;      // marker dot for that first point
 let creaseLine=null;      // rubber-band preview from the first point to the cursor
+let SNAP_ENABLED=true;    // mirrors the 2D snap toggle (snapActive), pushed from Swift
+let snapMark=null;        // live osnap indicator dot under the cursor (crease tool)
 let holeMesh=null;        // InstancedMesh of all hole markers (rides the fold)
 let chainLineMesh=null;   // LineSegments linking each chain's holes (always shown)
 let STAMPS=[];            // decoration-stamp outlines [{panelId, closed, pts:[{tri,bary}]}]
@@ -851,36 +854,68 @@ function worldToScreen(p){
   const v=new THREE.Vector3(p[0],p[1],p[2]).project(camera);
   return [(v.x*0.5+0.5)*window.innerWidth, (-v.y*0.5+0.5)*window.innerHeight];
 }
-// Snap a crease point to nearby panel geometry: boundary vertices first, then the
-// nearest point on a boundary edge or existing fold, within a screen-px radius.
-// Returns {world, p2d, snapped} — landing endpoints on edges so the fold spans the
-// panel edge-to-edge (which is what actually creates a hinge).
+// 2D segment intersection: param t on (p1→p2) if the segments cross, else null.
+function seg2dIntersectT(p1,p2,p3,p4){
+  const x1=p1[0],y1=p1[1],x2=p2[0],y2=p2[1],x3=p3[0],y3=p3[1],x4=p4[0],y4=p4[1];
+  const den=(x1-x2)*(y3-y4)-(y1-y2)*(x3-x4); if(Math.abs(den)<1e-9) return null;
+  const t=((x1-x3)*(y3-y4)-(y1-y3)*(x3-x4))/den;
+  const u=((x1-x3)*(y1-y2)-(y1-y3)*(x1-x2))/den;
+  if(t<-1e-6||t>1+1e-6||u<-1e-6||u>1+1e-6) return null;
+  return t;
+}
+// Full osnap for the crease tool (parity with 2D): endpoint / intersection /
+// center / midpoint, picked by nearest within a screen-px radius (priority breaks
+// near-ties). Gated by SNAP_ENABLED (the global snap toggle). Returns
+// {world, p2d, snapped, type}; falls back to the nearest boundary-edge point so a
+// fold still lands edge-to-edge.
 function snapCreasePoint(panel, hit, clientX, clientY){
-  const raw={world:[hit.point.x,hit.point.y,hit.point.z], p2d:hitTo2D(panel, hit.face, hit.point), snapped:false};
-  const TH=14; let best=null, bestD=TH;
-  // boundary + fold vertices (exact 2D known from index)
-  const verts=new Set();
-  for(const [a,b] of panel.boundaryEdges){ verts.add(a); verts.add(b); }
-  for(const [a,b] of panel.foldSegs){ verts.add(a); verts.add(b); }
-  for(const i of verts){
-    const s=worldToScreen(panel.X[i]); const d=Math.hypot(s[0]-clientX, s[1]-clientY);
-    if(d<bestD){ bestD=d; best={world:panel.X[i].slice(), p2d:panel.v2d[i].slice(), snapped:true}; }
-  }
-  if(best) return best;
-  // nearest point along a boundary edge (project the raw hit onto each segment)
+  const raw={world:[hit.point.x,hit.point.y,hit.point.z], p2d:hitTo2D(panel, hit.face, hit.point), snapped:false, type:""};
+  if(!SNAP_ENABLED) return raw;
+  const cands=[];
+  const lerp3=(a,b,t)=>[a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t, a[2]+(b[2]-a[2])*t];
+  const lerp2=(a,b,t)=>[a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t];
+  // endpoints (boundary + fold vertices)
+  const bv=new Set(); for(const [a,b] of panel.boundaryEdges){ bv.add(a); bv.add(b); } for(const [a,b] of panel.foldSegs){ bv.add(a); bv.add(b); }
+  for(const i of bv) cands.push({world:panel.X[i].slice(), p2d:panel.v2d[i].slice(), type:"endpoint", prio:0});
+  // midpoints (boundary + fold segments)
+  for(const [a,b] of panel.boundaryEdges.concat(panel.foldSegs))
+    cands.push({world:lerp3(panel.X[a],panel.X[b],0.5), p2d:lerp2(panel.v2d[a],panel.v2d[b],0.5), type:"midpoint", prio:3});
+  // centers: hole-chain holes on this panel + each region's centroid
+  for(const c of CHAINS){ if(c.panelId!==panel.id) continue; for(let k=0;k<c.holes.length;k++){ const h=c.holes[k]; cands.push({world:holeWorld(c,k), p2d:[h.x,h.y], type:"center", prio:2}); } }
+  if(panel.tree && panel.tree.region){ for(const reg of panel.tree.region){ let cx=0,cy=0,cz=0,px=0,py=0,n=0; reg.verts.forEach(v=>{ const X=panel.X[v],V=panel.v2d[v]; cx+=X[0];cy+=X[1];cz+=X[2];px+=V[0];py+=V[1];n++; }); if(n) cands.push({world:[cx/n,cy/n,cz/n], p2d:[px/n,py/n], type:"center", prio:2}); } }
+  // intersections of boundary edges (skip shared endpoints — already endpoints)
+  const be=panel.boundaryEdges;
+  if(be.length<=220){ for(let i=0;i<be.length;i++){ for(let j=i+1;j<be.length;j++){
+    const [a,b]=be[i], [c,d]=be[j]; if(a===c||a===d||b===c||b===d) continue;
+    const t=seg2dIntersectT(panel.v2d[a],panel.v2d[b],panel.v2d[c],panel.v2d[d]); if(t==null) continue;
+    cands.push({world:lerp3(panel.X[a],panel.X[b],t), p2d:lerp2(panel.v2d[a],panel.v2d[b],t), type:"intersection", prio:1});
+  } } }
+  const TH=14; let best=null, bestScore=1e18;
+  for(const cd of cands){ const s=worldToScreen(cd.world); const d=Math.hypot(s[0]-clientX, s[1]-clientY); if(d>TH) continue;
+    const score=d+cd.prio*3; if(score<bestScore){ bestScore=score; best=cd; } }
+  if(best) return {world:best.world, p2d:best.p2d, snapped:true, type:best.type};
+  // fallback: nearest point along a boundary edge (lands the fold edge-to-edge)
   let edgeD=TH;
-  for(const [a,b] of panel.boundaryEdges){
+  for(const [a,b] of be){
     const A=panel.X[a], B=panel.X[b], P=raw.world;
     const ab=sub(B,A), t=Math.max(0,Math.min(1, dot(sub(P,A),ab)/(dot(ab,ab)||1e-9)));
     const w=[A[0]+ab[0]*t, A[1]+ab[1]*t, A[2]+ab[2]*t];
-    const s=worldToScreen(w); const d=Math.hypot(s[0]-clientX, s[1]-clientY);
-    if(d<edgeD){ edgeD=d;
-      const A2=panel.v2d[a], B2=panel.v2d[b];
-      best={world:w, p2d:[A2[0]+(B2[0]-A2[0])*t, A2[1]+(B2[1]-A2[1])*t], snapped:true};
-    }
+    const s=worldToScreen(w); const dd=Math.hypot(s[0]-clientX, s[1]-clientY);
+    if(dd<edgeD){ edgeD=dd; best={world:w, p2d:lerp2(panel.v2d[a],panel.v2d[b],t), snapped:true, type:"edge"}; }
   }
   return best||raw;
 }
+const SNAP_COL={endpoint:0x35c1ff, midpoint:0xffd24a, center:0x6ee06e, intersection:0xff6ec7, edge:0xffffff};
+// Live osnap indicator: a colour-coded dot at the snap + a text tag by the cursor.
+function showSnapIndicator(sp, clientX, clientY){
+  const tag=document.getElementById("snaptag");
+  if(!sp || !sp.snapped){ if(snapMark) snapMark.visible=false; if(tag) tag.style.display="none"; return; }
+  if(!snapMark){ snapMark=new THREE.Mesh(_SPHERE, new THREE.MeshBasicMaterial({color:0xffffff})); snapMark.scale.setScalar(2.2); snapMark.renderOrder=6; scene.add(snapMark); }
+  snapMark.visible=true; snapMark.material.color.setHex(SNAP_COL[sp.type]||0xffffff); snapMark.position.set(sp.world[0],sp.world[1],sp.world[2]);
+  if(tag){ tag.textContent=sp.type; tag.style.left=clientX+"px"; tag.style.top=clientY+"px"; tag.style.display="block"; }
+}
+function hideSnapIndicator(){ if(snapMark) snapMark.visible=false; const t=document.getElementById("snaptag"); if(t) t.style.display="none"; }
+window.setConstructSnap=function(on){ SNAP_ENABLED=!!on; if(!on) hideSnapIndicator(); };
 function showCreaseMark(w){
   if(!creaseMark){ creaseMark=new THREE.Mesh(_SPHERE, new THREE.MeshBasicMaterial({color:COL_FOLD}));
     creaseMark.scale.setScalar(3); scene.add(creaseMark); }
@@ -912,7 +947,7 @@ window.setConstructControls=function(jsonStr){
 };
 window.setConstructTool=function(t){
   TOOL=t||"select";
-  if(TOOL!=="crease"){ CREASE_PT=null; hideCreaseMark(); }   // abandon a half-drawn crease
+  if(TOOL!=="crease"){ CREASE_PT=null; hideCreaseMark(); hideSnapIndicator(); }   // abandon a half-drawn crease
   if(PANELS.length) reportStretch();
 };
 window.setConstructSeams=function(jsonStr){
@@ -951,15 +986,19 @@ renderer.domElement.addEventListener("pointerdown",e=>{
   downXY=[e.clientX,e.clientY];
 });
 renderer.domElement.addEventListener("pointermove",e=>{
-  if(TOOL==="crease" && CREASE_PT){
-    // live rubber-band to the cursor's (snapped) point on the same panel
-    mouse.x=(e.clientX/window.innerWidth)*2-1; mouse.y=-(e.clientY/window.innerHeight)*2+1;
-    ray.setFromCamera(mouse,camera);
-    const panel=PANEL_BY_ID[CREASE_PT.panelId];
-    const hit=panel?ray.intersectObject(panel.mesh,false)[0]:null;
-    if(hit){ const sp=snapCreasePoint(panel, hit, e.clientX, e.clientY);
-             showCreasePreview(CREASE_PT.world, sp.world); }
-  }
+  if(TOOL!=="crease"){ hideSnapIndicator(); return; }
+  // Always show the osnap indicator under the cursor (the "constant little
+  // something"); while mid-crease also rubber-band to the snapped point.
+  mouse.x=(e.clientX/window.innerWidth)*2-1; mouse.y=-(e.clientY/window.innerHeight)*2+1;
+  ray.setFromCamera(mouse,camera);
+  const target = CREASE_PT ? PANEL_BY_ID[CREASE_PT.panelId] : null;
+  const hit = target ? ray.intersectObject(target.mesh,false)[0]
+                     : ray.intersectObjects(PANELS.map(p=>p.mesh),false)[0];
+  if(!hit){ hideSnapIndicator(); return; }
+  const panel = target || PANEL_BY_ID[hit.object.userData.panelId];
+  const sp=snapCreasePoint(panel, hit, e.clientX, e.clientY);
+  showSnapIndicator(sp, e.clientX, e.clientY);
+  if(CREASE_PT) showCreasePreview(CREASE_PT.world, sp.world);
 });
 renderer.domElement.addEventListener("pointerup",e=>{
   if(e.button!==0 || !downXY) return;
