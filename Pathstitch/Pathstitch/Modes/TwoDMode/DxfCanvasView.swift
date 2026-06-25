@@ -2305,6 +2305,15 @@ struct DxfCanvasView: View {
                         contextMenuButton("Explode", systemImage: "square.split.diagonal") {
                             state.explodeSelectedCompound(); contextMenuScreenPos = nil
                         }
+                        // Selective assembly: send just this enclosed area to 3D.
+                        contextMenuButton("Assemble Only This Area", systemImage: "cube.transparent") {
+                            state.assembleOnlySelectedAreas(); contextMenuScreenPos = nil
+                        }
+                        if !state.constructIncludeHandles.isEmpty {
+                            contextMenuButton("Assemble All Areas", systemImage: "square.grid.2x2") {
+                                state.assembleAllAreas(); contextMenuScreenPos = nil
+                            }
+                        }
                     }
 
                     // Stroke ↔ Fill conversion (MAS-146).

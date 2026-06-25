@@ -13,6 +13,23 @@ extension AppState {
         buildConstructModel()
     }
 
+    /// Assemble only the currently selected enclosed area(s) — right-click → "Assemble
+    /// Only This Area". Filters by the selected entities' DXF handles.
+    func assembleOnlySelectedAreas() {
+        guard !selectedHandles.isEmpty else { return }
+        constructIncludeHandles = Set(selectedHandles)
+        hasUnsavedChanges = true
+        enterConstructMode()
+    }
+
+    /// Clear the selective filter so every enclosed area assembles again.
+    func assembleAllAreas() {
+        guard !constructIncludeHandles.isEmpty else { if activeMode != .construct { enterConstructMode() }; return }
+        constructIncludeHandles = []
+        hasUnsavedChanges = true
+        enterConstructMode()
+    }
+
     /// Triangulates the current panels + fold lines into a construct model and
     /// hands the JSON to the viewport. Folds are auto-detected from a fold/crease
     /// layer in the sketch (see `construct_ops._FOLD_LAYERS`); existing fold
@@ -29,6 +46,7 @@ extension AppState {
         let extraFolds = constructUserFolds.map {
             ["panelId": $0.panelId, "seg": [[$0.x0, $0.y0], [$0.x1, $0.y1]]] as [String: Any]
         }
+        let include = Array(constructIncludeHandles)   // empty = all areas
         isBuildingConstructModel = true
 
         Task {
@@ -36,7 +54,8 @@ extension AppState {
                 let res = try await PythonBridge.shared.run(
                     module: "construct_ops",
                     op: "build_construct_model",
-                    args: ["input": dxfURL.path, "ground_panel": ground, "extra_folds": extraFolds]
+                    args: ["input": dxfURL.path, "ground_panel": ground,
+                           "extra_folds": extraFolds, "include_handles": include]
                 )
 
                 guard let data = res["data"] as? [String: Any],

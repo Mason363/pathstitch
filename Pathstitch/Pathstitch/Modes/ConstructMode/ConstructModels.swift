@@ -178,6 +178,9 @@ struct ConstructAssembly: Codable {
     /// Per-panel artwork framing: panelId (as string) → [offX, offY, scale,
     /// rotDeg, mirror(0/1)]. Optional → older files just centre the art.
     var decalFrames: [String: [Double]]? = nil
+    /// DXF handles of the only areas to assemble (selective assembly). Empty/nil =
+    /// assemble every enclosed area.
+    var includeHandles: [String]? = nil
 }
 
 /// A full snapshot of the editable assembly state for the panel's own undo/redo

@@ -560,9 +560,14 @@ def _entity_center(ent) -> Optional[Pt]:
 
 
 def _extract_from_dxf(input_path: str,
-                      fold_layers: Optional[List[str]]
+                      fold_layers: Optional[List[str]],
+                      include_handles: Optional[set] = None
                       ) -> Tuple[List[List[Pt]], List[List[Pt]], List[Pt]]:
-    """Reads panel outlines, fold-layer lines, and sewing-hole centers."""
+    """Reads panel outlines, fold-layer lines, and sewing-hole centers.
+
+    `include_handles` (optional) restricts which closed areas become panels — to
+    their DXF entity handle — so the user can assemble just one selected area.
+    """
     import ezdxf
     from ezdxf.path import make_path
 
@@ -598,6 +603,8 @@ def _extract_from_dxf(input_path: str,
             if layer in fold_set:
                 folds.append(pts)
             elif closed and layer not in _SKIP_LAYERS:
+                if include_handles and str(ent.dxf.handle) not in include_handles:
+                    continue  # only the user-chosen area(s) become panels
                 panels.append(pts)
     return panels, folds, holes
 
@@ -636,8 +643,10 @@ def op_build_construct_model(args: Dict[str, Any]) -> Dict[str, Any]:
         input_path = args.get("input")
         if not input_path or not os.path.exists(input_path):
             return {"status": "error", "message": f"Input file not found: {input_path}"}
+        inc = args.get("include_handles") or []
+        inc_set = {str(h) for h in inc} if inc else None
         try:
-            panels_in, folds_in, holes_in = _extract_from_dxf(input_path, args.get("fold_layers"))
+            panels_in, folds_in, holes_in = _extract_from_dxf(input_path, args.get("fold_layers"), inc_set)
         except Exception as e:
             return {"status": "error", "message": f"DXF read failed: {e}"}
 

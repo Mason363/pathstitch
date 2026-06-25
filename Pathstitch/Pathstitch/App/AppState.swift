@@ -1993,6 +1993,10 @@ class AppState {
     var constructUndoStack: [ConstructUndoState] = []
     var constructRedoStack: [ConstructUndoState] = []
 
+    // Selective assembly: DXF handles of the only areas to bring to 3D. Empty =
+    // assemble every enclosed area (the default). Persisted in the assembly.
+    var constructIncludeHandles: Set<String> = []
+
     // Fold lines added in 3D (re-fed to the triangulator on rebuild) + glue joints.
     var constructUserFolds: [ConstructUserFold] = []
     var constructGlues: [GlueJoint] = []
@@ -7040,7 +7044,8 @@ class AppState {
                 },
                 savedConstructAssembly: (constructFolds.isEmpty && constructGroundPanel == 0
                                          && constructSeams.isEmpty && constructUserFolds.isEmpty
-                                         && constructGlues.isEmpty && constructDecals.isEmpty) ? nil :
+                                         && constructGlues.isEmpty && constructDecals.isEmpty
+                                         && constructIncludeHandles.isEmpty) ? nil :
                     ConstructAssembly(
                         groundPanel: constructGroundPanel,
                         folds: constructFolds,
@@ -7054,7 +7059,8 @@ class AppState {
                         decals: constructDecals.isEmpty ? nil :
                             Dictionary(uniqueKeysWithValues: constructDecals.map { (String($0.key), $0.value) }),
                         decalFrames: constructDecalXforms.isEmpty ? nil :
-                            Dictionary(uniqueKeysWithValues: constructDecalXforms.map { (String($0.key), $0.value) }))
+                            Dictionary(uniqueKeysWithValues: constructDecalXforms.map { (String($0.key), $0.value) }),
+                        includeHandles: constructIncludeHandles.isEmpty ? nil : Array(constructIncludeHandles))
             )
 
             let encoder = JSONEncoder()
@@ -7164,6 +7170,7 @@ class AppState {
                     (asm.decals ?? [:]).compactMap { k, v in Int(k).map { ($0, v) } })
                 self.constructDecalXforms = Dictionary(uniqueKeysWithValues:
                     (asm.decalFrames ?? [:]).compactMap { k, v in Int(k).map { ($0, v) } })
+                self.constructIncludeHandles = Set(asm.includeHandles ?? [])
             }
             self.logEntries = validContainer.logEntries
             self.canvasScale = CGFloat(validContainer.canvasScale)
