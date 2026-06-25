@@ -450,16 +450,79 @@ struct ConstructModeView: View {
             .controlSize(.small)
 
             Divider().background(Color.border_subtle).padding(.vertical, 2)
-            Text("Artwork").font(PlasticityFont.label).foregroundColor(.text_secondary).tracking(1)
-            Text("Drop an image (PNG/JPG) onto a panel to add it as artwork — visual only, it rides the fold and never changes the cut pattern.")
-                .font(PlasticityFont.label).foregroundColor(.text_secondary.opacity(0.8))
-            if !state.constructDecals.isEmpty {
-                Button { state.clearConstructDecals() } label: {
-                    HStack { Image(systemName: "trash"); Text("Clear artwork (\(state.constructDecals.count))") }
-                        .font(PlasticityFont.label)
+            artworkSection
+        }
+    }
+
+    // MARK: Artwork — drop an image, then frame it (move / scale / spin / flip)
+
+    @ViewBuilder
+    private var artworkSection: some View {
+        Text("Artwork").font(PlasticityFont.label).foregroundColor(.text_secondary).tracking(1)
+        Text("Drop an image (PNG/JPG) onto a panel to add it as artwork — visual only, it rides the fold and never changes the cut pattern.")
+            .font(PlasticityFont.label).foregroundColor(.text_secondary.opacity(0.8))
+
+        if !state.constructDecals.isEmpty {
+            // Which panel's art are we framing? Auto-targets the last drop; a
+            // picker switches when several panels carry art.
+            let pids = state.constructDecals.keys.sorted()
+            let active = state.activeDecalPanel.flatMap { pids.contains($0) ? $0 : nil } ?? pids.first
+            if pids.count > 1, let active {
+                Picker("", selection: Binding(
+                    get: { active },
+                    set: { state.activeDecalPanel = $0 })) {
+                    ForEach(pids, id: \.self) { Text("Panel \($0)").tag($0) }
                 }
-                .buttonStyle(.plain).foregroundColor(.text_secondary)
+                .pickerStyle(.menu).controlSize(.small).labelsHidden()
             }
+            if let pid = active { decalFraming(pid) }
+
+            Button { state.clearConstructDecals() } label: {
+                HStack { Image(systemName: "trash"); Text("Clear all artwork (\(state.constructDecals.count))") }
+                    .font(PlasticityFont.label)
+            }
+            .buttonStyle(.plain).foregroundColor(.text_secondary)
+        }
+    }
+
+    @ViewBuilder
+    private func decalFraming(_ pid: Int) -> some View {
+        let x = state.decalXform(pid)
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Framing — panel \(pid)").font(PlasticityFont.label.weight(.semibold))
+                .foregroundColor(.text_primary)
+            framingSlider("Position X", value: x[0], range: -1...1) { state.setDecalXform(pid, 0, $0) }
+            framingSlider("Position Y", value: x[1], range: -1...1) { state.setDecalXform(pid, 1, $0) }
+            framingSlider("Scale", value: x[2], range: 0.2...3) { state.setDecalXform(pid, 2, $0) }
+            framingSlider("Rotation", value: x[3], range: -180...180, unit: "°") { state.setDecalXform(pid, 3, $0) }
+            Toggle(isOn: Binding(
+                get: { x[4] > 0.5 },
+                set: { state.setDecalXform(pid, 4, $0 ? 1 : 0) })) {
+                Text("Flip side (mirror)").font(PlasticityFont.label).foregroundColor(.text_secondary)
+            }
+            .toggleStyle(.switch).controlSize(.mini)
+            Button { state.clearConstructDecal(pid) } label: {
+                HStack { Image(systemName: "xmark.circle"); Text("Remove from panel \(pid)") }
+                    .font(PlasticityFont.label)
+            }
+            .buttonStyle(.plain).foregroundColor(.text_secondary)
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 5).fill(Color.bg_selected.opacity(0.5)))
+    }
+
+    private func framingSlider(_ label: String, value: Double, range: ClosedRange<Double>,
+                               unit: String = "", onChange: @escaping (Double) -> Void) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            HStack {
+                Text(label).font(PlasticityFont.label).foregroundColor(.text_secondary)
+                Spacer()
+                Text(unit == "°" ? "\(Int(value))\(unit)" : String(format: "%.2f", value))
+                    .font(PlasticityFont.label.monospacedDigit()).foregroundColor(.text_secondary)
+            }
+            Slider(value: Binding(get: { value }, set: { onChange($0) }), in: range)
+                .controlSize(.small)
         }
     }
 

@@ -848,7 +848,11 @@ function panelUVs(panel){
   for(let i=0;i<v.length;i++){ uv[i*2]=(v[i][0]-minx)/w; uv[i*2+1]=(v[i][1]-miny)/h; }
   return uv;
 }
-function applyDecalToPanel(panel, dataURL){
+// xf = {ox,oy (fraction of panel, −1…1), scale, rot (deg), mirror (0/1)} — the
+// "framing" the user sets in the inspector to slide / size / spin / flip the art.
+function applyDecalToPanel(panel, dataURL, xf){
+  xf=xf||{}; const ox=+xf.ox||0, oy=+xf.oy||0, scale=(xf.scale>0?+xf.scale:1),
+            rot=(+xf.rot||0)*Math.PI/180, mirror=(+xf.mirror)?true:false;
   DECALS[panel.id]=dataURL;
   const img=new Image();
   img.onload=function(){
@@ -864,8 +868,15 @@ function applyDecalToPanel(panel, dataURL){
     // WKWebView reports img.width/height as 0 at onload for data-URL images — use
     // naturalWidth/Height (fallback to the canvas so the art always draws).
     const iw=img.naturalWidth||img.width||W, ih=img.naturalHeight||img.height||H;
-    const r=Math.min(W/iw, H/ih)*0.9, dw=iw*r, dh=ih*r;
-    cx.drawImage(img, (W-dw)/2, (H-dh)/2, dw, dh);
+    const r=Math.min(W/iw, H/ih)*0.9*scale, dw=iw*r, dh=ih*r;
+    cx.save();
+    // Centre, then apply the user's framing: offset (oy up-positive), rotation,
+    // and a horizontal flip ("flip side") so the art reads right on either face.
+    cx.translate(W/2 + ox*W*0.5, H/2 - oy*H*0.5);
+    if(rot) cx.rotate(rot);
+    if(mirror) cx.scale(-1,1);
+    cx.drawImage(img, -dw/2, -dh/2, dw, dh);
+    cx.restore();
     const tex=new THREE.CanvasTexture(cv); tex.encoding=THREE.sRGBEncoding; tex.anisotropy=4; tex.flipY=true;
     if(panel.mat.map) panel.mat.map.dispose();
     panel.mat.map=tex; panel.mat.color.setHex(0xffffff); panel.mat.needsUpdate=true;
@@ -877,16 +888,19 @@ window.applyDroppedDecal=function(dataURL, ndcX, ndcY){
   mouse.x=ndcX; mouse.y=ndcY; ray.setFromCamera(mouse,camera);
   const hit=ray.intersectObjects(PANELS.map(p=>p.mesh),false)[0];
   const panel = hit ? PANEL_BY_ID[hit.object.userData.panelId] : (PANELS[CONTROLS.groundPanel]||PANELS[0]);
-  if(panel){ applyDecalToPanel(panel, dataURL); post({op:"decalApplied", panelId:panel.id, dataURL:dataURL}); }
+  if(panel){ applyDecalToPanel(panel, dataURL, null); post({op:"decalApplied", panelId:panel.id, dataURL:dataURL}); }
 };
-// Re-apply persisted decals (Swift pushes {panelId: dataURL}); also reconcile
-// removals — any panel with a decal not in the set has its overlay dropped.
+// Re-apply persisted decals (Swift pushes {panelId:{url,ox,oy,scale,rot,mirror}});
+// also reconcile removals — any panel with a decal not in the set is dropped.
 window.setConstructDecals=function(jsonStr){
   let d; try{ d=JSON.parse(jsonStr); }catch(e){ return; }
   d=d||{};
   for(const p of PANELS){
-    if(d[p.id]!==undefined){ applyDecalToPanel(p, d[p.id]); }
-    else if(DECALS[p.id]!==undefined){   // remove artwork → back to plain leather
+    const e=d[p.id];
+    if(e!==undefined){
+      const url=(typeof e==="string")?e:e.url;
+      applyDecalToPanel(p, url, (typeof e==="string")?null:e);
+    } else if(DECALS[p.id]!==undefined){   // remove artwork → back to plain leather
       if(p.mat.map){ p.mat.map.dispose(); p.mat.map=null; }
       p.mat.color.setHex(MATERIAL_COLOR); p.mat.needsUpdate=true; delete DECALS[p.id];
     }

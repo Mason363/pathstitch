@@ -136,6 +136,10 @@ struct ConstructViewport: NSViewRepresentable {
                 DispatchQueue.main.async {
                     if panelId >= 0 && !dataURL.isEmpty {
                         self.state.constructDecals[panelId] = dataURL
+                        if self.state.constructDecalXforms[panelId] == nil {
+                            self.state.constructDecalXforms[panelId] = [0, 0, 1, 0, 0]  // centred, full, upright
+                        }
+                        self.state.activeDecalPanel = panelId   // framing controls target it
                         self.lastDecalToken = self.state.constructDecalToken  // already applied in JS
                         self.state.hasUnsavedChanges = true
                     }

@@ -162,6 +162,9 @@ struct ConstructAssembly: Codable {
     var glues: [GlueJoint]? = nil
     /// Artwork decals: panelId (as string) → image data URL. Visual-only.
     var decals: [String: String]? = nil
+    /// Per-panel artwork framing: panelId (as string) → [offX, offY, scale,
+    /// rotDeg, mirror(0/1)]. Optional → older files just centre the art.
+    var decalFrames: [String: [Double]]? = nil
 }
 
 /// A glue/weld join: panel B is seated onto panel A where their edges meet and

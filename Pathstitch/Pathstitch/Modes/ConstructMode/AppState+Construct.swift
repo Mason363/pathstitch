@@ -152,18 +152,34 @@ extension AppState {
         Int(constructMaterialHex.trimmingCharacters(in: CharacterSet(charactersIn: "#")), radix: 16) ?? 0x8A5A2B
     }
 
-    /// {panelId: dataURL} for the viewport to re-apply artwork decals.
+    /// {panelId: {url, ox, oy, scale, rot, mirror}} for the viewport to re-apply
+    /// artwork decals *with their framing* (offset / scale / rotation / flip).
     var constructDecalsJSON: String {
-        var obj: [String: String] = [:]
-        for (pid, url) in constructDecals { obj[String(pid)] = url }
+        var obj: [String: Any] = [:]
+        for (pid, url) in constructDecals {
+            let x = decalXform(pid)
+            obj[String(pid)] = ["url": url, "ox": x[0], "oy": x[1],
+                                "scale": x[2], "rot": x[3], "mirror": x[4]]
+        }
         guard let d = try? JSONSerialization.data(withJSONObject: obj),
               let s = String(data: d, encoding: .utf8) else { return "{}" }
         return s
     }
 
+    /// Removes one panel's artwork (the viewport reconciles the removal).
+    func clearConstructDecal(_ pid: Int) {
+        constructDecals.removeValue(forKey: pid)
+        constructDecalXforms.removeValue(forKey: pid)
+        if activeDecalPanel == pid { activeDecalPanel = nil }
+        constructDecalToken += 1
+        hasUnsavedChanges = true
+    }
+
     /// Clears all artwork decals (the viewport reconciles removals).
     func clearConstructDecals() {
         constructDecals.removeAll()
+        constructDecalXforms.removeAll()
+        activeDecalPanel = nil
         constructDecalToken += 1
         hasUnsavedChanges = true
     }

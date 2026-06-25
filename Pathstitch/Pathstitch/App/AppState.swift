@@ -2006,6 +2006,30 @@ class AppState {
     // ride the folded mesh, never touch the 2D cut geometry. Persisted in .stch.
     var constructDecals: [Int: String] = [:]
     var constructDecalToken: Int = 0
+    // Per-panel framing for that artwork: [offsetX, offsetY, scale, rotationDeg,
+    // mirror(0/1)]. offset is in fractions of the panel (−1…1), so the user can
+    // slide the art around, size it, spin it, and flip which side it reads on
+    // (mirror) — the "frame the image" controls. Default = centred, full, upright.
+    var constructDecalXforms: [Int: [Double]] = [:]
+    // Which panel's artwork the framing controls in the inspector edit. Set when
+    // art is dropped (or the user clicks a decal'd panel).
+    var activeDecalPanel: Int? = nil
+
+    /// The active panel's framing vector, defaulted when absent.
+    func decalXform(_ pid: Int) -> [Double] {
+        let v = constructDecalXforms[pid] ?? []
+        return [v.count > 0 ? v[0] : 0, v.count > 1 ? v[1] : 0,
+                v.count > 2 ? v[2] : 1, v.count > 3 ? v[3] : 0, v.count > 4 ? v[4] : 0]
+    }
+    /// Update one component of a panel's framing and re-push to the viewport.
+    func setDecalXform(_ pid: Int, _ index: Int, _ value: Double) {
+        var v = decalXform(pid)
+        guard index >= 0 && index < v.count else { return }
+        v[index] = value
+        constructDecalXforms[pid] = v
+        constructDecalToken += 1
+        hasUnsavedChanges = true
+    }
 
     // Phase 4: Globe UX / Interactivity & Overrides
     var anchorFace3D: SelectedFace? {
@@ -7003,7 +7027,9 @@ class AppState {
                         userFolds: constructUserFolds.isEmpty ? nil : constructUserFolds,
                         glues: constructGlues.isEmpty ? nil : constructGlues,
                         decals: constructDecals.isEmpty ? nil :
-                            Dictionary(uniqueKeysWithValues: constructDecals.map { (String($0.key), $0.value) }))
+                            Dictionary(uniqueKeysWithValues: constructDecals.map { (String($0.key), $0.value) }),
+                        decalFrames: constructDecalXforms.isEmpty ? nil :
+                            Dictionary(uniqueKeysWithValues: constructDecalXforms.map { (String($0.key), $0.value) }))
             )
 
             let encoder = JSONEncoder()
@@ -7112,6 +7138,8 @@ class AppState {
                 }
                 self.constructDecals = Dictionary(uniqueKeysWithValues:
                     (asm.decals ?? [:]).compactMap { k, v in Int(k).map { ($0, v) } })
+                self.constructDecalXforms = Dictionary(uniqueKeysWithValues:
+                    (asm.decalFrames ?? [:]).compactMap { k, v in Int(k).map { ($0, v) } })
             }
             self.logEntries = validContainer.logEntries
             self.canvasScale = CGFloat(validContainer.canvasScale)
