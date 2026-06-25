@@ -2273,6 +2273,14 @@ struct DxfCanvasView: View {
                         contextMenuButton("Convert to Dashed", systemImage: "line.diagonal") {
                             state.quickConvertSelectedLines(to: "dashed"); contextMenuScreenPos = nil
                         }
+                        // Mark a line as a fold/crease for assembly: moves it to the
+                        // FOLD layer, where Assemble reads it as a hinge.
+                        contextMenuButton("Make Fold Line", systemImage: "arrow.uturn.up") {
+                            state.assignSelectedToLayer("FOLD"); contextMenuScreenPos = nil
+                        }
+                        contextMenuButton("Remove Fold Line", systemImage: "arrow.uturn.up.circle") {
+                            state.assignSelectedToLayer("ORIGINAL"); contextMenuScreenPos = nil
+                        }
                     }
 
                     // Boolean combine (MAS-144): only when 2+ watertight closed

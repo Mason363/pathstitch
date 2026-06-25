@@ -259,14 +259,35 @@ extension AppState {
         hasUnsavedChanges = true
     }
 
-    /// Adds a fold line drawn in 3D (2D segment in a panel's space) and rebuilds.
+    /// A fold line drawn in 3D becomes a real **FOLD-layer LINE in the 2D sketch**,
+    /// so it shows up (and is editable / deletable) back in 2D and is read straight
+    /// back as a hinge — persistent + parametric, not a hidden side list. Removal is
+    /// done in 2D (delete the line, or 2D undo). `panelId` only drives which panel's
+    /// new fold gets auto-selected after the rebuild.
     func addConstructUserFold(panelId: Int, x0: Double, y0: Double, x1: Double, y1: Double) {
         guard hypot(x1 - x0, y1 - y0) > 1.0 else { return }   // ignore a stray double-click
-        pushConstructUndo()
-        constructUserFolds.append(ConstructUserFold(panelId: panelId, x0: x0, y0: y0, x1: x1, y1: y1))
-        hasUnsavedChanges = true
-        pendingCreaseSelectPanel = panelId   // select the new fold once the rebuild lands
-        buildConstructModel()   // re-triangulate so the new crease is a real hinge
+        saveToHistory()                       // 2D history owns this geometry edit
+        let url = ensureActiveDXFFileExists()
+        pendingCreaseSelectPanel = panelId
+        isBuildingConstructModel = true
+        Task {
+            do {
+                await reconcileBufferIfNeeded()
+                _ = try await PythonBridge.shared.run(
+                    module: "dxf_ops", op: "add_entity",
+                    args: ["input": url.path, "output": url.path, "type": "line",
+                           "params": ["start": [x0, y0], "end": [x1, y1]], "layer": "FOLD"])
+                await MainActor.run {
+                    self.reloadDXF()            // surface the new fold line in 2D
+                    self.buildConstructModel()  // re-pose; reads the FOLD line as a hinge
+                }
+            } catch {
+                await MainActor.run {
+                    self.errorMessage = error.localizedDescription
+                    self.isBuildingConstructModel = false
+                }
+            }
+        }
     }
 
     /// Removes the most recently added 3D fold line.

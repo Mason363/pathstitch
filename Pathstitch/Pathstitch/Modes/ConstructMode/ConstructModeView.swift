@@ -214,7 +214,7 @@ struct ConstructModeView: View {
                 }
             }
             if state.constructTool == .crease {
-                Text("Crease tool — click a start point, then an end point across the panel. A dashed line previews it; the second click commits the fold and selects it so you can set its angle here.")
+                Text("Crease tool — click a start point, then an end point across the panel (endpoints snap to corners/edges). The new fold is saved into the 2D sketch on the FOLD layer, so you can edit or delete it back in 2D.")
                     .font(PlasticityFont.label).foregroundColor(.accent)
             }
             if !state.constructUserFolds.isEmpty {

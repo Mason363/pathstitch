@@ -805,6 +805,41 @@ function hitTo2D(panel, face, point){
   const A=panel.v2d[face.a], B=panel.v2d[face.b], C=panel.v2d[face.c];
   return [A[0]*bc[0]+B[0]*bc[1]+C[0]*bc[2], A[1]*bc[0]+B[1]*bc[1]+C[1]*bc[2]];
 }
+// World → screen pixels (for screen-space snap thresholds).
+function worldToScreen(p){
+  const v=new THREE.Vector3(p[0],p[1],p[2]).project(camera);
+  return [(v.x*0.5+0.5)*window.innerWidth, (-v.y*0.5+0.5)*window.innerHeight];
+}
+// Snap a crease point to nearby panel geometry: boundary vertices first, then the
+// nearest point on a boundary edge or existing fold, within a screen-px radius.
+// Returns {world, p2d, snapped} — landing endpoints on edges so the fold spans the
+// panel edge-to-edge (which is what actually creates a hinge).
+function snapCreasePoint(panel, hit, clientX, clientY){
+  const raw={world:[hit.point.x,hit.point.y,hit.point.z], p2d:hitTo2D(panel, hit.face, hit.point), snapped:false};
+  const TH=14; let best=null, bestD=TH;
+  // boundary + fold vertices (exact 2D known from index)
+  const verts=new Set();
+  for(const [a,b] of panel.boundaryEdges){ verts.add(a); verts.add(b); }
+  for(const [a,b] of panel.foldSegs){ verts.add(a); verts.add(b); }
+  for(const i of verts){
+    const s=worldToScreen(panel.X[i]); const d=Math.hypot(s[0]-clientX, s[1]-clientY);
+    if(d<bestD){ bestD=d; best={world:panel.X[i].slice(), p2d:panel.v2d[i].slice(), snapped:true}; }
+  }
+  if(best) return best;
+  // nearest point along a boundary edge (project the raw hit onto each segment)
+  let edgeD=TH;
+  for(const [a,b] of panel.boundaryEdges){
+    const A=panel.X[a], B=panel.X[b], P=raw.world;
+    const ab=sub(B,A), t=Math.max(0,Math.min(1, dot(sub(P,A),ab)/(dot(ab,ab)||1e-9)));
+    const w=[A[0]+ab[0]*t, A[1]+ab[1]*t, A[2]+ab[2]*t];
+    const s=worldToScreen(w); const d=Math.hypot(s[0]-clientX, s[1]-clientY);
+    if(d<edgeD){ edgeD=d;
+      const A2=panel.v2d[a], B2=panel.v2d[b];
+      best={world:w, p2d:[A2[0]+(B2[0]-A2[0])*t, A2[1]+(B2[1]-A2[1])*t], snapped:true};
+    }
+  }
+  return best||raw;
+}
 function showCreaseMark(w){
   if(!creaseMark){ creaseMark=new THREE.Mesh(_SPHERE, new THREE.MeshBasicMaterial({color:COL_FOLD}));
     creaseMark.scale.setScalar(3); scene.add(creaseMark); }
@@ -871,12 +906,13 @@ renderer.domElement.addEventListener("pointerdown",e=>{
 });
 renderer.domElement.addEventListener("pointermove",e=>{
   if(TOOL==="crease" && CREASE_PT){
-    // live rubber-band to the cursor's point on the same panel
+    // live rubber-band to the cursor's (snapped) point on the same panel
     mouse.x=(e.clientX/window.innerWidth)*2-1; mouse.y=-(e.clientY/window.innerHeight)*2+1;
     ray.setFromCamera(mouse,camera);
     const panel=PANEL_BY_ID[CREASE_PT.panelId];
     const hit=panel?ray.intersectObject(panel.mesh,false)[0]:null;
-    if(hit) showCreasePreview(CREASE_PT.world, [hit.point.x,hit.point.y,hit.point.z]);
+    if(hit){ const sp=snapCreasePoint(panel, hit, e.clientX, e.clientY);
+             showCreasePreview(CREASE_PT.world, sp.world); }
   }
 });
 renderer.domElement.addEventListener("pointerup",e=>{
@@ -890,12 +926,12 @@ renderer.domElement.addEventListener("pointerup",e=>{
     const hit=ray.intersectObjects(PANELS.map(p=>p.mesh),false)[0];
     if(hit){
       const panel=PANEL_BY_ID[hit.object.userData.panelId];
-      const p2d=hitTo2D(panel, hit.face, hit.point);
+      const sp=snapCreasePoint(panel, hit, e.clientX, e.clientY);
       if(!CREASE_PT || CREASE_PT.panelId!==panel.id){
-        CREASE_PT={panelId:panel.id, p2d, world:[hit.point.x,hit.point.y,hit.point.z]};
+        CREASE_PT={panelId:panel.id, p2d:sp.p2d, world:sp.world};
         showCreaseMark(CREASE_PT.world);
       }else{
-        post({op:"addFold", panelId:panel.id, seg:[CREASE_PT.p2d, p2d]});
+        post({op:"addFold", panelId:panel.id, seg:[CREASE_PT.p2d, sp.p2d]});
         CREASE_PT=null; hideCreaseMark();
       }
     }

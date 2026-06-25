@@ -8606,6 +8606,7 @@ class AppState {
         case "UNFOLDED_3D": return Color(red: 0.9, green: 0.1, blue: 0.9)
         case "PROJECTED_SKETCH": return Color(red: 1.0, green: 0.8, blue: 0.0)
         case "CREASES": return Color.blue
+        case "FOLD", "FOLDS", "FOLD_LINES", "CREASE": return Color(red: 1.0, green: 0.48, blue: 0.17)  // matches the 3D crease colour
         case "GLUE_TABS": return Color.orange
         case "PATTERN": return Color.yellow
         case "TEXT": return Color.green
