@@ -25,6 +25,9 @@ struct ConstructModeView: View {
                     renderToken: state.constructRenderToken,
                     lightingToken: state.constructLightingToken,
                     textureToken: state.constructTextureToken,
+                    selFoldToken: state.constructSelFoldToken,
+                    artworkToken: state.constructArtworkToken,
+                    artworkCmdToken: state.constructArtworkCmdToken,
                     snapActive: state.snapActive,
                     homeToken: state.triggerConstructHomeToken,
                     state: state
@@ -211,44 +214,26 @@ struct ConstructModeView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
-                    // Edit ↔ Mockup. Mockup hides the editing tools and shows the
-                    // material + lighting (presentation) controls instead.
+                    // Always-on overview: finished size / stitches / health + Export +
+                    // Assemble. Stays put no matter which tool is active.
+                    overviewStrip
+                    Divider().background(Color.border_subtle)
+
+                    // Edit ↔ Mockup. Mockup swaps the editing tools for material +
+                    // lighting (presentation) controls.
                     renderModeSection
 
-                    let editing = state.constructRenderMode == "edit"
-                    if editing {
-                        // Mirror the viewport HUD so the active tool's controls below
-                        // have an obvious header tying icon → name → next step.
+                    if state.constructArtworkMode {
+                        artworkPanel
+                    } else if state.constructRenderMode == "mockup" {
+                        materialSection
+                        ConstructLightingView(state: state)
+                    } else {
+                        // Contextual: only the active tool's options (left rail picks the tool).
                         stepCard
-
-                        // One-click: fold every flat fold up to 90° (box/upright pose).
-                        Button { state.assembleAll() } label: {
-                            HStack { Image(systemName: "shippingbox"); Text("Assemble") }
-                                .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(PlasticityButtonStyle(isEnabled: !state.constructFolds.isEmpty))
-                        .disabled(state.constructFolds.isEmpty)
-
-                        Button {
-                            state.buildConstructModel()
-                        } label: {
-                            HStack { Image(systemName: "arrow.triangle.2.circlepath"); Text("Rebuild from sketch") }
-                                .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.plain).foregroundColor(.text_secondary).font(PlasticityFont.label)
-
-                        if state.constructTool == .move { moveSection }
-                        groundSection
-                        foldSection
-                        seamSection
-                        glueSection
+                        toolOptions
+                        stretchSection
                     }
-
-                    materialSection
-                    ConstructLightingView(state: state)
-
-                    readoutsSection
-                    if editing { stretchSection }
                 }
                 .padding(14)
             }
@@ -281,6 +266,142 @@ struct ConstructModeView: View {
     ]
 
     private let finishes: [(String, String)] = [("matte", "Matte"), ("satin", "Satin"), ("glossy", "Glossy")]
+
+    // MARK: Always-on overview strip (size / stitches / health + Assemble + Export)
+
+    private var overviewStrip: some View {
+        let h = state.assemblyHealth
+        let healthy = h.ok && h.openChains == 0
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .top, spacing: 8) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(String(format: "%.0f × %.0f × %.0f mm",
+                                state.constructFinishedW, state.constructFinishedH, state.constructFinishedD))
+                        .font(PlasticityFont.label.monospacedDigit()).foregroundColor(.text_primary)
+                    Text("\(state.constructStitchCount) stitches · \(String(format: "%.0f", state.constructLeatherAreaMm2 / 100)) cm² · \(state.constructReadoutPanels) panels")
+                        .font(PlasticityFont.label).foregroundColor(.text_secondary)
+                }
+                Spacer()
+                Image(systemName: healthy ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+                    .foregroundColor(healthy ? .green : .orange)
+                    .help(healthy ? "Everything connected, seams fit" : healthSummary(h))
+            }
+            HStack(spacing: 8) {
+                Button { state.assembleAll() } label: {
+                    HStack(spacing: 4) { Image(systemName: "shippingbox"); Text("Assemble") }
+                        .font(PlasticityFont.label).frame(maxWidth: .infinity)
+                }
+                .buttonStyle(PlasticityButtonStyle(isEnabled: !state.constructFolds.isEmpty))
+                .disabled(state.constructFolds.isEmpty)
+                Menu {
+                    Button("STEP (.step)") { state.exportConstruct("step") }
+                    Button("STL (.stl)") { state.exportConstruct("stl") }
+                } label: {
+                    HStack(spacing: 4) { Image(systemName: "square.and.arrow.up"); Text("Export") }
+                        .font(PlasticityFont.label)
+                }
+                .menuStyle(.borderlessButton).fixedSize()
+                .disabled(state.constructReadoutPanels == 0)
+            }
+        }
+    }
+
+    private func healthSummary(_ h: (floating: Int, openChains: Int, mismatched: Int, ok: Bool)) -> String {
+        var parts: [String] = []
+        if h.floating > 0 { parts.append("\(h.floating) unattached") }
+        if h.mismatched > 0 { parts.append("\(h.mismatched) seam mismatch") }
+        if h.openChains > 0 { parts.append("\(h.openChains) unstitched") }
+        return parts.isEmpty ? "OK" : parts.joined(separator: " · ")
+    }
+
+    // MARK: Contextual tool options — only the active tool's controls
+
+    @ViewBuilder private var toolOptions: some View {
+        switch state.constructTool {
+        case .select: selectSection
+        case .move:   moveSection
+        case .fold:   foldSection
+        case .crease: creaseSection
+        case .ground: groundSection
+        case .stitch: seamSection
+        case .glue:   glueSection
+        }
+    }
+
+    private var selectSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionHeader("Select")
+            Text("Hover highlights what you'll pick. Click a fold to set its angle, or choose a tool on the left.")
+                .font(PlasticityFont.label).foregroundColor(.text_secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Button { state.buildConstructModel() } label: {
+                HStack { Image(systemName: "arrow.triangle.2.circlepath"); Text("Rebuild from sketch") }
+                    .font(PlasticityFont.label)
+            }
+            .buttonStyle(.plain).foregroundColor(.text_secondary)
+            healthDetail
+        }
+    }
+
+    private var creaseSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionHeader("Crease")
+            Text("Click a start point, then an end point across a panel — endpoints snap to corners / edges (toggle snapping with the snap button or “n”). The new fold is written to the 2D sketch on the FOLD layer, so it's editable back in 2D.")
+                .font(PlasticityFont.label).foregroundColor(.accent)
+                .fixedSize(horizontal: false, vertical: true)
+            if !state.constructUserFolds.isEmpty {
+                Button { state.undoLastUserFold() } label: {
+                    HStack { Image(systemName: "arrow.uturn.backward"); Text("Undo added fold (\(state.constructUserFolds.count))") }
+                        .font(PlasticityFont.label)
+                }
+                .buttonStyle(.plain).foregroundColor(.text_secondary)
+            }
+        }
+    }
+
+    private func legendDot(_ c: Color, _ t: String) -> some View {
+        HStack(spacing: 4) {
+            Circle().fill(c.opacity(0.65)).frame(width: 9, height: 9)
+            Text(t).font(PlasticityFont.label).foregroundColor(.text_secondary)
+        }
+    }
+
+    // MARK: Artwork placement panel (shown while a dropped image is being placed)
+
+    private var artworkPanel: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionHeader("Place Artwork")
+            Text(state.activeDecalPanel == nil
+                 ? "Bird's-eye view — click a body to drop the image onto it."
+                 : "Drag the art on the body to move it. Tune it below; click another body to place it there too.")
+                .font(PlasticityFont.label).foregroundColor(.text_secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if let pid = state.activeDecalPanel, state.constructDecals[pid] != nil {
+                Text("Body \(pid)").font(PlasticityFont.label.weight(.semibold)).foregroundColor(.text_primary)
+                HStack(spacing: 10) {
+                    Button { state.artworkCommand("fill") } label: {
+                        HStack(spacing: 4) { Image(systemName: "arrow.up.left.and.arrow.down.right"); Text("Fill") }.font(PlasticityFont.label)
+                    }.buttonStyle(.plain).foregroundColor(.accent)
+                    Button { state.artworkCommand("flipface") } label: {
+                        HStack(spacing: 4) { Image(systemName: "square.on.square"); Text("Other face") }.font(PlasticityFont.label)
+                    }.buttonStyle(.plain).foregroundColor(.accent)
+                    Button { state.artworkCommand("mirror") } label: {
+                        HStack(spacing: 4) { Image(systemName: "arrow.left.and.right"); Text("Mirror") }.font(PlasticityFont.label)
+                    }.buttonStyle(.plain).foregroundColor(.accent)
+                }
+                let x = state.decalXform(pid)
+                framingSlider("Scale", value: x[2], range: 0.2...3) { state.setDecalXform(pid, 2, $0) }
+                framingSlider("Rotation", value: x[3], range: -180...180, unit: "°") { state.setDecalXform(pid, 3, $0) }
+                Button { state.clearConstructDecal(pid) } label: {
+                    HStack { Image(systemName: "trash"); Text("Remove from body \(pid)") }.font(PlasticityFont.label)
+                }.buttonStyle(.plain).foregroundColor(.text_secondary)
+            }
+            Button { state.exitArtworkPlacement() } label: {
+                HStack { Image(systemName: "checkmark"); Text("Done") }.frame(maxWidth: .infinity)
+            }
+            .buttonStyle(PlasticityButtonStyle(isEnabled: true))
+        }
+    }
 
     private var moveSection: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -338,24 +459,25 @@ struct ConstructModeView: View {
                     foldRow(spec)
                 }
             }
-            if state.constructTool != .crease {
-                Button { state.setConstructTool(.crease) } label: {
-                    HStack { Image(systemName: ConstructTool.crease.icon); Text("Add fold (Crease tool)") }
+            // Which side stays flat vs folds — shown for the selected fold, with a
+            // one-click Flip. (Ground tool can also click the base face directly.)
+            if let id = state.selectedFoldId, state.constructFolds.contains(where: { $0.id == id }) {
+                HStack(spacing: 12) {
+                    legendDot(.green, "stays flat")
+                    legendDot(.orange, "folds up")
+                }
+                Button { state.flipFoldSide() } label: {
+                    HStack { Image(systemName: "arrow.left.arrow.right"); Text("Flip — make the other side fold") }
                         .font(PlasticityFont.label)
                 }
                 .buttonStyle(.plain).foregroundColor(.accent)
+                .disabled(state.lastFoldSides == nil)
             }
-            if state.constructTool == .crease {
-                Text("Crease tool — click a start point, then an end point across the panel (endpoints snap to corners/edges). The new fold is saved into the 2D sketch on the FOLD layer, so you can edit or delete it back in 2D.")
-                    .font(PlasticityFont.label).foregroundColor(.accent)
+            Button { state.setConstructTool(.crease) } label: {
+                HStack { Image(systemName: ConstructTool.crease.icon); Text("Add fold (Crease tool)") }
+                    .font(PlasticityFont.label)
             }
-            if !state.constructUserFolds.isEmpty {
-                Button { state.undoLastUserFold() } label: {
-                    HStack { Image(systemName: "arrow.uturn.backward"); Text("Undo added fold (\(state.constructUserFolds.count))") }
-                        .font(PlasticityFont.label)
-                }
-                .buttonStyle(.plain).foregroundColor(.text_secondary)
-            }
+            .buttonStyle(.plain).foregroundColor(.accent)
         }
     }
 
@@ -728,19 +850,13 @@ struct ConstructModeView: View {
         }
     }
 
-    // MARK: Readouts + health — the numbers a maker actually checks
+    // MARK: Health detail — the actionable "what's wrong" lines (numbers live in the
+    // overview strip; this is shown under the Select tool).
 
-    private var readoutsSection: some View {
+    private var healthDetail: some View {
         let h = state.assemblyHealth
         return VStack(alignment: .leading, spacing: 4) {
-            sectionHeader("Assembly")
-            readoutRow("Finished size", String(format: "%.0f × %.0f × %.0f mm",
-                state.constructFinishedW, state.constructFinishedH, state.constructFinishedD))
-            readoutRow("Leather area", String(format: "%.1f cm²", state.constructLeatherAreaMm2 / 100.0))
             readoutRow("Seam length", String(format: "%.0f mm", state.constructSeamLengthMm))
-            readoutRow("Stitches", "\(state.constructStitchCount)")
-            readoutRow("Panels", "\(state.constructReadoutPanels)")
-
             Divider().background(Color.border_subtle).padding(.vertical, 2)
             if h.ok && h.openChains == 0 {
                 Label("Everything connected, seams fit", systemImage: "checkmark.seal.fill")
@@ -759,17 +875,6 @@ struct ConstructModeView: View {
                         .font(PlasticityFont.label).foregroundColor(.text_secondary)
                 }
             }
-
-            Divider().background(Color.border_subtle).padding(.vertical, 2)
-            Menu {
-                Button("STEP (.step)") { state.exportConstruct("step") }
-                Button("STL (.stl)") { state.exportConstruct("stl") }
-            } label: {
-                HStack { Image(systemName: "square.and.arrow.up"); Text("Export 3D…") }
-                    .frame(maxWidth: .infinity)
-            }
-            .menuStyle(.borderlessButton)
-            .disabled(state.constructReadoutPanels == 0)
         }
     }
 

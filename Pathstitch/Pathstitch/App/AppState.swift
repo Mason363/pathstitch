@@ -1969,7 +1969,9 @@ class AppState {
     var constructGroundPanel: Int = 0         // panel pinned to the ground plane
     var constructFolds: [FoldSpec] = []       // controllable folds (one per panel/foldId group)
     var constructFoldStateToken: Int = 0      // bump to push ground + fold angles to the viewport
-    var selectedFoldId: FoldSpec.ID?          // currently selected fold (inspector highlight)
+    var selectedFoldId: FoldSpec.ID? {        // currently selected fold (inspector highlight)
+        didSet { if selectedFoldId != oldValue { constructSelFoldToken += 1 } }
+    }
     var constructMaxStretchPct: Double = 0     // solver-quality HUD readout (should stay ~0)
     var constructToolToken: Int = 0           // bump to push the active tool to the viewport
     var triggerConstructHomeToken: Int = 0    // bump to recenter the construct camera
@@ -2077,11 +2079,28 @@ class AppState {
     var constructLightingToken: Int = 0
     var activeLightIndex: Int = 0                    // light the inspector controls edit
 
-    /// The active panel's framing vector, defaulted when absent.
+    // Selected-fold highlight: bumped to push the selected fold to the viewport so it
+    // can tint the two regions (base vs folds). `lastFoldSides` = the viewport's
+    // reported representative 2D points for each side, so Flip can re-root.
+    var constructSelFoldToken: Int = 0
+    var lastFoldSides: (panelId: Int, base: [Double], move: [Double])? = nil
+
+    // Artwork placement mode: a dropped image enters a bird's-eye mode where the
+    // user clicks a body, then moves / scales / rotates / mirrors / flips-face the
+    // art. Visual-only; the framing persists in the decal xforms.
+    var constructArtworkMode: Bool = false
+    var pendingArtworkURL: String? = nil
+    var constructArtworkToken: Int = 0
+    var constructArtworkCmd: String? = nil           // "fill" | "flipface" | "mirror"
+    var constructArtworkCmdToken: Int = 0
+
+    /// The active panel's framing vector [ox, oy, scale, rot, mirror, side],
+    /// defaulted when absent (side 0 = front face).
     func decalXform(_ pid: Int) -> [Double] {
         let v = constructDecalXforms[pid] ?? []
         return [v.count > 0 ? v[0] : 0, v.count > 1 ? v[1] : 0,
-                v.count > 2 ? v[2] : 1, v.count > 3 ? v[3] : 0, v.count > 4 ? v[4] : 0]
+                v.count > 2 ? v[2] : 1, v.count > 3 ? v[3] : 0,
+                v.count > 4 ? v[4] : 0, v.count > 5 ? v[5] : 0]
     }
     /// Update one component of a panel's framing and re-push to the viewport.
     func setDecalXform(_ pid: Int, _ index: Int, _ value: Double) {

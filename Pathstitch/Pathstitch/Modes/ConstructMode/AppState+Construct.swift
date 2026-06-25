@@ -128,10 +128,13 @@ extension AppState {
                            "area_treatments": treatments]
                 )
 
-                guard let data = res["data"] as? [String: Any],
-                      let panels = data["panels"] as? [[String: Any]] else {
-                    let msg = (res["message"] as? String) ?? "No panels in construct model."
-                    throw PythonBridgeError.invalidResponse(msg)
+                let data = res["data"] as? [String: Any]
+                let panels = (data?["panels"] as? [[String: Any]]) ?? []
+                // No enclosed areas (e.g. the sketch was emptied in 2D) → clear the
+                // 3D view instead of erroring or leaving a stale pose.
+                guard let data = data, !panels.isEmpty else {
+                    await MainActor.run { self.clearConstructModel() }
+                    return
                 }
 
                 let modelData = try JSONSerialization.data(withJSONObject: data)
@@ -581,6 +584,76 @@ extension AppState {
         hasUnsavedChanges = true
     }
 
+    // MARK: - Fold side (which stays flat) + artwork placement
+
+    /// {panelId,foldId} of the selected fold for the viewport's side highlight.
+    var constructSelFoldJSON: String {
+        guard let id = selectedFoldId,
+              let f = constructFolds.first(where: { $0.id == id }),
+              let d = try? JSONSerialization.data(withJSONObject: ["panelId": f.panelId, "foldId": f.foldId]),
+              let s = String(data: d, encoding: .utf8) else { return "{}" }
+        return s
+    }
+
+    /// Stores the viewport's reported region centroids for the selected fold's sides.
+    func setFoldSides(panelId: Int, base: [Double], move: [Double]) {
+        lastFoldSides = (panelId, base, move)
+    }
+
+    /// Flip which side of the selected fold stays flat: re-root the panel at the side
+    /// that's currently folding (reuses the base-region mechanism; Ground tool still works).
+    func flipFoldSide() {
+        guard let fs = lastFoldSides, fs.move.count == 2 else { return }
+        setConstructGround(fs.panelId, basePoint: fs.move)
+    }
+
+    /// Drop an image → enter artwork placement (bird's-eye; click a body to place it).
+    func enterArtworkPlacement(_ dataURL: String) {
+        if constructRenderMode != "edit" { setConstructRenderMode("edit") }
+        pendingArtworkURL = dataURL
+        constructArtworkMode = true
+        constructArtworkToken += 1
+        hasUnsavedChanges = true
+    }
+    /// Leave artwork placement (restores the camera).
+    func exitArtworkPlacement() {
+        guard constructArtworkMode else { return }
+        constructArtworkMode = false
+        pendingArtworkURL = nil
+        constructArtworkToken += 1
+    }
+    /// Transient artwork command pushed to the viewport ("fill" | "flipface" | "mirror").
+    func artworkCommand(_ cmd: String) {
+        constructArtworkCmd = cmd
+        constructArtworkCmdToken += 1
+    }
+    /// Store a framing reported live from the viewport (drag / fill / flip) WITHOUT
+    /// re-pushing decals — the viewport already applied it (mirrors the panelXf path).
+    func storeDecalFrame(panelId: Int, ox: Double, oy: Double, scale: Double, rot: Double, mirror: Double, side: Double) {
+        constructDecalXforms[panelId] = [ox, oy, scale, rot, mirror, side]
+        if constructDecals[panelId] != nil { activeDecalPanel = panelId }
+        hasUnsavedChanges = true
+    }
+
+    /// Clears the 3D assembly when the sketch has no enclosed areas (e.g. everything
+    /// was deleted in 2D) — pushes an empty model so the viewport shows nothing,
+    /// instead of leaving a stale pose or erroring.
+    func clearConstructModel() {
+        constructModelJSON = "{\"panels\":[],\"groundPanel\":0}"
+        constructFolds = []
+        constructHoleChains = []
+        constructSeams = []
+        constructStampsJSON = "[]"
+        pendingEngulfed = []
+        constructPanelHandles = [:]
+        selectedFoldId = nil
+        constructModelToken += 1
+        constructFoldStateToken += 1
+        constructSeamStateToken += 1
+        constructStampToken += 1
+        isBuildingConstructModel = false
+    }
+
     /// {panelId: {url, ox, oy, scale, rot, mirror}} for the viewport to re-apply
     /// artwork decals *with their framing* (offset / scale / rotation / flip).
     var constructDecalsJSON: String {
@@ -588,7 +661,7 @@ extension AppState {
         for (pid, url) in constructDecals {
             let x = decalXform(pid)
             obj[String(pid)] = ["url": url, "ox": x[0], "oy": x[1],
-                                "scale": x[2], "rot": x[3], "mirror": x[4]]
+                                "scale": x[2], "rot": x[3], "mirror": x[4], "side": x[5]]
         }
         guard let d = try? JSONSerialization.data(withJSONObject: obj),
               let s = String(data: d, encoding: .utf8) else { return "{}" }

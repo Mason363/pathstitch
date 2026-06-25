@@ -204,7 +204,7 @@ window.setConstructFinish=function(name){
 // panel. Pass an empty url to clear back to the tinted procedural leather.
 window.setConstructLeatherTexture=function(dataURL, tiling){
   tiling=(tiling>0?tiling:1);
-  const apply=()=>{ for(const p of PANELS){ if(p.mat && DECALS[p.id]===undefined){
+  const apply=()=>{ for(const p of PANELS){ if(p.mat){
       p.mat.map=LEATHER_TEX||null; p.mat.color.setHex(LEATHER_TEX?0xffffff:MATERIAL_COLOR); p.mat.needsUpdate=true; } } };
   if(!dataURL){ if(LEATHER_TEX){ LEATHER_TEX.dispose(); LEATHER_TEX=null; } apply(); return; }
   const img=new Image();
@@ -261,7 +261,8 @@ const _IDENT=new THREE.Matrix4();
 
 function clearPanels(){
   for(const p of PANELS){
-    if(p.mat && p.mat.map){ p.mat.map.dispose(); }   // artwork texture
+    if(p.decalMesh){ root.remove(p.decalMesh); p.decalMesh.geometry.dispose(); if(p.decalMesh.material.map) p.decalMesh.material.map.dispose(); p.decalMesh.material.dispose(); }
+    if(p.mat && p.mat.map && p.mat.map!==LEATHER_TEX){ p.mat.map.dispose(); }   // base leather map (not the shared custom texture)
     if(p.shell){ root.remove(p.shell); p.shell.geometry.dispose(); }  // shares p.mat
     if(p.mesh){ root.remove(p.mesh); p.mesh.geometry.dispose(); p.mesh.material.dispose(); }
     if(p.foldLine){ root.remove(p.foldLine); p.foldLine.geometry.dispose(); p.foldLine.material.dispose(); }
@@ -272,6 +273,9 @@ function clearPanels(){
   if(chainLineMesh){ root.remove(chainLineMesh); chainLineMesh.geometry.dispose(); chainLineMesh.material.dispose(); chainLineMesh=null; }
   if(stampMesh){ root.remove(stampMesh); stampMesh.geometry.dispose(); stampMesh.material.dispose(); stampMesh=null; }
   if(typeof detachGizmo==="function") detachGizmo();
+  hoverPanelId=-1; if(typeof clearHoverLine==="function") clearHoverLine();   // stale hover refs gone
+  if(typeof clearFoldHi==="function") clearFoldHi();
+  DECALS={}; ART_IMG={}; DECAL_XF={};   // re-pushed fresh after the model reloads
   HOLE_SLOTS=[];
   clearThread();
 }
@@ -857,6 +861,7 @@ function recomputePose(){
   postSeamFit();
   postReadouts();
   if(typeof applyRenderMode==="function") applyRenderMode();   // re-hide overlays in mockup
+  if(typeof updateFoldHi==="function") updateFoldHi();         // fold-side tint rides the pose
   // Keep the gizmo on its panel as the pose changes (but never while dragging it).
   if(gizmoPanel && gizmoPanel.seatCentroid && !tcontrols.dragging){
     const c=gizmoPanel.seatCentroid, xf=gizmoPanel.userXf;
@@ -987,8 +992,22 @@ function writePanelGeometry(panel){
     panel.shell.geometry.computeVertexNormals();
     panel.shell.geometry.computeBoundingSphere();
   }
-  // (artwork is the panel's own albedo map — UV-locked to the surface, so it
-  // rides every fold automatically; nothing extra to update here.)
+  // artwork overlay: hug the chosen face, just off the surface along the normal
+  // (front = +, back = below the thickness shell), so it rides every fold.
+  if(panel.decalMesh){
+    const dp=panel.decalMesh.geometry.attributes.position.array;
+    const nrm=panel.mesh.geometry.attributes.normal.array;
+    const ds=Math.max(0.3, THICKNESS*0.18);
+    const off = panel.decalSide ? -(THICKNESS+ds) : ds;
+    for(let i=0;i<panel.X.length;i++){
+      dp[i*3]=panel.X[i][0]+nrm[i*3]*off;
+      dp[i*3+1]=panel.X[i][1]+nrm[i*3+1]*off;
+      dp[i*3+2]=panel.X[i][2]+nrm[i*3+2]*off;
+    }
+    panel.decalMesh.geometry.attributes.position.needsUpdate=true;
+    panel.decalMesh.geometry.computeVertexNormals();
+    panel.decalMesh.geometry.computeBoundingSphere();
+  }
   // outline (boundary edges only)
   const wp=panel.wire.geometry.attributes.position.array;
   panel.boundaryEdges.forEach(([a,b],i)=>{ const A=panel.X[a],B=panel.X[b]; wp[i*6]=A[0];wp[i*6+1]=A[1];wp[i*6+2]=A[2]; wp[i*6+3]=B[0];wp[i*6+4]=B[1];wp[i*6+5]=B[2]; });
@@ -1026,7 +1045,7 @@ window.setConstructMaterial=function(hex){
   if(hex!=null) MATERIAL_COLOR=hex>>>0;
   // panels showing artwork or a custom texture keep white (the map is their albedo);
   // plain-leather panels take the tint.
-  for(const p of PANELS){ if(p.mat && DECALS[p.id]===undefined && !LEATHER_TEX) p.mat.color.setHex(MATERIAL_COLOR); }
+  for(const p of PANELS){ if(p.mat && !LEATHER_TEX) p.mat.color.setHex(MATERIAL_COLOR); }
 };
 window.setConstructThickness=function(t){ THICKNESS=Math.max(0, t||0); needsPose=true; };
 
@@ -1069,40 +1088,56 @@ function panelUVs(panel){
   for(let i=0;i<v.length;i++){ uv[i*2]=(v[i][0]-minx)/w; uv[i*2+1]=(v[i][1]-miny)/h; }
   return uv;
 }
-// xf = {ox,oy (fraction of panel, −1…1), scale, rot (deg), mirror (0/1)} — the
-// "framing" the user sets in the inspector to slide / size / spin / flip the art.
+// Artwork rides a *separate overlay mesh* hugging one face of the panel (not baked
+// into the leather albedo), so it can sit on exactly one side and flip to the other.
+function ensureDecalMesh(panel){
+  if(panel.decalMesh) return panel.decalMesh;
+  const g=new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.BufferAttribute(new Float32Array(panel.X.length*3),3));
+  const idx=[]; for(const t of panel.triangles) idx.push(t[0],t[1],t[2]); g.setIndex(idx);
+  g.setAttribute("uv", new THREE.BufferAttribute(panelUVs(panel),2));
+  const m=new THREE.MeshStandardMaterial({transparent:true, side:THREE.FrontSide, roughness:0.6,
+    metalness:0.0, depthWrite:false, polygonOffset:true, polygonOffsetFactor:-2, polygonOffsetUnits:-2});
+  const mesh=new THREE.Mesh(g,m); mesh.renderOrder=4; mesh.castShadow=false; mesh.receiveShadow=false;
+  root.add(mesh); panel.decalMesh=mesh; return mesh;
+}
+// Draw the artwork onto a TRANSPARENT canvas sized to the panel aspect (leather
+// shows through where the art is transparent), framed by xf, → an overlay texture.
+function drawDecalTexture(panel, img, ox,oy,scale,rot,mirror){
+  const v=panel.v2d; let mnx=1e18,mny=1e18,mxx=-1e18,mxy=-1e18;
+  for(const p of v){ if(p[0]<mnx)mnx=p[0]; if(p[1]<mny)mny=p[1]; if(p[0]>mxx)mxx=p[0]; if(p[1]>mxy)mxy=p[1]; }
+  const aw=(mxx-mnx)||1, ah=(mxy-mny)||1, W=512, H=Math.max(64, Math.round(512*ah/aw));
+  const cv=document.createElement("canvas"); cv.width=W; cv.height=H; const cx=cv.getContext("2d");
+  // WKWebView reports img.width/height as 0 at onload for data-URL images — use naturalWidth.
+  const iw=img.naturalWidth||img.width||W, ih=img.naturalHeight||img.height||H;
+  const r=Math.min(W/iw, H/ih)*0.9*scale, dw=iw*r, dh=ih*r;
+  cx.save();
+  cx.translate(W/2 + ox*W*0.5, H/2 - oy*H*0.5);
+  if(rot) cx.rotate(rot);
+  if(mirror) cx.scale(-1,1);
+  cx.drawImage(img, -dw/2, -dh/2, dw, dh);
+  cx.restore();
+  const tex=new THREE.CanvasTexture(cv); tex.encoding=THREE.sRGBEncoding; tex.anisotropy=4; tex.flipY=true;
+  return tex;
+}
+// xf = {ox,oy (fraction of panel, −1…1), scale, rot (deg), mirror (0/1), side (0
+// front | 1 back)} — slide / size / spin / flip / move-to-the-other-face the art.
+// The overlay's position is set each pose (writePanelGeometry). When the panel's
+// image is already cached we redraw synchronously, so dragging stays smooth.
 function applyDecalToPanel(panel, dataURL, xf){
   xf=xf||{}; const ox=+xf.ox||0, oy=+xf.oy||0, scale=(xf.scale>0?+xf.scale:1),
-            rot=(+xf.rot||0)*Math.PI/180, mirror=(+xf.mirror)?true:false;
-  DECALS[panel.id]=dataURL;
+            rot=(+xf.rot||0)*Math.PI/180, mirror=(+xf.mirror)?true:false, side=(+xf.side)?1:0;
+  DECALS[panel.id]=dataURL; panel.decalSide=side;
+  const mesh=ensureDecalMesh(panel);
+  mesh.material.side = side ? THREE.BackSide : THREE.FrontSide;   // show on the chosen face only
+  const setTex=(img)=>{ const tex=drawDecalTexture(panel,img,ox,oy,scale,rot,mirror);
+    if(mesh.material.map) mesh.material.map.dispose(); mesh.material.map=tex; mesh.material.needsUpdate=true; };
+  const cached=ART_IMG[panel.id];
+  if(cached && cached.__src===dataURL){ setTex(cached); needsPose=true; return; }
   const img=new Image();
-  img.onload=function(){
-    // Composite the artwork over the current leather colour onto a canvas sized
-    // to the panel's aspect, then use it as the panel albedo (UVs map it to the
-    // flat layout, so it rides every fold). Transparent areas read as leather.
-    const v=panel.v2d; let mnx=1e18,mny=1e18,mxx=-1e18,mxy=-1e18;
-    for(const p of v){ if(p[0]<mnx)mnx=p[0]; if(p[1]<mny)mny=p[1]; if(p[0]>mxx)mxx=p[0]; if(p[1]>mxy)mxy=p[1]; }
-    const aw=(mxx-mnx)||1, ah=(mxy-mny)||1;
-    const W=512, H=Math.max(64, Math.round(512*ah/aw));
-    const cv=document.createElement("canvas"); cv.width=W; cv.height=H; const cx=cv.getContext("2d");
-    cx.fillStyle="#"+("000000"+MATERIAL_COLOR.toString(16)).slice(-6); cx.fillRect(0,0,W,H);
-    // WKWebView reports img.width/height as 0 at onload for data-URL images — use
-    // naturalWidth/Height (fallback to the canvas so the art always draws).
-    const iw=img.naturalWidth||img.width||W, ih=img.naturalHeight||img.height||H;
-    const r=Math.min(W/iw, H/ih)*0.9*scale, dw=iw*r, dh=ih*r;
-    cx.save();
-    // Centre, then apply the user's framing: offset (oy up-positive), rotation,
-    // and a horizontal flip ("flip side") so the art reads right on either face.
-    cx.translate(W/2 + ox*W*0.5, H/2 - oy*H*0.5);
-    if(rot) cx.rotate(rot);
-    if(mirror) cx.scale(-1,1);
-    cx.drawImage(img, -dw/2, -dh/2, dw, dh);
-    cx.restore();
-    const tex=new THREE.CanvasTexture(cv); tex.encoding=THREE.sRGBEncoding; tex.anisotropy=4; tex.flipY=true;
-    if(panel.mat.map) panel.mat.map.dispose();
-    panel.mat.map=tex; panel.mat.color.setHex(0xffffff); panel.mat.needsUpdate=true;
-  };
+  img.onload=function(){ img.__src=dataURL; ART_IMG[panel.id]=img; setTex(img); };
   img.src=dataURL;
+  needsPose=true;   // position the overlay against the current fold this frame
 }
 // Called from the drop handler with normalized device coords of the drop point.
 window.applyDroppedDecal=function(dataURL, ndcX, ndcY){
@@ -1120,12 +1155,11 @@ window.setConstructDecals=function(jsonStr){
     const e=d[p.id];
     if(e!==undefined){
       const url=(typeof e==="string")?e:e.url;
+      if(typeof e==="object"){ DECAL_XF[p.id]={ox:+e.ox||0, oy:+e.oy||0, scale:e.scale>0?+e.scale:1, rot:+e.rot||0, mirror:e.mirror?1:0, side:e.side?1:0}; }
       applyDecalToPanel(p, url, (typeof e==="string")?null:e);
-    } else if(DECALS[p.id]!==undefined){   // remove artwork → back to plain leather / texture
-      if(p.mat.map){ p.mat.map.dispose(); p.mat.map=null; }   // the decal's own composited canvas
-      if(LEATHER_TEX){ p.mat.map=LEATHER_TEX; p.mat.color.setHex(0xffffff); }
-      else p.mat.color.setHex(MATERIAL_COLOR);
-      p.mat.needsUpdate=true; delete DECALS[p.id];
+    } else if(DECALS[p.id]!==undefined){   // remove artwork → drop its overlay mesh
+      if(p.decalMesh){ root.remove(p.decalMesh); p.decalMesh.geometry.dispose(); if(p.decalMesh.material.map) p.decalMesh.material.map.dispose(); p.decalMesh.material.dispose(); p.decalMesh=null; }
+      delete DECALS[p.id]; delete ART_IMG[p.id];
     }
   }
 };
@@ -1242,6 +1276,7 @@ window.setConstructTool=function(t){
   TOOL=t||"select";
   if(TOOL!=="crease"){ CREASE_PT=null; hideCreaseMark(); hideSnapIndicator(); }   // abandon a half-drawn crease
   if(TOOL!=="move") detachGizmo();   // hide the transform gizmo outside the Move tool
+  if(typeof clearHover==="function") clearHover();   // drop stale hover highlight
   if(PANELS.length) reportStretch();
 };
 // Per-panel base region ("which side stays flat"): re-root each panel's fold tree
@@ -1303,6 +1338,166 @@ window.setConstructStamps=function(jsonStr){
   needsPose=true;
 };
 
+// ---- hover + robust picking (so "what's under the cursor" is what selects) --
+// A bright overlay follows the hovered fold / chain, and the hovered panel tints,
+// so selection is never a guess. Folds are picked by screen-pixel distance (the
+// thin-line raycast was the guessing game), updated continuously on pointer-move.
+let hoverLine=null, hoverPanelId=-1, hoverPanelEmis=null;
+function ensureHoverLine(){
+  if(hoverLine) return hoverLine;
+  const g=new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(new Float32Array(2*3),3));
+  const m=new THREE.LineBasicMaterial({color:0x46c8ff, transparent:true, opacity:0.95}); m.depthTest=false;
+  hoverLine=new THREE.Line(g,m); hoverLine.renderOrder=8; scene.add(hoverLine); return hoverLine;
+}
+function showHoverPts(pts){
+  const L=ensureHoverLine(), need=pts.length; if(need<2){ L.visible=false; return; }
+  if(L.geometry.attributes.position.count < need)
+    L.geometry.setAttribute("position", new THREE.Float32BufferAttribute(new Float32Array(need*3),3));
+  const a=L.geometry.attributes.position.array;
+  for(let i=0;i<need;i++){ a[i*3]=pts[i][0]; a[i*3+1]=pts[i][1]; a[i*3+2]=pts[i][2]; }
+  L.geometry.attributes.position.needsUpdate=true; L.geometry.setDrawRange(0,need); L.visible=true;
+}
+function clearHoverLine(){ if(hoverLine) hoverLine.visible=false; }
+function setHoverPanel(pid){
+  if(hoverPanelId===pid) return;
+  if(hoverPanelId>=0){ const p=PANEL_BY_ID[hoverPanelId]; if(p&&p.mat&&hoverPanelEmis) p.mat.emissive.copy(hoverPanelEmis); }
+  hoverPanelId=pid;
+  if(pid>=0){ const p=PANEL_BY_ID[pid]; if(p&&p.mat){ hoverPanelEmis=p.mat.emissive.clone(); p.mat.emissive.setHex(0x16384a); } }
+}
+function clearHover(){ clearHoverLine(); setHoverPanel(-1); renderer.domElement.style.cursor="default"; }
+function segScreenDist(px,py,A,B){
+  const dx=B[0]-A[0], dy=B[1]-A[1], L2=dx*dx+dy*dy||1e-9;
+  let t=((px-A[0])*dx+(py-A[1])*dy)/L2; t=Math.max(0,Math.min(1,t));
+  return Math.hypot(px-(A[0]+dx*t), py-(A[1]+dy*t));
+}
+function pickFoldAt(cx,cy){
+  let best=null, bd=16;
+  for(const p of PANELS){
+    if(!p.foldLine || !p.foldSegs) continue;
+    for(let i=0;i<p.foldSegs.length;i++){
+      const meta=p.foldLine.userData.segs[i]; if(!meta) continue;
+      const A=worldToScreen(p.X[p.foldSegs[i][0]]), B=worldToScreen(p.X[p.foldSegs[i][1]]);
+      const d=segScreenDist(cx,cy,A,B);
+      if(d<bd){ bd=d; best={panelId:meta.panelId, foldId:meta.foldId,
+                           a:p.X[p.foldSegs[i][0]].slice(), b:p.X[p.foldSegs[i][1]].slice()}; }
+    }
+  }
+  return best;
+}
+function panelHitAt(cx,cy){ setMouse(cx,cy); ray.setFromCamera(mouse,camera);
+  return ray.intersectObjects(PANELS.map(p=>p.mesh),false)[0]||null; }
+function chainNearestAt(hit){
+  if(!hit) return -1; const pid=hit.object.userData.panelId, hp=[hit.point.x,hit.point.y,hit.point.z];
+  let best=-1,bd=1e18;
+  for(const c of CHAINS){ if(c.panelId!==pid) continue;
+    for(let k=0;k<c.holes.length;k++){ const d=len(sub(holeWorld(c,k),hp)); if(d<bd){ bd=d; best=c.id; } } }
+  return best;
+}
+function chainPolyWorld(cid){ const c=CHAIN_BY_ID[cid]; if(!c) return null;
+  const n=c.holes.length; if(n<2) return null; const pts=[], last=c.closed?n+1:n;
+  for(let k=0;k<last;k++) pts.push(holeWorld(c,k%n)); return pts; }
+
+// ---- selected-fold side highlight (which side stays flat vs folds up) --------
+// On selecting a fold we tint its two regions: GREEN = stays flat (base), ORANGE
+// = folds up. Removes the "which way will it go" guesswork; a Swift "Flip" button
+// re-roots to the other side (we post each side's representative 2D point).
+let SEL_FOLD=null, foldHi=[];
+function clearFoldHi(){ for(const m of foldHi){ scene.remove(m); m.geometry.dispose(); m.material.dispose(); } foldHi=[]; }
+function regionsOfFold(panel, foldId){
+  const T=panel.tree; let childR=-1;
+  for(let r=0;r<T.region.length;r++){ if(T.parentFold[r]===foldId){ childR=r; break; } }
+  if(childR<0) return null; return { move:childR, base:T.parent[childR] };
+}
+function region2DCentroid(panel, ri){ const reg=panel.tree.region[ri]; if(!reg) return [0,0];
+  let x=0,y=0,n=0; reg.verts.forEach(v=>{ x+=panel.v2d[v][0]; y+=panel.v2d[v][1]; n++; }); return n?[x/n,y/n]:[0,0]; }
+function regionFaceMesh(panel, ri, colHex){
+  const reg=panel.tree.region[ri]; if(!reg) return null; const verts=[];
+  for(const fi of reg.faces){ const t=panel.triangles[fi]; for(const vi of t){ const X=panel.X[vi]; verts.push(X[0],X[1],X[2]); } }
+  if(!verts.length) return null;
+  const g=new THREE.BufferGeometry(); g.setAttribute("position", new THREE.Float32BufferAttribute(verts,3)); g.computeVertexNormals();
+  const m=new THREE.MeshBasicMaterial({color:colHex, transparent:true, opacity:0.30, side:THREE.DoubleSide, depthWrite:false});
+  const mesh=new THREE.Mesh(g,m); mesh.renderOrder=5; return mesh;
+}
+function updateFoldHi(){
+  clearFoldHi();
+  if(!SEL_FOLD || RENDER_MODE==="mockup") return;
+  const p=PANEL_BY_ID[SEL_FOLD.panelId]; if(!p||!p.tree) return;
+  const rr=regionsOfFold(p, SEL_FOLD.foldId); if(!rr) return;
+  const baseM=regionFaceMesh(p, rr.base, 0x39d27a), moveM=regionFaceMesh(p, rr.move, 0xff9a3c);
+  if(baseM){ scene.add(baseM); foldHi.push(baseM); }
+  if(moveM){ scene.add(moveM); foldHi.push(moveM); }
+}
+window.setConstructSelectedFold=function(jsonStr){
+  let d; try{ d=(typeof jsonStr==="string")?JSON.parse(jsonStr):jsonStr; }catch(e){ d=null; }
+  SEL_FOLD=(d&&d.panelId!=null&&d.foldId!=null)?{panelId:d.panelId, foldId:d.foldId}:null;
+  if(SEL_FOLD){ const p=PANEL_BY_ID[SEL_FOLD.panelId];
+    if(p&&p.tree){ const rr=regionsOfFold(p, SEL_FOLD.foldId);
+      if(rr) post({op:"foldSides", panelId:p.id, base:region2DCentroid(p,rr.base), move:region2DCentroid(p,rr.move)}); } }
+  updateFoldHi();
+};
+
+// ---- artwork placement mode (drop an image → bird's-eye → click a body → drag)
+let ARTWORK_MODE=false, ARTWORK_URL=null, ARTWORK_PANEL=-1, ART_IMG={}, DECAL_XF={};
+let artDragging=false;
+function getDecalXf(pid){ const x=DECAL_XF[pid]||{}; return {ox:+x.ox||0, oy:+x.oy||0, scale:x.scale>0?+x.scale:1, rot:+x.rot||0, mirror:x.mirror?1:0}; }
+function applyAndPostDecal(pid, xf, persist){
+  const p=PANEL_BY_ID[pid]; if(!p||DECALS[pid]===undefined&&!ARTWORK_URL) return;
+  DECAL_XF[pid]=xf;
+  applyDecalToPanel(p, DECALS[pid]||ARTWORK_URL, xf);
+  if(persist) post({op:"decalFrame", panelId:pid, ox:xf.ox, oy:xf.oy, scale:xf.scale, rot:xf.rot, mirror:xf.mirror});
+}
+function birdsEye(){
+  const box=new THREE.Box3().setFromObject(root); if(!isFinite(box.min.x)) return;
+  const c=box.getCenter(new THREE.Vector3()), s=box.getSize(new THREE.Vector3());
+  const r=Math.max(s.x,s.z,1)*0.5, dist=r/Math.tan(camera.fov*Math.PI/360)*2.0;
+  controls.target.copy(c); camera.position.set(c.x, c.y+dist, c.z+0.001);
+  camera.near=Math.max(r*0.01,0.1); camera.far=r*100; camera.updateProjectionMatrix();
+}
+// Place / re-activate the clicked body, dropping the artwork on it centred.
+function artworkPickPanel(pid){
+  ARTWORK_PANEL=pid; const p=PANEL_BY_ID[pid]; if(!p) return;
+  if(DECALS[pid]===undefined){
+    const xf={ox:0,oy:0,scale:1,rot:0,mirror:0}; DECAL_XF[pid]=xf;
+    applyDecalToPanel(p, ARTWORK_URL, xf);
+    post({op:"decalApplied", panelId:pid, dataURL:ARTWORK_URL});   // Swift persists + frames
+  }
+}
+// Move the artwork so its centre sits at a clicked/dragged panel point.
+function artworkMoveTo(hit){
+  const pid=ARTWORK_PANEL, p=PANEL_BY_ID[pid]; if(!p||!hit) return;
+  const p2=hitTo2D(p, hit.face, hit.point); const v=p.v2d;
+  let mnx=1e18,mny=1e18,mxx=-1e18,mxy=-1e18;
+  for(const q of v){ if(q[0]<mnx)mnx=q[0]; if(q[1]<mny)mny=q[1]; if(q[0]>mxx)mxx=q[0]; if(q[1]>mxy)mxy=q[1]; }
+  const fx=(p2[0]-mnx)/((mxx-mnx)||1), fy=(p2[1]-mny)/((mxy-mny)||1);
+  const xf=getDecalXf(pid); xf.ox=2*(fx-0.5); xf.oy=2*(fy-0.5);
+  applyAndPostDecal(pid, xf, false);   // post on release
+}
+window.fillActiveDecal=function(){
+  const pid=ARTWORK_PANEL, p=PANEL_BY_ID[pid], img=ART_IMG[pid]; if(!p||!img) return;
+  const v=p.v2d; let mnx=1e18,mny=1e18,mxx=-1e18,mxy=-1e18;
+  for(const q of v){ if(q[0]<mnx)mnx=q[0]; if(q[1]<mny)mny=q[1]; if(q[0]>mxx)mxx=q[0]; if(q[1]>mxy)mxy=q[1]; }
+  const aw=(mxx-mnx)||1, ah=(mxy-mny)||1, W=512, H=Math.max(64,Math.round(512*ah/aw));
+  const iw=img.naturalWidth||img.width||W, ih=img.naturalHeight||img.height||H;
+  const containR=Math.min(W/iw,H/ih)*0.9, coverR=Math.max(W/iw,H/ih);
+  const xf=getDecalXf(pid); xf.scale=coverR/(containR||1e-6); xf.ox=0; xf.oy=0;
+  applyAndPostDecal(pid, xf, true);
+};
+window.flipActiveDecal=function(){
+  const pid=ARTWORK_PANEL; if(pid<0) return; const xf=getDecalXf(pid); xf.mirror=xf.mirror?0:1;
+  applyAndPostDecal(pid, xf, true);
+};
+window.flipDecalFace=function(){
+  const pid=ARTWORK_PANEL; if(pid<0) return; const xf=getDecalXf(pid); xf.side=xf.side?0:1;
+  applyAndPostDecal(pid, xf, true);
+};
+window.setConstructArtworkMode=function(on, dataURL){
+  ARTWORK_MODE=!!on;
+  if(on){ ARTWORK_URL=dataURL||ARTWORK_URL; ARTWORK_PANEL=-1; detachGizmo(); clearHover();
+    controls.enableRotate=false; birdsEye(); }
+  else { ARTWORK_URL=null; ARTWORK_PANEL=-1; controls.enableRotate=true; clearHover(); recenterCamera(); }
+};
+
 // ---- camera framing -------------------------------------------------------
 window.recenterCamera=function(){
   const box=new THREE.Box3().setFromObject(root);
@@ -1319,83 +1514,92 @@ window.recenterCamera=function(){
 const ray=new THREE.Raycaster(); ray.params.Line.threshold=3.0;
 const mouse=new THREE.Vector2();
 function setMouse(cx,cy){ mouse.x=(cx/window.innerWidth)*2-1; mouse.y=-(cy/window.innerHeight)*2+1; }
-let downXY=null;
+let downXY=null, artDrag=false;
 renderer.domElement.addEventListener("pointerdown",e=>{
   if(e.button!==0) return;
-  downXY=[e.clientX,e.clientY];
+  downXY=[e.clientX,e.clientY]; artDrag=false;
+  // artwork: grab the art on the active body to drag it
+  if(ARTWORK_MODE && ARTWORK_PANEL>=0){
+    const p=PANEL_BY_ID[ARTWORK_PANEL];
+    if(p){ setMouse(e.clientX,e.clientY); ray.setFromCamera(mouse,camera);
+      if(ray.intersectObject(p.mesh,false)[0]){ artDrag=true; controls.enabled=false; } }
+  }
 });
 renderer.domElement.addEventListener("pointermove",e=>{
-  if(TOOL!=="crease"){ hideSnapIndicator(); return; }
-  // Always show the osnap indicator under the cursor (the "constant little
-  // something"); while mid-crease also rubber-band to the snapped point.
-  mouse.x=(e.clientX/window.innerWidth)*2-1; mouse.y=-(e.clientY/window.innerHeight)*2+1;
-  ray.setFromCamera(mouse,camera);
-  const target = CREASE_PT ? PANEL_BY_ID[CREASE_PT.panelId] : null;
-  const hit = target ? ray.intersectObject(target.mesh,false)[0]
-                     : ray.intersectObjects(PANELS.map(p=>p.mesh),false)[0];
-  if(!hit){ hideSnapIndicator(); return; }
-  const panel = target || PANEL_BY_ID[hit.object.userData.panelId];
-  const sp=snapCreasePoint(panel, hit, e.clientX, e.clientY);
-  showSnapIndicator(sp, e.clientX, e.clientY);
-  if(CREASE_PT) showCreasePreview(CREASE_PT.world, sp.world);
+  const cx=e.clientX, cy=e.clientY;
+  // crease keeps its dedicated osnap behaviour (constant indicator + rubber-band)
+  if(TOOL==="crease"){
+    mouse.x=(cx/window.innerWidth)*2-1; mouse.y=-(cy/window.innerHeight)*2+1; ray.setFromCamera(mouse,camera);
+    const target = CREASE_PT ? PANEL_BY_ID[CREASE_PT.panelId] : null;
+    const hit = target ? ray.intersectObject(target.mesh,false)[0]
+                       : ray.intersectObjects(PANELS.map(p=>p.mesh),false)[0];
+    if(!hit){ hideSnapIndicator(); return; }
+    const panel = target || PANEL_BY_ID[hit.object.userData.panelId];
+    const sp=snapCreasePoint(panel, hit, cx, cy); showSnapIndicator(sp, cx, cy);
+    if(CREASE_PT) showCreasePreview(CREASE_PT.world, sp.world);
+    return;
+  }
+  // artwork: drag the art to follow the cursor on the active body; else hover bodies
+  if(ARTWORK_MODE){
+    if(artDrag){ const p=PANEL_BY_ID[ARTWORK_PANEL];
+      if(p){ setMouse(cx,cy); ray.setFromCamera(mouse,camera); const hit=ray.intersectObject(p.mesh,false)[0]; if(hit) artworkMoveTo(hit); } }
+    else { const hit=panelHitAt(cx,cy); setHoverPanel(hit?hit.object.userData.panelId:-1);
+      renderer.domElement.style.cursor = hit?"pointer":"default"; }
+    return;
+  }
+  // live hover for every tool, so the click selects exactly what's highlighted
+  if(TOOL==="select" || TOOL==="fold"){
+    const f=pickFoldAt(cx,cy);
+    if(f){ showHoverPts([f.a,f.b]); setHoverPanel(-1); renderer.domElement.style.cursor="pointer"; }
+    else { clearHoverLine(); const hit=panelHitAt(cx,cy); setHoverPanel(hit?hit.object.userData.panelId:-1); renderer.domElement.style.cursor="default"; }
+  } else if(TOOL==="ground" || TOOL==="glue" || TOOL==="move"){
+    clearHoverLine(); const hit=panelHitAt(cx,cy); setHoverPanel(hit?hit.object.userData.panelId:-1);
+    renderer.domElement.style.cursor=hit?"pointer":"default";
+  } else if(TOOL==="stitch"){
+    const cid=chainNearestAt(panelHitAt(cx,cy)); const poly=cid>=0?chainPolyWorld(cid):null;
+    if(poly) showHoverPts(poly); else clearHoverLine(); setHoverPanel(-1);
+    renderer.domElement.style.cursor=cid>=0?"pointer":"default";
+  } else { clearHover(); }
 });
 renderer.domElement.addEventListener("pointerup",e=>{
-  if(e.button!==0 || !downXY) return;
+  if(e.button!==0) return;
+  const wasArt=artDrag; artDrag=false; controls.enabled=true;
+  if(!downXY) return;
   const moved=Math.hypot(e.clientX-downXY[0], e.clientY-downXY[1]); downXY=null;
-  if(moved>4) return; // a drag, not a click
-  mouse.x=(e.clientX/window.innerWidth)*2-1; mouse.y=-(e.clientY/window.innerHeight)*2+1;
-  ray.setFromCamera(mouse,camera);
+  // artwork: finish a drag (persist), or a click picks / drops onto a body
+  if(ARTWORK_MODE){
+    if(wasArt && moved>4){ if(ARTWORK_PANEL>=0) applyAndPostDecal(ARTWORK_PANEL, getDecalXf(ARTWORK_PANEL), true); return; }
+    const hit=panelHitAt(e.clientX,e.clientY); if(hit) artworkPickPanel(hit.object.userData.panelId);
+    return;
+  }
+  if(moved>4) return; // a camera drag, not a click
   if(TOOL==="crease"){
-    // two clicks on a panel define a new fold line (mapped back to its 2D coords)
+    setMouse(e.clientX,e.clientY); ray.setFromCamera(mouse,camera);
     const hit=ray.intersectObjects(PANELS.map(p=>p.mesh),false)[0];
-    if(hit){
-      const panel=PANEL_BY_ID[hit.object.userData.panelId];
-      const sp=snapCreasePoint(panel, hit, e.clientX, e.clientY);
-      if(!CREASE_PT || CREASE_PT.panelId!==panel.id){
-        CREASE_PT={panelId:panel.id, p2d:sp.p2d, world:sp.world};
-        showCreaseMark(CREASE_PT.world);
-      }else{
-        post({op:"addFold", panelId:panel.id, seg:[CREASE_PT.p2d, sp.p2d]});
-        CREASE_PT=null; hideCreaseMark();
-      }
-    }
+    if(hit){ const panel=PANEL_BY_ID[hit.object.userData.panelId]; const sp=snapCreasePoint(panel, hit, e.clientX, e.clientY);
+      if(!CREASE_PT || CREASE_PT.panelId!==panel.id){ CREASE_PT={panelId:panel.id, p2d:sp.p2d, world:sp.world}; showCreaseMark(CREASE_PT.world); }
+      else { post({op:"addFold", panelId:panel.id, seg:[CREASE_PT.p2d, sp.p2d]}); CREASE_PT=null; hideCreaseMark(); } }
     return;
   }
   if(TOOL==="stitch"){
-    // pick the nearest hole → its chain (click chain A, then chain B to sew)
-    if(holeMesh){
-      const hit=ray.intersectObject(holeMesh,false)[0];
-      if(hit && hit.instanceId!=null){ const slot=HOLE_SLOTS[hit.instanceId];
-        if(slot){ post({op:"selectChain", chainId:slot.chainId}); return; } }
-    }
-    // fallback: clicking anywhere on a panel picks that panel's nearest chain,
-    // so users don't have to land exactly on a tiny hole marker.
-    const ph=ray.intersectObjects(PANELS.map(p=>p.mesh),false)[0];
-    if(ph){
-      const pid=ph.object.userData.panelId, hp=[ph.point.x,ph.point.y,ph.point.z];
-      let best=-1, bd=1e18;
-      for(const c of CHAINS){ if(c.panelId!==pid) continue;
-        for(let k=0;k<c.holes.length;k++){ const d=len(sub(holeWorld(c,k),hp)); if(d<bd){ bd=d; best=c.id; } } }
-      if(best>=0) post({op:"selectChain", chainId:best});
-    }
+    const cid=chainNearestAt(panelHitAt(e.clientX,e.clientY));
+    if(cid>=0) post({op:"selectChain", chainId:cid});
     return;
   }
   if(TOOL==="ground" || TOOL==="glue"){
-    const hit=ray.intersectObjects(PANELS.map(p=>p.mesh),false)[0];
+    const hit=panelHitAt(e.clientX,e.clientY);
     if(hit){ const panel=PANEL_BY_ID[hit.object.userData.panelId];
-      const p2d=hitTo2D(panel, hit.face, hit.point);   // the clicked face → base region
-      post({op:"selectPanel", panelId:panel.id, p2d:p2d}); }
+      post({op:"selectPanel", panelId:panel.id, p2d:hitTo2D(panel, hit.face, hit.point)}); }
     return;
   }
   if(TOOL==="move"){
-    const hit=ray.intersectObjects(PANELS.map(p=>p.mesh),false)[0];
+    const hit=panelHitAt(e.clientX,e.clientY);
     if(hit) attachGizmo(PANEL_BY_ID[hit.object.userData.panelId]); else detachGizmo();
     return;
   }
-  // select / fold → nearest fold edge
-  const lines=PANELS.map(p=>p.foldLine).filter(l=>l.userData.segs.length);
-  const hits=ray.intersectObjects(lines,false);
-  if(hits.length){ const h=hits[0]; const seg=Math.floor(h.index/2); const meta=h.object.userData.segs[seg]; if(meta) post({op:"selectFold", panelId:meta.panelId, foldId:meta.foldId}); }
+  // select / fold → nearest fold by screen distance (exactly what hover showed)
+  const f=pickFoldAt(e.clientX,e.clientY);
+  if(f) post({op:"selectFold", panelId:f.panelId, foldId:f.foldId});
 });
 
 // ---- loop -----------------------------------------------------------------

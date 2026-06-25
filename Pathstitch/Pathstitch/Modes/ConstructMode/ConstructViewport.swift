@@ -26,6 +26,9 @@ struct ConstructViewport: NSViewRepresentable {
     let renderToken: Int       // edit ↔ mockup render mode
     let lightingToken: Int     // studio lighting changes
     let textureToken: Int      // custom leather texture / tiling
+    let selFoldToken: Int      // selected-fold side highlight
+    let artworkToken: Int      // artwork placement mode on/off
+    let artworkCmdToken: Int   // transient artwork command (fill / flip / mirror)
     let snapActive: Bool   // mirrors the 2D snap toggle so changes re-push live
     let homeToken: Int
     var state: AppState
@@ -42,6 +45,9 @@ struct ConstructViewport: NSViewRepresentable {
         webView.registerForDraggedTypes([.fileURL])
         webView.onFileDrop = { [weak state] urls in
             DispatchQueue.main.async { state?.importFiles(urls) }
+        }
+        webView.onImageDrop = { [weak state] dataURL in
+            DispatchQueue.main.async { state?.enterArtworkPlacement(dataURL) }
         }
         context.coordinator.webView = webView
 
@@ -75,6 +81,9 @@ struct ConstructViewport: NSViewRepresentable {
         context.coordinator.pushRenderMode()
         context.coordinator.pushLighting()
         context.coordinator.pushTexture()
+        context.coordinator.pushSelFold()
+        context.coordinator.pushArtwork()
+        context.coordinator.pushArtworkCmd()
         context.coordinator.pushHome()
     }
 
@@ -97,6 +106,9 @@ struct ConstructViewport: NSViewRepresentable {
         private var lastRenderToken = -1
         private var lastLightingToken = -1
         private var lastTextureToken = -1
+        private var lastSelFoldToken = -1
+        private var lastArtworkToken = -1
+        private var lastArtworkCmdToken = -1
         private var lastSnap: Bool? = nil
         private var lastHomeToken = -1
 
@@ -138,9 +150,13 @@ struct ConstructViewport: NSViewRepresentable {
                     self.lastRenderToken = -1
                     self.lastLightingToken = -1
                     self.lastTextureToken = -1
+                    self.lastSelFoldToken = -1
+                    self.lastArtworkToken = -1
                     self.pushRenderMode()
                     self.pushLighting()
                     self.pushTexture()
+                    self.pushSelFold()
+                    self.pushArtwork()
                 }
             case "selectFold":
                 let panelId = json["panelId"] as? Int ?? 0
@@ -178,7 +194,7 @@ struct ConstructViewport: NSViewRepresentable {
                         self.state.pushConstructUndo()
                         self.state.constructDecals[panelId] = dataURL
                         if self.state.constructDecalXforms[panelId] == nil {
-                            self.state.constructDecalXforms[panelId] = [0, 0, 1, 0, 0]  // centred, full, upright
+                            self.state.constructDecalXforms[panelId] = [0, 0, 1, 0, 0, 0]  // centred, full, upright, front
                         }
                         self.state.activeDecalPanel = panelId   // framing controls target it
                         self.lastDecalToken = self.state.constructDecalToken  // already applied in JS
@@ -191,6 +207,24 @@ struct ConstructViewport: NSViewRepresentable {
                     if self.state.constructTool == .stitch && chainId >= 0 {
                         self.state.pickChainForStitch(chainId)
                     }
+                }
+            case "foldSides":
+                let panelId = json["panelId"] as? Int ?? -1
+                let base = json["base"] as? [Double] ?? []
+                let move = json["move"] as? [Double] ?? []
+                DispatchQueue.main.async {
+                    if panelId >= 0 { self.state.setFoldSides(panelId: panelId, base: base, move: move) }
+                }
+            case "decalFrame":
+                let panelId = json["panelId"] as? Int ?? -1
+                DispatchQueue.main.async {
+                    guard panelId >= 0 else { return }
+                    self.lastDecalToken = self.state.constructDecalToken  // already applied in JS
+                    self.state.storeDecalFrame(
+                        panelId: panelId,
+                        ox: json["ox"] as? Double ?? 0, oy: json["oy"] as? Double ?? 0,
+                        scale: json["scale"] as? Double ?? 1, rot: json["rot"] as? Double ?? 0,
+                        mirror: json["mirror"] as? Double ?? 0, side: json["side"] as? Double ?? 0)
                 }
             case "stretchReport":
                 let pct = json["maxStretchPct"] as? Double ?? 0
@@ -338,6 +372,35 @@ struct ConstructViewport: NSViewRepresentable {
             webView.evaluateJavaScript("setConstructLeatherTexture(\"\(esc)\", \(state.constructLeatherTiling));", completionHandler: nil)
         }
 
+        func pushSelFold() {
+            guard ready, let webView = webView else { return }
+            guard lastSelFoldToken != state.constructSelFoldToken else { return }
+            lastSelFoldToken = state.constructSelFoldToken
+            let esc = Self.escape(state.constructSelFoldJSON)
+            webView.evaluateJavaScript("setConstructSelectedFold(\"\(esc)\");", completionHandler: nil)
+        }
+
+        func pushArtwork() {
+            guard ready, let webView = webView else { return }
+            guard lastArtworkToken != state.constructArtworkToken else { return }
+            lastArtworkToken = state.constructArtworkToken
+            let on = state.constructArtworkMode
+            let esc = Self.escape(state.pendingArtworkURL ?? "")
+            webView.evaluateJavaScript("setConstructArtworkMode(\(on), \"\(esc)\");", completionHandler: nil)
+        }
+
+        func pushArtworkCmd() {
+            guard ready, let webView = webView else { return }
+            guard lastArtworkCmdToken != state.constructArtworkCmdToken else { return }
+            lastArtworkCmdToken = state.constructArtworkCmdToken
+            switch state.constructArtworkCmd {
+            case "fill":     webView.evaluateJavaScript("fillActiveDecal();", completionHandler: nil)
+            case "flipface": webView.evaluateJavaScript("flipDecalFace();", completionHandler: nil)
+            case "mirror":   webView.evaluateJavaScript("flipActiveDecal();", completionHandler: nil)
+            default: break
+            }
+        }
+
         func pushDecals() {
             guard ready, let webView = webView else { return }
             guard lastDecalToken != state.constructDecalToken else { return }
@@ -410,6 +473,7 @@ struct ConstructViewport: NSViewRepresentable {
 /// navigating to them (same fix as the 3D viewport's `DropForwardingWebView`).
 final class ConstructDropWebView: WKWebView {
     var onFileDrop: (([URL]) -> Void)?
+    var onImageDrop: ((String) -> Void)?   // image data URL → enter artwork placement
 
     private func fileURLs(_ sender: NSDraggingInfo) -> [URL] {
         let opts: [NSPasteboard.ReadingOptionKey: Any] = [.urlReadingFileURLsOnly: true]
@@ -433,15 +497,13 @@ final class ConstructDropWebView: WKWebView {
         let imageExts: Set<String> = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff", "tif", "heic"]
         if let img = urls.first(where: { imageExts.contains($0.pathExtension.lowercased()) }),
            let data = try? Data(contentsOf: img) {
-            let pt = convert(sender.draggingLocation, from: nil)
-            let nx = Double(pt.x / max(bounds.width, 1)) * 2 - 1
-            let ny = Double(pt.y / max(bounds.height, 1)) * 2 - 1   // AppKit y is bottom-up = NDC y
             let mimes = ["png": "image/png", "gif": "image/gif", "webp": "image/webp", "bmp": "image/bmp"]
             let mime = mimes[img.pathExtension.lowercased()] ?? "image/jpeg"
             let dataURL = "data:\(mime);base64,\(data.base64EncodedString())"
-            DispatchQueue.main.async {
-                self.evaluateJavaScript("applyDroppedDecal('\(dataURL)', \(nx), \(ny));", completionHandler: nil)
-            }
+            // Dropping an image opens artwork-placement mode (bird's-eye; click a body
+            // to place it, then move / scale / rotate / flip), rather than committing
+            // to the panel under the cursor.
+            onImageDrop?(dataURL)
             return true
         }
         onFileDrop?(urls)
