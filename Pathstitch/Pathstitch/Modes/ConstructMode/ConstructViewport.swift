@@ -149,6 +149,9 @@ struct ConstructViewport: NSViewRepresentable {
             case "stretchReport":
                 let pct = json["maxStretchPct"] as? Double ?? 0
                 DispatchQueue.main.async { self.state.constructMaxStretchPct = pct }
+            case "seamFit":
+                let fits = json["seams"] as? [[String: Any]] ?? []
+                DispatchQueue.main.async { self.state.applySeamFit(fits) }
             case "consoleError":
                 let msg = json["message"] as? String ?? ""
                 let src = json["source"] as? String ?? ""

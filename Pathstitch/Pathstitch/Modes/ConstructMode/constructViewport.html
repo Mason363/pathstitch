@@ -451,13 +451,23 @@ function seamPairs(seam, ca, cb){
   }
   return seam.pairs;
 }
-function measureSeam(fixed, fIdxKey, moving, mIdxKey, pairs){
+function measureSeam(seam, fixed, fIdxKey, moving, mIdxKey, pairs){
   let mx=0, sum=0, n=0;
   for(const pr of pairs){
     const g=len(sub(holeWorld(fixed, pr[fIdxKey]), holeWorld(moving, pr[mIdxKey])));
     if(g>mx) mx=g; sum+=g; n++;
   }
-  return {maxGap:mx, meanGap:n?sum/n:0};
+  return {id:(seam&&seam.id)||"", maxGap:mx, meanGap:n?sum/n:0,
+          nA:fixed.holes.length, nB:moving.holes.length};
+}
+// Push per-seam fit (gap after seating + hole counts) to Swift, only when it
+// actually moves — this is the data behind the inspector's fit verdict.
+let lastSeamFitJSON="";
+function postSeamFit(){
+  const arr=seamReport.map(r=>({id:r.id, maxGap:+r.maxGap.toFixed(3),
+                                meanGap:+r.meanGap.toFixed(3), nA:r.nA, nB:r.nB}));
+  const j=JSON.stringify(arr);
+  if(j!==lastSeamFitJSON){ lastSeamFitJSON=j; post({op:"seamFit", seams:arr}); }
 }
 // Non-rigid "deform / ease": gently pull the moving panel's seam holes onto the
 // fixed targets (each hole tugs its triangle's verts), then re-satisfy the bars
@@ -493,7 +503,7 @@ function solveStitches(){
     if(cb.panelId===ground && ca.panelId!==ground){ fixed=cb; moving=ca; fKey=1; mKey=0; }
     if(fixed.panelId===moving.panelId){
       // same-panel corner seam — the two runs already meet once folded
-      seamReport.push(measureSeam(fixed,fKey,moving,mKey,pairs)); continue;
+      seamReport.push(measureSeam(seam,fixed,fKey,moving,mKey,pairs)); continue;
     }
     const mp=PANEL_BY_ID[moving.panelId]; if(!mp) continue;
     const src=[], dst=[];
@@ -504,7 +514,7 @@ function solveStitches(){
     // gathers as thread that converges many holes onto fewer — 0% stretch. Only
     // Deform-to-Fit actually compresses/stretches the panel so holes meet 1:1.
     if(seam.mode==="deform") deformSeam(fixed,fKey,moving,mKey,mp,pairs);
-    seamReport.push(measureSeam(fixed,fKey,moving,mKey,pairs));
+    seamReport.push(measureSeam(seam,fixed,fKey,moving,mKey,pairs));
   }
   // Glue (weld): seat panel B onto panel A along their *closest* boundary run —
   // exactly mating a glue tab to the panel it's glued onto. Rigid, no thread.
@@ -566,6 +576,7 @@ function recomputePose(){
   updateChainLines();
   updateThread();
   reportStretch();
+  postSeamFit();
 }
 
 // ---- hole markers + thread (ride the live folded mesh) ---------------------

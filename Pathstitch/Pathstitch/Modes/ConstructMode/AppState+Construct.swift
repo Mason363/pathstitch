@@ -292,6 +292,7 @@ extension AppState {
             let lenB = (data["lenB"] as? Double) ?? 0
             let mismatch = (data["mismatch"] as? Double) ?? 0
             let reversed = (data["reversed"] as? Bool) ?? false
+            let nA = ca.holes.count, nB = cb.holes.count
             await MainActor.run {
                 guard let i = self.constructSeams.firstIndex(where: { $0.id == seamId }) else { return }
                 self.constructSeams[i].pairs = pairs
@@ -299,12 +300,32 @@ extension AppState {
                 self.constructSeams[i].lenB = lenB
                 self.constructSeams[i].mismatch = mismatch
                 self.constructSeams[i].reversed = reversed
+                self.constructSeams[i].holesA = nA   // counts known now; gap fills after pose
+                self.constructSeams[i].holesB = nB
                 self.constructSeamStateToken += 1
             }
         } catch {
             // matching failure leaves the seam un-paired; the viewport just won't
             // draw thread for it. Surface quietly.
             await MainActor.run { self.errorMessage = "Stitch match failed: \(error.localizedDescription)" }
+        }
+    }
+
+    /// Applies the viewport's live fit report (gap after seating + hole counts)
+    /// onto the matching seams, so the inspector verdict reflects the real pose.
+    func applySeamFit(_ fits: [[String: Any]]) {
+        // Mutating constructSeams refreshes the inspector (AppState is @Observable);
+        // the seam-state token is deliberately NOT bumped, so this fit update never
+        // re-pushes to the viewport and disturbs the live pose.
+        for fit in fits {
+            guard let idStr = fit["id"] as? String, let id = UUID(uuidString: idStr),
+                  let i = constructSeams.firstIndex(where: { $0.id == id }) else { continue }
+            let gap = (fit["maxGap"] as? Double) ?? 0
+            let nA = (fit["nA"] as? Int) ?? constructSeams[i].holesA
+            let nB = (fit["nB"] as? Int) ?? constructSeams[i].holesB
+            constructSeams[i].maxGapMm = gap
+            constructSeams[i].holesA = nA
+            constructSeams[i].holesB = nB
         }
     }
 

@@ -121,9 +121,25 @@ struct StitchSeam: Codable, Identifiable, Hashable {
     var lenB: Double = 0
     var mismatch: Double = 0    // 0…1 perimeter mismatch (>0.12 surfaces a warning)
     var reversed: Bool = false  // B was wound the other way and auto-flipped
+    // Live fit, reported by the viewport after seating (recomputed each pose).
+    var holesA: Int = 0
+    var holesB: Int = 0
+    var maxGapMm: Double = 0    // worst hole-to-hole gap after the seam is seated
 
     /// True when the seams differ enough in length to warrant a heads-up.
-    var hasWarning: Bool { mismatch >= 0.12 }
+    var hasWarning: Bool { verdict == .mismatch }
+
+    /// Where this seam lands against the fit tolerances. Defaults here are sane
+    /// for hobbyists; Phase 3 makes the thresholds user-settable.
+    enum Verdict { case match, ease, mismatch }
+    var verdict: Verdict {
+        let countDelta = abs(holesA - holesB)
+        if mismatch >= 0.12 || maxGapMm > 4 || (countDelta > 0 && (holesA == 0 || holesB == 0)) {
+            return .mismatch
+        }
+        if countDelta == 0 && mismatch < 0.04 && maxGapMm <= 1.5 { return .match }
+        return .ease
+    }
 }
 
 /// PBR material + thickness for the Posing & Mockup phase (Phase 4). Stored now

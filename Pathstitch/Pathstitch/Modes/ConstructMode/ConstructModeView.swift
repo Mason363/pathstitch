@@ -321,9 +321,24 @@ struct ConstructModeView: View {
         }
     }
 
+    /// The plain-English verdict label + colour for a seam's fit.
+    private func verdictStyle(_ v: StitchSeam.Verdict) -> (String, Color) {
+        switch v {
+        case .match:    return ("FITS", .green)
+        case .ease:     return ("EASE", Color(hex: "C9A36A"))
+        case .mismatch: return ("MISMATCH", .orange)
+        }
+    }
+
     private func seamRow(_ seam: StitchSeam) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
+        let (vLabel, vColor) = verdictStyle(seam.verdict)
+        return VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 6) {
+                Text(vLabel)
+                    .font(PlasticityFont.label.weight(.bold)).tracking(0.5)
+                    .foregroundColor(vColor)
+                    .padding(.horizontal, 6).padding(.vertical, 1)
+                    .background(RoundedRectangle(cornerRadius: 3).fill(vColor.opacity(0.18)))
                 Text("Chain \(seam.chainA) → \(seam.chainB)")
                     .font(PlasticityFont.label).foregroundColor(.text_primary)
                 Spacer()
@@ -333,19 +348,21 @@ struct ConstructModeView: View {
                 .buttonStyle(.plain).foregroundColor(.text_secondary).help("Unstitch")
             }
 
-            // Mismatch readout + warning when the two seams differ in length.
-            HStack(spacing: 6) {
-                Text(String(format: "%.0f vs %.0f mm", seam.lenA, seam.lenB))
-                    .font(PlasticityFont.label.monospacedDigit())
-                    .foregroundColor(.text_secondary)
-                Spacer()
-                Text(String(format: "%.0f%% mismatch", seam.mismatch * 100))
-                    .font(PlasticityFont.label.monospacedDigit())
-                    .foregroundColor(seam.hasWarning ? .orange : .text_secondary)
-            }
-            if seam.hasWarning {
-                Text("Seams differ by \(Int(seam.mismatch * 100))% — eased (gathered). Switch to Deform to Fit to stretch them flush, or fix hole spacing in 2D.")
+            // The three numbers a maker actually checks: hole counts, edge lengths,
+            // and the gap left after the seam is seated in 3D.
+            fitStat("Holes", "\(seam.holesA) vs \(seam.holesB)",
+                    warn: seam.holesA != seam.holesB && seam.holesA > 0 && seam.holesB > 0)
+            fitStat("Length", String(format: "%.0f vs %.0f mm", seam.lenA, seam.lenB),
+                    warn: seam.mismatch >= 0.12)
+            fitStat("Gap after seating", String(format: "%.1f mm", seam.maxGapMm),
+                    warn: seam.maxGapMm > 4)
+
+            if seam.verdict == .mismatch {
+                Text("Seams differ too much to sew cleanly. Try Deform to Fit, or fix the hole count/spacing in 2D.")
                     .font(PlasticityFont.label).foregroundColor(.orange.opacity(0.9))
+            } else if seam.verdict == .ease {
+                Text("Slightly off — eased (gathered) losslessly. Switch to Deform to Fit for a flush 1:1.")
+                    .font(PlasticityFont.label).foregroundColor(.text_secondary.opacity(0.8))
             }
 
             // Mismatch policy.
@@ -358,9 +375,18 @@ struct ConstructModeView: View {
             Text(seam.mode.blurb)
                 .font(PlasticityFont.label).foregroundColor(.text_secondary.opacity(0.7))
         }
-        .padding(6)
+        .padding(7)
         .background(Color.bg_selected.opacity(0.5))
         .cornerRadius(5)
+    }
+
+    private func fitStat(_ label: String, _ value: String, warn: Bool) -> some View {
+        HStack {
+            Text(label).font(PlasticityFont.label).foregroundColor(.text_secondary)
+            Spacer()
+            Text(value).font(PlasticityFont.label.monospacedDigit())
+                .foregroundColor(warn ? .orange : .text_primary)
+        }
     }
 
     // MARK: Mockup material — leather colour + thickness
