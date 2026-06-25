@@ -1,0 +1,840 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; padding: 0; overflow: hidden; background: #1e1f22; }
+  #c { width: 100vw; height: 100vh; display: block; }
+  #hud {
+    position: fixed; left: 10px; bottom: 8px; font: 11px ui-monospace, monospace;
+    color: #9aa0a6; pointer-events: none; user-select: none;
+  }
+  #hud .ok { color: #57c777; }
+  #hud .warn { color: #e2a23b; }
+</style>
+<!-- Same Three.js the 3D viewport uses (r128 global build + OrbitControls). -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">construct · drop a .dxf / .stch, or fold the active sketch</div>
+<script>
+"use strict";
+
+// ---- bridge helpers -------------------------------------------------------
+function post(obj){ try{ window.webkit.messageHandlers.construct.postMessage(JSON.stringify(obj)); }catch(e){} }
+window.onerror = function(m,s,l){ post({op:"consoleError", message:String(m), source:String(s||""), lineno:l||0}); };
+
+// ---- tiny vec3 math (flat [x,y,z] arrays) ---------------------------------
+function sub(a,b){ return [a[0]-b[0],a[1]-b[1],a[2]-b[2]]; }
+function add(a,b){ return [a[0]+b[0],a[1]+b[1],a[2]+b[2]]; }
+function scl(a,s){ return [a[0]*s,a[1]*s,a[2]*s]; }
+function dot(a,b){ return a[0]*b[0]+a[1]*b[1]+a[2]*b[2]; }
+function cross(a,b){ return [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]; }
+function len(a){ return Math.hypot(a[0],a[1],a[2]); }
+function norm(a){ const l=len(a)||1; return [a[0]/l,a[1]/l,a[2]/l]; }
+// Rodrigues: rotate point p about axis through origin `o`, unit dir `u`, angle t.
+function rotAbout(p,o,u,t){
+  const v=sub(p,o), c=Math.cos(t), s=Math.sin(t);
+  const term1=scl(v,c);
+  const term2=scl(cross(u,v),s);
+  const term3=scl(u, dot(u,v)*(1-c));
+  return add(o, add(add(term1,term2),term3));
+}
+
+// ---- three.js scene -------------------------------------------------------
+const canvas=document.getElementById("c");
+const scene=new THREE.Scene();
+scene.background=new THREE.Color(0x1e1f22);
+let camera=new THREE.PerspectiveCamera(45, window.innerWidth/window.innerHeight, 0.1, 100000);
+camera.position.set(120,140,180);
+const renderer=new THREE.WebGLRenderer({canvas, antialias:true});
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(window.devicePixelRatio);
+
+const controls=new THREE.OrbitControls(camera, renderer.domElement);
+controls.enableDamping=true; controls.dampingFactor=0.08;
+controls.mouseButtons={ LEFT:null, MIDDLE:THREE.MOUSE.PAN, RIGHT:THREE.MOUSE.ROTATE };
+
+scene.add(new THREE.AmbientLight(0xffffff,0.5));
+const d1=new THREE.DirectionalLight(0xffffff,0.7); d1.position.set(200,400,300); scene.add(d1);
+const d2=new THREE.DirectionalLight(0xffffff,0.25); d2.position.set(-200,-100,-300); scene.add(d2);
+const grid=new THREE.GridHelper(600,60,0x3a3d42,0x2a2c30); grid.position.y=0; scene.add(grid);
+
+const root=new THREE.Group(); scene.add(root);
+
+// ---- model state ----------------------------------------------------------
+let MODEL=null;           // {panels:[...], groundPanel}
+let PANELS=[];            // per-panel runtime: {rest, X, edges, regions, tree, mesh, foldLine, wire}
+let PANEL_BY_ID={};       // id -> panel
+let CONTROLS={ groundPanel:0, foldAngle:{} };  // foldAngle["pid-fid"]=deg
+let TOOL="select";
+let needsPose=false, hudT=0;
+
+// Stitch flagship state -----------------------------------------------------
+let CHAINS=[];            // [{id, panelId, closed, holes:[{x,y,tri,bary}]}]
+let CHAIN_BY_ID={};
+let SEAMS=[];             // [{id, chainA, chainB, mode, pairs:[[a,b]], reversed}]
+let GLUES=[];             // [{panelA, panelB}] — rigid weld where panel edges meet
+let SHOW_THREAD=true;
+let SELECTED_CHAIN=-1;    // chain the user has picked (first half of a stitch)
+let CREASE_PT=null;       // first clicked point of a new fold being drawn in 3D
+let creaseMark=null;      // marker dot for that first point
+let holeMesh=null;        // InstancedMesh of all hole markers (rides the fold)
+let HOLE_SLOTS=[];        // per-instance {chainId, k} parallel to holeMesh
+let threadGroup=new THREE.Group(); scene.add(threadGroup);
+let seamReport=[];        // per-seam gap stats for the HUD
+
+// Drag brush (Phase 3) — Blender-style soft grab, never stretches -----------
+let BRUSH_R=25;           // brush radius (world mm)
+let DRAG=null;            // active drag: {panel, idxs, w, rest, n, P0}
+let brushRing=null;       // hover ring showing the brush footprint
+// Fold stiffness 0..1: real leather can't crease infinitely sharp — low values
+// round the folds over a radius, high values keep them tight. Drives a
+// curvature smoothing pass after folding (bars re-projected → still 0% stretch).
+let STIFFNESS=0.6;
+
+const COL_GROUND=0x6b8caf, COL_FLAP=0xb98a5e, COL_FOLD=0xff7a1a, COL_WIRE=0x000000;
+const COL_HOLE=0x202225, COL_HOLE_SEL=0x35c1ff, COL_THREAD=0xf0e2c0;
+const _SPHERE=new THREE.SphereGeometry(1,10,8);   // unit sphere, scaled per hole
+const _IDENT=new THREE.Matrix4();
+
+function clearPanels(){
+  for(const p of PANELS){
+    if(p.mesh){ root.remove(p.mesh); p.mesh.geometry.dispose(); p.mesh.material.dispose(); }
+    if(p.foldLine){ root.remove(p.foldLine); p.foldLine.geometry.dispose(); p.foldLine.material.dispose(); }
+    if(p.wire){ root.remove(p.wire); p.wire.geometry.dispose(); p.wire.material.dispose(); }
+  }
+  PANELS=[]; PANEL_BY_ID={};
+  if(holeMesh){ root.remove(holeMesh); holeMesh.geometry.dispose(); holeMesh.material.dispose(); holeMesh=null; }
+  HOLE_SLOTS=[];
+  clearThread();
+}
+function clearThread(){
+  for(let i=threadGroup.children.length-1;i>=0;i--){ const c=threadGroup.children[i]; threadGroup.remove(c); c.geometry.dispose(); c.material.dispose(); }
+}
+
+// union-find ----------------------------------------------------------------
+function makeUF(n){ const p=[...Array(n).keys()];
+  function f(x){ while(p[x]!==x){ p[x]=p[p[x]]; x=p[x]; } return x; }
+  return { find:f, union:(a,b)=>{ p[f(a)]=f(b); } };
+}
+
+// Partition a panel's faces into rigid regions separated by FOLD hinges, then
+// build the fold tree (root = ground/base region) used for forward folding.
+function buildRegions(panel, isGround){
+  const tris=panel.triangles, hinges=panel.hinges;
+  const ekey=(a,b)=> a<b ? a+"_"+b : b+"_"+a;
+  // fold edges (the cuts between regions) + their foldId
+  const foldOf={};
+  for(const h of hinges){ if(h.foldId>=0) foldOf[ekey(h.v0,h.v1)]=h.foldId; }
+  // edge -> incident faces
+  const edgeFaces={};
+  tris.forEach((t,fi)=>{
+    [[t[0],t[1]],[t[1],t[2]],[t[2],t[0]]].forEach(([a,b])=>{
+      const k=ekey(a,b); (edgeFaces[k]||(edgeFaces[k]=[])).push(fi);
+    });
+  });
+  // union faces across non-fold shared edges
+  const uf=makeUF(tris.length);
+  for(const k in edgeFaces){
+    const fs=edgeFaces[k];
+    if(fs.length===2 && foldOf[k]===undefined) uf.union(fs[0],fs[1]);
+  }
+  // regions
+  const regOf=tris.map((_,fi)=>uf.find(fi));
+  const regIds=[...new Set(regOf)];
+  const idx=new Map(regIds.map((r,i)=>[r,i]));
+  const region=regIds.map(()=>({faces:[], verts:new Set()}));
+  tris.forEach((t,fi)=>{
+    const r=idx.get(regOf[fi]); region[r].faces.push(fi);
+    t.forEach(v=>region[r].verts.add(v));
+  });
+  // region graph from fold edges (regionA, regionB, foldId, sharedVerts)
+  const radj=region.map(()=>[]);
+  for(const k in edgeFaces){
+    const fs=edgeFaces[k]; if(fs.length!==2 || foldOf[k]===undefined) continue;
+    const ra=idx.get(regOf[fs[0]]), rb=idx.get(regOf[fs[1]]);
+    if(ra===rb) continue;
+    const [a,b]=k.split("_").map(Number);
+    radj[ra].push({to:rb, foldId:foldOf[k], v:[a,b]});
+    radj[rb].push({to:ra, foldId:foldOf[k], v:[a,b]});
+  }
+  // root = base region = the one touching the most fold lines (a box base hubs
+  // all four flaps); ties broken by vertex count. Fold-degree (not size) matters
+  // when base and flaps are equal-area, as in a box net.
+  let rootR=0;
+  for(let i=1;i<region.length;i++){
+    const di=radj[i].length, dr=radj[rootR].length;
+    if(di>dr || (di===dr && region[i].verts.size>region[rootR].verts.size)) rootR=i;
+  }
+  // BFS tree
+  const parent=region.map(()=>-1), parentFold=region.map(()=>-1), parentVerts=region.map(()=>null);
+  const order=[], seen=region.map(()=>false); seen[rootR]=true; const q=[rootR];
+  while(q.length){ const r=q.shift(); order.push(r);
+    for(const e of radj[r]) if(!seen[e.to]){ seen[e.to]=true; parent[e.to]=r; parentFold[e.to]=e.foldId; parentVerts[e.to]=collectFoldAxis(panel,e.foldId,region[e.to].verts); q.push(e.to); }
+  }
+  // subtree vertex sets (region + descendants)
+  const children=region.map(()=>[]); for(let r=0;r<region.length;r++) if(parent[r]>=0) children[parent[r]].push(r);
+  const subtree=region.map(()=>null);
+  function buildSub(r){ const s=new Set(region[r].verts); for(const c of children[r]){ buildSub(c); subtree[c].forEach(v=>s.add(v)); } subtree[r]=s; }
+  buildSub(rootR);
+  return { region, regOf:tris.map((_,fi)=>idx.get(regOf[fi])), rootR, parent, parentFold, parentVerts, order, subtree, isGround };
+}
+
+// The fold axis between a child region and its parent: the two extreme vertices
+// of that fold's hinge chain (a straight fold is collinear; a curved fold uses
+// its chord, which the PBD relax pass then smooths into the developable curve).
+function collectFoldAxis(panel, foldId, regionVerts){
+  const pts=new Set();
+  for(const h of panel.hinges){ if(h.foldId===foldId){ pts.add(h.v0); pts.add(h.v1); } }
+  const arr=[...pts];
+  // farthest pair (in rest space)
+  let bi=0,bj=1,bd=-1;
+  for(let i=0;i<arr.length;i++) for(let j=i+1;j<arr.length;j++){
+    const a=panel.rest3[arr[i]], b=panel.rest3[arr[j]];
+    const dd=(a[0]-b[0])**2+(a[1]-b[1])**2+(a[2]-b[2])**2;
+    if(dd>bd){ bd=dd; bi=i; bj=j; }
+  }
+  return [arr[bi], arr[bj]];
+}
+
+// ---- load model -----------------------------------------------------------
+window.loadConstructModel=function(jsonStr){
+  let m; try{ m=JSON.parse(jsonStr); }catch(e){ post({op:"consoleError",message:"bad model json"}); return; }
+  MODEL=m; clearPanels();
+  for(const pj of (m.panels||[])){
+    const rest3=pj.vertices.map(v=>[v[0],v[1],v[2]]);
+    const panel={ id:pj.id, triangles:pj.triangles, hinges:pj.hinges, rest3,
+                  v2d:pj.vertices2d||pj.vertices.map(v=>[v[0],v[2]]),
+                  X:rest3.map(v=>v.slice()) };
+    // unique edges + rest lengths (the inextensible "bars")
+    const seen=new Set(), edges=[];
+    for(const e of pj.edges){ const a=e[0],b=e[1],k=a<b?a+"_"+b:b+"_"+a; if(!seen.has(k)){ seen.add(k); edges.push([a,b, len(sub(rest3[a],rest3[b]))]); } }
+    panel.edges=edges;
+    panel.asm=null;        // assembly transform {R,t} set by the stitch solver
+    panel.tree=buildRegions(panel, pj.id===(m.groundPanel||0));
+    // vertex adjacency + boundary (interior verts get crease-rounded; boundary
+    // verts stay so the cut outline stays crisp).
+    const nbr=panel.X.map(()=>new Set()), ec={};
+    const ek=(a,b)=>a<b?a+"_"+b:b+"_"+a;
+    for(const t of panel.triangles){ for(const [a,b] of [[t[0],t[1]],[t[1],t[2]],[t[2],t[0]]]){
+      nbr[a].add(b); nbr[b].add(a); const k=ek(a,b); ec[k]=(ec[k]||0)+1; } }
+    panel.nbr=nbr.map(s=>[...s]);
+    const bnd=new Set();
+    for(const k in ec){ if(ec[k]===1){ const [a,b]=k.split("_").map(Number); bnd.add(a); bnd.add(b); } }
+    panel.boundary=bnd;
+    buildPanelMeshes(panel);
+    PANELS.push(panel); PANEL_BY_ID[panel.id]=panel;
+  }
+  CONTROLS.groundPanel = m.groundPanel||0;
+  buildHoleChains(m.holeChains||[]);
+  // Pose once (flat) so the meshes have real positions, then frame the camera.
+  recomputePose(); recenterCamera();
+};
+
+// Build the sewing-hole markers (one InstancedMesh; each instance rides its
+// panel's mesh via the stored barycentric weights so holes follow every fold).
+function buildHoleChains(chains){
+  CHAINS=chains; CHAIN_BY_ID={}; HOLE_SLOTS=[];
+  let total=0;
+  for(const c of chains){ CHAIN_BY_ID[c.id]=c; total+=c.holes.length; }
+  if(holeMesh){ root.remove(holeMesh); holeMesh.geometry.dispose(); holeMesh.material.dispose(); holeMesh=null; }
+  if(total===0) return;
+  // marker radius from a typical pitch (kept readable but not chunky)
+  let pitch=0; let np=0; for(const c of chains){ if(c.pitch){ pitch+=c.pitch; np++; } }
+  pitch = np? pitch/np : 4; const rad=Math.max(0.4, Math.min(pitch*0.18, 2.0));
+  // base white so per-instance colors (which multiply the base) read true.
+  const mat=new THREE.MeshStandardMaterial({color:0xffffff, roughness:0.5, metalness:0.1});
+  holeMesh=new THREE.InstancedMesh(_SPHERE, mat, total);
+  holeMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  holeMesh.userData.rad=rad;
+  let s=0;
+  for(const c of chains){ for(let k=0;k<c.holes.length;k++){ HOLE_SLOTS.push({chainId:c.id, k}); s++; } }
+  root.add(holeMesh);
+  // color buffer so a picked chain can light up
+  holeMesh.instanceColor=new THREE.InstancedBufferAttribute(new Float32Array(total*3), 3);
+  for(let i=0;i<total;i++) holeMesh.setColorAt(i, new THREE.Color(COL_HOLE));
+}
+
+// World position of hole k on a chain = barycentric blend of its triangle's
+// three (already folded + assembly-transformed) panel vertices.
+function holeWorld(chain, k){
+  const h=chain.holes[k]; const p=PANEL_BY_ID[chain.panelId];
+  if(!p) return [h.x,0,h.y];
+  const t=p.triangles[h.tri]; if(!t) return [h.x,0,h.y];
+  const A=p.X[t[0]], B=p.X[t[1]], C=p.X[t[2]], w=h.bary;
+  return [A[0]*w[0]+B[0]*w[1]+C[0]*w[2],
+          A[1]*w[0]+B[1]*w[1]+C[1]*w[2],
+          A[2]*w[0]+B[2]*w[1]+C[2]*w[2]];
+}
+
+function buildPanelMeshes(panel){
+  const n=panel.X.length;
+  const pos=new Float32Array(n*3);
+  const geo=new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(pos,3));
+  const idx=[]; for(const t of panel.triangles){ idx.push(t[0],t[1],t[2]); }
+  geo.setIndex(idx);
+  const isGround=panel.id===CONTROLS.groundPanel;
+  const mat=new THREE.MeshStandardMaterial({ color:isGround?COL_GROUND:COL_FLAP, roughness:0.75, metalness:0.05, side:THREE.DoubleSide, flatShading:false });
+  const mesh=new THREE.Mesh(geo,mat); mesh.userData.panelId=panel.id; root.add(mesh); panel.mesh=mesh;
+
+  // faint wireframe of every triangle edge (reads the tessellation/curvature)
+  const wpos=new Float32Array(panel.edges.length*2*3);
+  const wgeo=new THREE.BufferGeometry(); wgeo.setAttribute("position", new THREE.BufferAttribute(wpos,3));
+  panel.wire=new THREE.LineSegments(wgeo, new THREE.LineBasicMaterial({color:COL_WIRE, transparent:true, opacity:0.12}));
+  root.add(panel.wire);
+
+  // fold edges highlighted + used for picking; userData.segs maps segment→foldId
+  const fsegs=[]; const segMeta=[];
+  for(const h of panel.hinges){ if(h.foldId>=0){ fsegs.push([h.v0,h.v1]); segMeta.push({panelId:panel.id, foldId:h.foldId}); } }
+  panel.foldSegs=fsegs;
+  const fpos=new Float32Array(Math.max(fsegs.length,1)*2*3);
+  const fgeo=new THREE.BufferGeometry(); fgeo.setAttribute("position", new THREE.BufferAttribute(fpos,3));
+  panel.foldLine=new THREE.LineSegments(fgeo, new THREE.LineBasicMaterial({color:COL_FOLD, linewidth:2}));
+  panel.foldLine.userData.segs=segMeta; panel.foldLine.userData.panelId=panel.id;
+  root.add(panel.foldLine);
+}
+
+// ---- Kabsch rigid alignment (Horn quaternion, Jacobi 4x4 eigensolve) -------
+// The "shift + rotate so one seam lands over the other." Given matched hole
+// pairs, it returns the rotation+translation that best seats the moving panel's
+// seam onto the fixed one — no stretching, just a rigid move.
+function quatToMat(q){
+  let w=q[0],x=q[1],y=q[2],z=q[3]; const n=Math.hypot(w,x,y,z)||1; w/=n;x/=n;y/=n;z/=n;
+  return [1-2*(y*y+z*z), 2*(x*y-z*w),   2*(x*z+y*w),
+          2*(x*y+z*w),   1-2*(x*x+z*z), 2*(y*z-x*w),
+          2*(x*z-y*w),   2*(y*z+x*w),   1-2*(x*x+y*y)];
+}
+function largestEigenvector4(A){
+  const n=4, a=A.map(r=>r.slice());
+  const V=[[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]];
+  for(let sweep=0; sweep<100; sweep++){
+    let off=0; for(let i=0;i<n;i++) for(let j=i+1;j<n;j++) off+=a[i][j]*a[i][j];
+    if(off<1e-20) break;
+    for(let p=0;p<n;p++) for(let q=p+1;q<n;q++){
+      if(Math.abs(a[p][q])<1e-18) continue;
+      const theta=(a[q][q]-a[p][p])/(2*a[p][q]);
+      const denom=Math.abs(theta)+Math.sqrt(theta*theta+1);
+      const t=(theta>=0?1:-1)/denom, c=1/Math.sqrt(t*t+1), s=t*c;
+      const apq=a[p][q];
+      a[p][p]-=t*apq; a[q][q]+=t*apq; a[p][q]=0; a[q][p]=0;
+      for(let k=0;k<n;k++){
+        if(k!==p && k!==q){
+          const akp=a[k][p], akq=a[k][q];
+          a[k][p]=c*akp - s*akq; a[p][k]=a[k][p];
+          a[k][q]=s*akp + c*akq; a[q][k]=a[k][q];
+        }
+        const vkp=V[k][p], vkq=V[k][q];
+        V[k][p]=c*vkp - s*vkq; V[k][q]=s*vkp + c*vkq;
+      }
+    }
+  }
+  let best=0, bv=a[0][0];
+  for(let i=1;i<n;i++){ if(a[i][i]>bv){ bv=a[i][i]; best=i; } }
+  return [V[0][best],V[1][best],V[2][best],V[3][best]];
+}
+function kabsch(src,dst){
+  const n=Math.min(src.length,dst.length); if(n<1) return null;
+  let cs=[0,0,0], cd=[0,0,0];
+  for(let i=0;i<n;i++){ cs=add(cs,src[i]); cd=add(cd,dst[i]); }
+  cs=scl(cs,1/n); cd=scl(cd,1/n);
+  let Sxx=0,Sxy=0,Sxz=0,Syx=0,Syy=0,Syz=0,Szx=0,Szy=0,Szz=0;
+  for(let i=0;i<n;i++){
+    const a=sub(src[i],cs), b=sub(dst[i],cd);
+    Sxx+=a[0]*b[0]; Sxy+=a[0]*b[1]; Sxz+=a[0]*b[2];
+    Syx+=a[1]*b[0]; Syy+=a[1]*b[1]; Syz+=a[1]*b[2];
+    Szx+=a[2]*b[0]; Szy+=a[2]*b[1]; Szz+=a[2]*b[2];
+  }
+  const N=[
+    [Sxx+Syy+Szz, Syz-Szy,      Szx-Sxz,      Sxy-Syx],
+    [Syz-Szy,     Sxx-Syy-Szz,  Sxy+Syx,      Szx+Sxz],
+    [Szx-Sxz,     Sxy+Syx,     -Sxx+Syy-Szz,  Syz+Szy],
+    [Sxy-Syx,     Szx+Sxz,      Syz+Szy,     -Sxx-Syy+Szz]];
+  const R=quatToMat(largestEigenvector4(N));
+  const t=[ cd[0]-(R[0]*cs[0]+R[1]*cs[1]+R[2]*cs[2]),
+            cd[1]-(R[3]*cs[0]+R[4]*cs[1]+R[5]*cs[2]),
+            cd[2]-(R[6]*cs[0]+R[7]*cs[1]+R[8]*cs[2]) ];
+  return {R, t};
+}
+function applyRigidInPlace(panel, R, t){
+  for(const x of panel.X){
+    const rx=R[0]*x[0]+R[1]*x[1]+R[2]*x[2]+t[0];
+    const ry=R[3]*x[0]+R[4]*x[1]+R[5]*x[2]+t[1];
+    const rz=R[6]*x[0]+R[7]*x[1]+R[8]*x[2]+t[2];
+    x[0]=rx; x[1]=ry; x[2]=rz;
+  }
+}
+
+// ---- stitch solve: seat moving panels onto fixed ones, then couple ---------
+function seamPairs(seam, ca, cb){
+  if(seam.mode==="oneToOne" || !(seam.pairs && seam.pairs.length)){
+    const n=Math.min(ca.holes.length, cb.holes.length), p=[];
+    for(let i=0;i<n;i++) p.push([i,i]); return p;
+  }
+  return seam.pairs;
+}
+function measureSeam(fixed, fIdxKey, moving, mIdxKey, pairs){
+  let mx=0, sum=0, n=0;
+  for(const pr of pairs){
+    const g=len(sub(holeWorld(fixed, pr[fIdxKey]), holeWorld(moving, pr[mIdxKey])));
+    if(g>mx) mx=g; sum+=g; n++;
+  }
+  return {maxGap:mx, meanGap:n?sum/n:0};
+}
+// Non-rigid "deform / ease": gently pull the moving panel's seam holes onto the
+// fixed targets (each hole tugs its triangle's verts), then re-satisfy the bars
+// so the panel puckers to fit without stretching — exactly easing a longer seam.
+function deformSeam(fixed, fIdxKey, moving, mIdxKey, mp, pairs){
+  const alpha=0.5, iters=6;
+  for(let it=0; it<iters; it++){
+    for(const pr of pairs){
+      const target=holeWorld(fixed, pr[fIdxKey]);
+      const h=moving.holes[pr[mIdxKey]]; const tri=mp.triangles[h.tri]; if(!tri) continue;
+      const d=sub(target, holeWorld(moving, pr[mIdxKey]));
+      for(let c=0;c<3;c++){ const vi=tri[c], wc=h.bary[c]*alpha;
+        mp.X[vi][0]+=d[0]*wc; mp.X[vi][1]+=d[1]*wc; mp.X[vi][2]+=d[2]*wc; }
+    }
+    for(let r=0;r<4;r++) for(const e of mp.edges){
+      const a=e[0],b=e[1],rest=e[2];
+      const dx=sub(mp.X[b],mp.X[a]); const dd=len(dx)||1e-9; const s=0.5*(dd-rest)/dd; const cx=scl(dx,s);
+      mp.X[a][0]+=cx[0]; mp.X[a][1]+=cx[1]; mp.X[a][2]+=cx[2];
+      mp.X[b][0]-=cx[0]; mp.X[b][1]-=cx[1]; mp.X[b][2]-=cx[2];
+    }
+  }
+}
+function solveStitches(){
+  for(const p of PANELS) p.asm=null;
+  seamReport=[];
+  const ground=CONTROLS.groundPanel;
+  for(const seam of SEAMS){
+    const ca=CHAIN_BY_ID[seam.chainA], cb=CHAIN_BY_ID[seam.chainB];
+    if(!ca||!cb) continue;
+    const pairs=seamPairs(seam, ca, cb);
+    // pairs are [aIdxInChainA, bIdxInChainB]; A is fixed, B moves by default.
+    let fixed=ca, moving=cb, fKey=0, mKey=1;
+    if(cb.panelId===ground && ca.panelId!==ground){ fixed=cb; moving=ca; fKey=1; mKey=0; }
+    if(fixed.panelId===moving.panelId){
+      // same-panel corner seam — the two runs already meet once folded
+      seamReport.push(measureSeam(fixed,fKey,moving,mKey,pairs)); continue;
+    }
+    const mp=PANEL_BY_ID[moving.panelId]; if(!mp) continue;
+    const src=[], dst=[];
+    for(const pr of pairs){ dst.push(holeWorld(fixed, pr[fKey])); src.push(holeWorld(moving, pr[mKey])); }
+    const RT=kabsch(src,dst);
+    if(RT) applyRigidInPlace(mp, RT.R, RT.t);
+    // Ease/gather (default) is LOSSLESS: rigid seating only, the excess length
+    // gathers as thread that converges many holes onto fewer — 0% stretch. Only
+    // Deform-to-Fit actually compresses/stretches the panel so holes meet 1:1.
+    if(seam.mode==="deform") deformSeam(fixed,fKey,moving,mKey,mp,pairs);
+    seamReport.push(measureSeam(fixed,fKey,moving,mKey,pairs));
+  }
+  // Glue (weld): seat panel B onto panel A along their *closest* boundary run —
+  // exactly mating a glue tab to the panel it's glued onto. Rigid, no thread.
+  for(const g of GLUES){
+    let A=g.panelA, B=g.panelB;
+    if(B===ground && A!==ground){ const t=A; A=B; B=t; }
+    const pa=PANEL_BY_ID[A], pb=PANEL_BY_ID[B]; if(!pa||!pb||A===B) continue;
+    const ba=[...pa.boundary], bb=[...pb.boundary]; if(!ba.length||!bb.length) continue;
+    const pairs=[];
+    for(const j of bb){ let bi=-1,bd=1e18; for(const i of ba){ const d=len(sub(pb.X[j],pa.X[i])); if(d<bd){ bd=d; bi=i; } } pairs.push([bi,j,bd]); }
+    pairs.sort((x,y)=>x[2]-y[2]);
+    const keep=pairs.slice(0, Math.max(3, Math.floor(pairs.length*0.4)));
+    const src=keep.map(p=>pb.X[p[1]].slice()), dst=keep.map(p=>pa.X[p[0]].slice());
+    const RT=kabsch(src,dst); if(RT) applyRigidInPlace(pb, RT.R, RT.t);
+  }
+}
+
+// ---- pose: forward fold (rigid origami) + PBD relax, then stitch solve ------
+function foldPanel(panel){
+  const T=panel.tree;
+  // start from flat rest
+  for(let i=0;i<panel.X.length;i++){ const r=panel.rest3[i]; panel.X[i][0]=r[0]; panel.X[i][1]=r[1]; panel.X[i][2]=r[2]; }
+  // forward fold each non-root region about its parent fold, in BFS order
+  for(const r of T.order){
+    if(T.parent[r]<0) continue;
+    const fid=T.parentFold[r];
+    const key=panel.id+"-"+fid;
+    let deg=CONTROLS.foldAngle[key]||0; if(!deg) continue;
+    const ax=T.parentVerts[r]; if(!ax) continue;
+    const a=panel.X[ax[0]], b=panel.X[ax[1]];
+    let u=norm(sub(b,a)); const o=a;
+    // orient axis so +angle lifts the subtree (+y), matching the inspector
+    const sub_=T.subtree[r]; let cen=[0,0,0],cn=0; sub_.forEach(v=>{ cen=add(cen,panel.X[v]); cn++; }); cen=scl(cen,1/Math.max(cn,1));
+    const test=rotAbout(cen,o,u, 0.05);
+    if(test[1]-cen[1] < 0) u=scl(u,-1);
+    const t=deg*Math.PI/180;
+    sub_.forEach(v=>{ const np=rotAbout(panel.X[v],o,u,t); panel.X[v][0]=np[0]; panel.X[v][1]=np[1]; panel.X[v][2]=np[2]; });
+  }
+  // PBD distance relax: keep the root region (base / pinned ground) anchored;
+  // project every bar to rest length so curved folds settle without stretching.
+  // The same inextensible-bar solver the stitch coupling above reuses.
+  const pinned=new Set();
+  T.region[T.rootR].verts.forEach(v=>pinned.add(v));
+  for(let it=0; it<10; it++){
+    for(const [a,b,rest] of panel.edges){
+      const wa=pinned.has(a)?0:1, wb=pinned.has(b)?0:1; const wsum=wa+wb; if(wsum===0) continue;
+      const dx=sub(panel.X[b],panel.X[a]); const d=len(dx)||1e-9; const s=(d-rest)/d;
+      const ca=scl(dx, (wa/wsum)*s), cb=scl(dx, (wb/wsum)*s);
+      if(wa){ panel.X[a][0]+=ca[0]; panel.X[a][1]+=ca[1]; panel.X[a][2]+=ca[2]; }
+      if(wb){ panel.X[b][0]-=cb[0]; panel.X[b][1]-=cb[1]; panel.X[b][2]-=cb[2]; }
+    }
+  }
+}
+// Soft folds: round the sharp creases by curvature (Laplacian) smoothing of
+// interior vertices, then re-project the bars so nothing stretches. Flat areas
+// have ~zero Laplacian so they don't move; only the creased band rounds out. The
+// number of passes scales with (1-stiffness): stiff = crisp crease, soft = wide bend.
+function roundCreases(panel){
+  if(STIFFNESS>=0.99 || !panel.nbr) return;
+  // Only round when this panel is actually folded — a flat panel has no crease to
+  // soften, and smoothing it would just nibble the silhouette (and add stretch).
+  let folded=false;
+  for(const h of panel.hinges){ if(h.foldId>=0 && Math.abs(CONTROLS.foldAngle[panel.id+"-"+h.foldId]||0)>3){ folded=true; break; } }
+  if(!folded) return;
+  const T=panel.tree, pinned=new Set(); T.region[T.rootR].verts.forEach(v=>pinned.add(v));
+  const rounds=Math.round((1-STIFFNESS)*16); if(rounds<=0) return;
+  const lambda=0.6, n=panel.X.length, tmp=panel.X.map(v=>v.slice());
+  for(let it=0; it<rounds; it++){
+    for(let i=0;i<n;i++){
+      if(pinned.has(i) || panel.boundary.has(i)){ tmp[i][0]=panel.X[i][0]; tmp[i][1]=panel.X[i][1]; tmp[i][2]=panel.X[i][2]; continue; }
+      const nb=panel.nbr[i]; if(!nb.length){ tmp[i][0]=panel.X[i][0]; tmp[i][1]=panel.X[i][1]; tmp[i][2]=panel.X[i][2]; continue; }
+      let cx=0,cy=0,cz=0; for(const j of nb){ cx+=panel.X[j][0]; cy+=panel.X[j][1]; cz+=panel.X[j][2]; } const m=nb.length;
+      tmp[i][0]=panel.X[i][0]+lambda*(cx/m-panel.X[i][0]);
+      tmp[i][1]=panel.X[i][1]+lambda*(cy/m-panel.X[i][1]);
+      tmp[i][2]=panel.X[i][2]+lambda*(cz/m-panel.X[i][2]);
+    }
+    for(let i=0;i<n;i++){ panel.X[i][0]=tmp[i][0]; panel.X[i][1]=tmp[i][1]; panel.X[i][2]=tmp[i][2]; }
+    for(let s=0;s<4;s++) for(const [a,b,rest] of panel.edges){
+      const wa=pinned.has(a)?0:1, wb=pinned.has(b)?0:1; const wsum=wa+wb; if(wsum===0) continue;
+      const dx=sub(panel.X[b],panel.X[a]); const d=len(dx)||1e-9; const sc=(d-rest)/d;
+      const ca=scl(dx,(wa/wsum)*sc), cb=scl(dx,(wb/wsum)*sc);
+      if(wa){ panel.X[a][0]+=ca[0]; panel.X[a][1]+=ca[1]; panel.X[a][2]+=ca[2]; }
+      if(wb){ panel.X[b][0]-=cb[0]; panel.X[b][1]-=cb[1]; panel.X[b][2]-=cb[2]; }
+    }
+  }
+}
+function recomputePose(){
+  for(const panel of PANELS) foldPanel(panel);   // each panel folds in place (sharp)
+  for(const panel of PANELS) roundCreases(panel); // soften creases per stiffness
+  solveStitches();                                // seat & sew panels together
+  for(const panel of PANELS) writePanelGeometry(panel);
+  updateHoleInstances();
+  updateThread();
+  reportStretch();
+}
+
+// ---- hole markers + thread (ride the live folded mesh) ---------------------
+function updateHoleInstances(){
+  if(!holeMesh) return;
+  const rad=holeMesh.userData.rad, m=new THREE.Matrix4(), col=new THREE.Color();
+  for(let i=0;i<HOLE_SLOTS.length;i++){
+    const slot=HOLE_SLOTS[i], c=CHAIN_BY_ID[slot.chainId]; if(!c) continue;
+    const w=holeWorld(c, slot.k);
+    m.makeScale(rad,rad,rad); m.setPosition(w[0],w[1],w[2]); holeMesh.setMatrixAt(i, m);
+    col.setHex(slot.chainId===SELECTED_CHAIN ? COL_HOLE_SEL : COL_HOLE); holeMesh.setColorAt(i, col);
+  }
+  holeMesh.instanceMatrix.needsUpdate=true;
+  if(holeMesh.instanceColor) holeMesh.instanceColor.needsUpdate=true;
+}
+// Stitch rendering — make a sewn seam *read* like real saddle stitching:
+//   • running stitch: bright thread segments hole→hole along each chain (the
+//     visible top thread you see on the leather — also the seam line in plain view)
+//   • cross / pull-through: a fainter thread linking each matched A↔B hole pair
+//     (the part of the thread that passes between the two panels)
+// Both ride the live folded/seated mesh, so the seam stays readable at any zoom.
+function updateThread(){
+  clearThread();
+  if(!SHOW_THREAD) return;
+  const run=[], cross=[];
+  for(const seam of SEAMS){
+    const ca=CHAIN_BY_ID[seam.chainA], cb=CHAIN_BY_ID[seam.chainB]; if(!ca||!cb) continue;
+    const pairs=seamPairs(seam, ca, cb);
+    for(const pr of pairs){
+      const A=holeWorld(ca, pr[0]), B=holeWorld(cb, pr[1]);
+      cross.push(A[0],A[1],A[2], B[0],B[1],B[2]);
+    }
+    for(const ch of [ca, cb]){
+      for(let k=0;k<ch.holes.length-1;k++){
+        const P=holeWorld(ch,k), Q=holeWorld(ch,k+1);
+        run.push(P[0],P[1],P[2], Q[0],Q[1],Q[2]);
+      }
+    }
+  }
+  if(cross.length){
+    const g=new THREE.BufferGeometry(); g.setAttribute("position", new THREE.Float32BufferAttribute(cross,3));
+    threadGroup.add(new THREE.LineSegments(g, new THREE.LineBasicMaterial({color:COL_THREAD, transparent:true, opacity:0.45})));
+  }
+  if(run.length){
+    const g=new THREE.BufferGeometry(); g.setAttribute("position", new THREE.Float32BufferAttribute(run,3));
+    const mat=new THREE.LineBasicMaterial({color:COL_THREAD, linewidth:2});
+    mat.depthTest=false;  // keep the seam visible even where it hugs the surface
+    const seg=new THREE.LineSegments(g, mat); seg.renderOrder=3; threadGroup.add(seg);
+  }
+}
+
+function writePanelGeometry(panel){
+  const pos=panel.mesh.geometry.attributes.position.array;
+  for(let i=0;i<panel.X.length;i++){ pos[i*3]=panel.X[i][0]; pos[i*3+1]=panel.X[i][1]; pos[i*3+2]=panel.X[i][2]; }
+  panel.mesh.geometry.attributes.position.needsUpdate=true;
+  panel.mesh.geometry.computeVertexNormals();
+  // wire
+  const wp=panel.wire.geometry.attributes.position.array;
+  panel.edges.forEach(([a,b],i)=>{ const A=panel.X[a],B=panel.X[b]; wp[i*6]=A[0];wp[i*6+1]=A[1];wp[i*6+2]=A[2]; wp[i*6+3]=B[0];wp[i*6+4]=B[1];wp[i*6+5]=B[2]; });
+  panel.wire.geometry.attributes.position.needsUpdate=true;
+  // fold lines
+  const fp=panel.foldLine.geometry.attributes.position.array;
+  panel.foldSegs.forEach(([a,b],i)=>{ const A=panel.X[a],B=panel.X[b]; fp[i*6]=A[0];fp[i*6+1]=A[1];fp[i*6+2]=A[2]; fp[i*6+3]=B[0];fp[i*6+4]=B[1];fp[i*6+5]=B[2]; });
+  panel.foldLine.geometry.attributes.position.needsUpdate=true;
+  panel.foldLine.geometry.computeBoundingSphere();
+}
+
+let lastStretch=-1;
+function reportStretch(){
+  let mx=0;
+  for(const panel of PANELS) for(const [a,b,rest] of panel.edges){
+    const d=len(sub(panel.X[a],panel.X[b])); const e=Math.abs(d-rest)/(rest||1); if(e>mx) mx=e;
+  }
+  const pct=mx*100;
+  if(Math.abs(pct-lastStretch)>0.05){ lastStretch=pct; post({op:"stretchReport", maxStretchPct:pct}); }
+  const cls=pct<1?"ok":"warn";
+  let seamTxt="";
+  if(SEAMS.length){
+    let worst=0; for(const r of seamReport) if(r.maxGap>worst) worst=r.maxGap;
+    const sc=worst<1.5?"ok":"warn";
+    seamTxt=` · seams ${SEAMS.length} · gap <span class="${sc}">${worst.toFixed(1)}mm</span>`;
+  } else if(CHAINS.length){
+    seamTxt=` · ${CHAINS.length} hole chains`;
+  }
+  document.getElementById("hud").innerHTML=
+    `construct · panels ${PANELS.length} · max stretch <span class="${cls}">${pct.toFixed(2)}%</span>${seamTxt} · tool ${TOOL}`;
+}
+
+// ---- drag brush (Phase 3): grab + ground-pinned no-stretch relax -----------
+// Vertices inside the brush radius are grabbed with a smooth falloff and pulled
+// toward the cursor (on a camera-facing plane). The inextensible bars propagate
+// the pull while the panel's base region stays pinned — so the surface bends and
+// drapes (open/close a wallet) but never stretches. Same solver as fold/stitch.
+function beginDrag(clientX, clientY){
+  setMouse(clientX, clientY); ray.setFromCamera(mouse,camera);
+  const hit=ray.intersectObjects(PANELS.map(p=>p.mesh),false)[0];
+  if(!hit) return false;
+  const panel=PANEL_BY_ID[hit.object.userData.panelId]; if(!panel) return false;
+  const P0=[hit.point.x,hit.point.y,hit.point.z];
+  const cd=camera.getWorldDirection(new THREE.Vector3()); const n=[cd.x,cd.y,cd.z];
+  const idxs=[], w=[];
+  const dists=new Array(panel.X.length);
+  for(let i=0;i<panel.X.length;i++){
+    const d=len(sub(panel.X[i],P0)); dists[i]=[d,i];
+    if(d<=BRUSH_R){ const t=d/BRUSH_R; idxs.push(i); w.push((1-t*t)*(1-t*t)); }
+  }
+  if(!idxs.length) return false;
+  // Anchor the opposite side: the farthest ~12% of vertices stay put while the
+  // inextensible bars propagate the grab across the rest (flat plane → drapes,
+  // folded flap → swings about its fold; "ground stays, lead drags").
+  dists.sort((a,b)=>b[0]-a[0]);
+  const nAnchor=Math.max(1, Math.floor(panel.X.length*0.12));
+  const pinned=new Set(); for(let k=0;k<nAnchor;k++) pinned.add(dists[k][1]);
+  DRAG={panel, idxs, w, n, P0, pinned, brushR:BRUSH_R, lastDelta:[0,0,0]};
+  controls.enabled=false;
+  return true;
+}
+function moveDrag(clientX, clientY){
+  if(!DRAG) return;
+  setMouse(clientX, clientY); ray.setFromCamera(mouse,camera);
+  const o=[camera.position.x,camera.position.y,camera.position.z];
+  const rd=[ray.ray.direction.x, ray.ray.direction.y, ray.ray.direction.z];
+  const denom=dot(rd,DRAG.n); if(Math.abs(denom)<1e-6) return;
+  const tt=dot(sub(DRAG.P0,o),DRAG.n)/denom;
+  const P1=add(o,scl(rd,tt));
+  const delta=sub(P1,DRAG.P0);
+  const inc=sub(delta, DRAG.lastDelta); DRAG.lastDelta=delta;   // impulse since last move
+  applyDrag(DRAG, inc);
+  writePanelGeometry(DRAG.panel);
+  updateHoleInstances(); updateThread(); reportStretch();
+}
+// Impulse grab: nudge the brush vertices by the cursor increment (falloff-weighted),
+// then relax the inextensible bars with only the far anchor pinned. PBD removes the
+// stretch while keeping the gross lifted shape — the leather drapes, never stretches.
+// Fast jumps are sub-stepped so even a quick flick stays inextensible.
+function applyDrag(d, inc){
+  const panel=d.panel, pinned=d.pinned;
+  const subs=Math.max(1, Math.min(8, Math.ceil(len(inc)/(d.brushR*0.15))));
+  for(let ss=0; ss<subs; ss++){
+    for(let k=0;k<d.idxs.length;k++){
+      const i=d.idxs[k]; if(pinned.has(i)) continue;
+      const f=d.w[k]/subs;
+      panel.X[i][0]+=inc[0]*f; panel.X[i][1]+=inc[1]*f; panel.X[i][2]+=inc[2]*f;
+    }
+    for(let it=0; it<20; it++){
+      for(const [a,b,rest] of panel.edges){
+        const wa=pinned.has(a)?0:1, wb=pinned.has(b)?0:1; const wsum=wa+wb; if(wsum===0) continue;
+        const dx=sub(panel.X[b],panel.X[a]); const dd=len(dx)||1e-9; const s=(dd-rest)/dd;
+        const ca=scl(dx,(wa/wsum)*s), cb=scl(dx,(wb/wsum)*s);
+        if(wa){ panel.X[a][0]+=ca[0]; panel.X[a][1]+=ca[1]; panel.X[a][2]+=ca[2]; }
+        if(wb){ panel.X[b][0]-=cb[0]; panel.X[b][1]-=cb[1]; panel.X[b][2]-=cb[2]; }
+      }
+    }
+  }
+}
+function endDrag(){ DRAG=null; controls.enabled=true; }
+
+function ensureBrushRing(){
+  if(brushRing) return;
+  const seg=48, pts=[];
+  for(let i=0;i<=seg;i++){ const a=i/seg*Math.PI*2; pts.push(new THREE.Vector3(Math.cos(a),0,Math.sin(a))); }
+  const g=new THREE.BufferGeometry().setFromPoints(pts);
+  brushRing=new THREE.Line(g, new THREE.LineBasicMaterial({color:0x35c1ff, transparent:true, opacity:0.8}));
+  brushRing.visible=false; scene.add(brushRing);
+}
+function updateBrushRing(clientX, clientY){
+  ensureBrushRing();
+  if(TOOL!=="drag"){ brushRing.visible=false; return; }
+  setMouse(clientX, clientY); ray.setFromCamera(mouse,camera);
+  const hit=ray.intersectObjects(PANELS.map(p=>p.mesh),false)[0];
+  if(!hit){ brushRing.visible=false; return; }
+  brushRing.visible=true;
+  brushRing.position.copy(hit.point);
+  // orient flat to the surface normal so the ring hugs the panel
+  const nrm=hit.face? hit.face.normal.clone().transformDirection(hit.object.matrixWorld) : new THREE.Vector3(0,1,0);
+  brushRing.quaternion.setFromUnitVectors(new THREE.Vector3(0,1,0), nrm);
+  brushRing.scale.setScalar(BRUSH_R);
+}
+window.setConstructBrush=function(r){ BRUSH_R=(r&&r>0)?r:25; };
+
+// ---- create a fold line in 3D (two clicks on a panel) ----------------------
+function bary3(p,a,b,c){
+  const v0=sub(b,a), v1=sub(c,a), v2=sub(p,a);
+  const d00=dot(v0,v0), d01=dot(v0,v1), d11=dot(v1,v1), d20=dot(v2,v0), d21=dot(v2,v1);
+  const den=d00*d11-d01*d01||1e-9, v=(d11*d20-d01*d21)/den, w=(d00*d21-d01*d20)/den;
+  return [1-v-w, v, w];
+}
+function hitTo2D(panel, face, point){
+  const bc=bary3([point.x,point.y,point.z], panel.X[face.a], panel.X[face.b], panel.X[face.c]);
+  const A=panel.v2d[face.a], B=panel.v2d[face.b], C=panel.v2d[face.c];
+  return [A[0]*bc[0]+B[0]*bc[1]+C[0]*bc[2], A[1]*bc[0]+B[1]*bc[1]+C[1]*bc[2]];
+}
+function showCreaseMark(w){
+  if(!creaseMark){ creaseMark=new THREE.Mesh(_SPHERE, new THREE.MeshBasicMaterial({color:COL_FOLD}));
+    creaseMark.scale.setScalar(2); scene.add(creaseMark); }
+  creaseMark.visible=true; creaseMark.position.set(w[0],w[1],w[2]);
+}
+function hideCreaseMark(){ if(creaseMark) creaseMark.visible=false; }
+
+// ---- controls from Swift --------------------------------------------------
+window.setConstructControls=function(jsonStr){
+  let c; try{ c=JSON.parse(jsonStr); }catch(e){ return; }
+  CONTROLS.groundPanel=c.groundPanel||0;
+  if(c.stiffness!=null) STIFFNESS=Math.max(0,Math.min(1,c.stiffness));
+  CONTROLS.foldAngle={};
+  for(const f of (c.folds||[])) CONTROLS.foldAngle[f.panelId+"-"+f.foldId]=f.angleDeg||0;
+  // recolor ground vs flap
+  for(const p of PANELS){ if(p.mesh) p.mesh.material.color.setHex(p.id===CONTROLS.groundPanel?COL_GROUND:COL_FLAP); }
+  needsPose=true;
+};
+window.setConstructTool=function(t){ TOOL=t||"select"; if(TOOL!=="drag" && brushRing) brushRing.visible=false; if(PANELS.length) reportStretch(); };
+window.setConstructSeams=function(jsonStr){
+  let c; try{ c=JSON.parse(jsonStr); }catch(e){ return; }
+  SEAMS=c.seams||[];
+  GLUES=c.glues||[];
+  SHOW_THREAD=c.showThread!==false;
+  SELECTED_CHAIN=(c.selectedChain==null?-1:c.selectedChain);
+  needsPose=true;
+};
+
+// ---- camera framing -------------------------------------------------------
+window.recenterCamera=function(){
+  const box=new THREE.Box3().setFromObject(root);
+  if(!isFinite(box.min.x)) return;
+  const c=box.getCenter(new THREE.Vector3()), s=box.getSize(new THREE.Vector3());
+  const r=Math.max(s.x,s.y,s.z,1)*0.5;
+  const dist=r/Math.tan(camera.fov*Math.PI/360)*1.7;
+  controls.target.copy(c);
+  camera.position.set(c.x+dist*0.6, c.y+dist*0.7, c.z+dist*0.9);
+  camera.near=Math.max(r*0.01,0.1); camera.far=r*100; camera.updateProjectionMatrix();
+};
+
+// ---- picking --------------------------------------------------------------
+const ray=new THREE.Raycaster(); ray.params.Line.threshold=3.0;
+const mouse=new THREE.Vector2();
+function setMouse(cx,cy){ mouse.x=(cx/window.innerWidth)*2-1; mouse.y=-(cy/window.innerHeight)*2+1; }
+let downXY=null;
+renderer.domElement.addEventListener("pointerdown",e=>{
+  if(e.button!==0) return;
+  if(TOOL==="drag"){ if(beginDrag(e.clientX,e.clientY)) e.preventDefault(); return; }
+  downXY=[e.clientX,e.clientY];
+});
+renderer.domElement.addEventListener("pointermove",e=>{
+  if(DRAG){ moveDrag(e.clientX,e.clientY); return; }
+  if(TOOL==="drag") updateBrushRing(e.clientX,e.clientY);
+});
+renderer.domElement.addEventListener("pointerup",e=>{
+  if(DRAG){ endDrag(); return; }
+  if(e.button!==0 || !downXY) return;
+  const moved=Math.hypot(e.clientX-downXY[0], e.clientY-downXY[1]); downXY=null;
+  if(moved>4) return; // a drag, not a click
+  mouse.x=(e.clientX/window.innerWidth)*2-1; mouse.y=-(e.clientY/window.innerHeight)*2+1;
+  ray.setFromCamera(mouse,camera);
+  if(TOOL==="crease"){
+    // two clicks on a panel define a new fold line (mapped back to its 2D coords)
+    const hit=ray.intersectObjects(PANELS.map(p=>p.mesh),false)[0];
+    if(hit){
+      const panel=PANEL_BY_ID[hit.object.userData.panelId];
+      const p2d=hitTo2D(panel, hit.face, hit.point);
+      if(!CREASE_PT || CREASE_PT.panelId!==panel.id){
+        CREASE_PT={panelId:panel.id, p2d}; showCreaseMark([hit.point.x,hit.point.y,hit.point.z]);
+      }else{
+        post({op:"addFold", panelId:panel.id, seg:[CREASE_PT.p2d, p2d]});
+        CREASE_PT=null; hideCreaseMark();
+      }
+    }
+    return;
+  }
+  if(TOOL==="stitch"){
+    // pick the nearest hole → its chain (click chain A, then chain B to sew)
+    if(holeMesh){
+      const hit=ray.intersectObject(holeMesh,false)[0];
+      if(hit && hit.instanceId!=null){ const slot=HOLE_SLOTS[hit.instanceId];
+        if(slot){ post({op:"selectChain", chainId:slot.chainId}); return; } }
+    }
+    // fallback: clicking anywhere on a panel picks that panel's nearest chain,
+    // so users don't have to land exactly on a tiny hole marker.
+    const ph=ray.intersectObjects(PANELS.map(p=>p.mesh),false)[0];
+    if(ph){
+      const pid=ph.object.userData.panelId, hp=[ph.point.x,ph.point.y,ph.point.z];
+      let best=-1, bd=1e18;
+      for(const c of CHAINS){ if(c.panelId!==pid) continue;
+        for(let k=0;k<c.holes.length;k++){ const d=len(sub(holeWorld(c,k),hp)); if(d<bd){ bd=d; best=c.id; } } }
+      if(best>=0) post({op:"selectChain", chainId:best});
+    }
+    return;
+  }
+  if(TOOL==="ground" || TOOL==="glue"){
+    const hit=ray.intersectObjects(PANELS.map(p=>p.mesh),false)[0];
+    if(hit) post({op:"selectPanel", panelId:hit.object.userData.panelId});
+    return;
+  }
+  // select / fold → nearest fold edge
+  const lines=PANELS.map(p=>p.foldLine).filter(l=>l.userData.segs.length);
+  const hits=ray.intersectObjects(lines,false);
+  if(hits.length){ const h=hits[0]; const seg=Math.floor(h.index/2); const meta=h.object.userData.segs[seg]; if(meta) post({op:"selectFold", panelId:meta.panelId, foldId:meta.foldId}); }
+});
+
+// ---- loop -----------------------------------------------------------------
+function tick(){
+  requestAnimationFrame(tick);
+  if(needsPose){ needsPose=false; recomputePose(); }
+  controls.update();
+  renderer.render(scene,camera);
+}
+window.addEventListener("resize",()=>{
+  camera.aspect=window.innerWidth/window.innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+tick();
+post({op:"ready"});
+</script>
+</body>
+</html>

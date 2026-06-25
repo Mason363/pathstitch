@@ -40,6 +40,10 @@ def _get_operations(module):
         from pathstitch_core import jig_ops
         _MODULES[module] = jig_ops.OPERATIONS
         return _MODULES[module]
+    if module == "construct_ops":
+        from pathstitch_core import construct_ops
+        _MODULES[module] = construct_ops.OPERATIONS
+        return _MODULES[module]
     return None
 
 

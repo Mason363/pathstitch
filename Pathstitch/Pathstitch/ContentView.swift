@@ -281,6 +281,8 @@ struct ContentView: View {
                     twoDEditorView
                 } else if state.activeMode == .batch {
                     BatchModeView(state: state)
+                } else if state.activeMode == .construct {
+                    ConstructModeView(state: state)
                 } else {
                     threeDImporterView
                 }
@@ -4173,6 +4175,7 @@ extension ContentView {
                     // Mode Toggle Buttons
                     ModeButton(mode: .twoD, systemName: "square.on.square", help: "2D Editor", state: state)
                     ModeButton(mode: .threeD, systemName: "cube", help: "3D STEP Importer", state: state)
+                    ModeButton(mode: .construct, systemName: "shippingbox", help: "Construct — fold & stitch panels into the 3D object", state: state)
                     ModeButton(mode: .batch, systemName: "square.grid.2x2", help: "Batch Mode", state: state)
                     
                     Divider()
@@ -4300,6 +4303,14 @@ extension ContentView {
                             if state.bodyMoveToolActive { state.toggleBodyMoveTool() }
                             if !state.isPlaneSelectionActive { state.startPlaneSelection() }
                         }
+                    } else if state.activeMode == .construct {
+                        // Construct tools share this leftmost sidebar, like 2D/3D.
+                        ForEach(ConstructTool.available) { tool in
+                            threeDToolButton(icon: tool.icon, active: state.constructTool == tool,
+                                             help: constructToolHelp(tool)) {
+                                state.setConstructTool(tool)
+                            }
+                        }
                     }
 
                     Spacer()
@@ -4356,6 +4367,18 @@ extension ContentView {
         .background(active ? Color.bg_selected : Color.clear)
         .foregroundColor(active ? Color.accent : Color.text_secondary)
         .help(help)
+    }
+
+    private func constructToolHelp(_ tool: ConstructTool) -> String {
+        switch tool {
+        case .select: return "Select — orbit and pick folds"
+        case .fold:   return "Fold — click a fold line, then set its angle"
+        case .crease: return "Crease — click two points on a panel to add a fold line"
+        case .ground: return "Ground — click a panel to pin it to the ground plane"
+        case .stitch: return "Stitch — click one hole chain, then another, to sew them"
+        case .glue:   return "Glue — click two panels to weld their meeting edges (glue tabs)"
+        case .drag:   return "Bend — soft-fold brush: drag a panel to pose it, never stretches"
+        }
     }
 
     @ViewBuilder
@@ -5181,6 +5204,7 @@ struct OnboardingModifier: ViewModifier {
     @AppStorage("onboarding.seenIntro.twoD") private var seenIntro2D = false
     @AppStorage("onboarding.seenIntro.threeD") private var seenIntro3D = false
     @AppStorage("onboarding.seenIntro.batch") private var seenIntroBatch = false
+    @AppStorage("onboarding.seenIntro.construct") private var seenIntroConstruct = false
     @State private var modeIntro: AppMode? = nil
     @State private var modeIntroDontShowAgain = true
     /// Document snapshot captured when the current step began, so auto-advance can
@@ -5234,7 +5258,7 @@ struct OnboardingModifier: ViewModifier {
                 tutorial.step = 0
             }
             .onReceive(NotificationCenter.default.publisher(for: .pathstitchResetIntros)) { _ in
-                seenIntro2D = false; seenIntro3D = false; seenIntroBatch = false
+                seenIntro2D = false; seenIntro3D = false; seenIntroBatch = false; seenIntroConstruct = false
             }
     }
 
@@ -5332,6 +5356,7 @@ struct OnboardingModifier: ViewModifier {
         case .twoD:   if !seenIntro2D    { modeIntro = .twoD }
         case .threeD: if !seenIntro3D    { modeIntro = .threeD }
         case .batch:  if !seenIntroBatch { modeIntro = .batch }
+        case .construct: if !seenIntroConstruct { modeIntro = .construct }
         }
     }
 
@@ -5340,6 +5365,7 @@ struct OnboardingModifier: ViewModifier {
         case .twoD:   seenIntro2D = true
         case .threeD: seenIntro3D = true
         case .batch:  seenIntroBatch = true
+        case .construct: seenIntroConstruct = true
         }
     }
 }
@@ -5518,6 +5544,11 @@ struct ModeIntroCard: View {
             return ("square.grid.2x2", "Batch",
                     ["Drop in many files at once to process them together with shared settings.",
                      "Great for running the same export or operation across a whole folder of parts."])
+        case .construct:
+            return ("shippingbox", "Construct — Assembly",
+                    ["Fold your flat panels into the real 3D object: pick a Ground panel, then fold along fold lines (draw them on a FOLD layer in 2D).",
+                     "Leather is inextensible here — it bends but never stretches, so what you see is what will actually sew together.",
+                     "Edit the 2D sketch and Rebuild to re-fold live. Stitching seams together comes next."])
         }
     }
 

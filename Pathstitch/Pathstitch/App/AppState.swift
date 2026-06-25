@@ -12,6 +12,7 @@ enum AppMode {
     case twoD
     case threeD
     case batch
+    case construct   // 3D assembly workspace: fold + stitch flat panels into the object
 }
 
 struct BatchItem: Identifiable, Hashable, Equatable {
@@ -741,6 +742,11 @@ struct ProjectSaveContainer: Codable {
     /// Per-body manual move offsets in the 3D viewport (MAS-125), keyed by body
     /// index. Optional so older .stch files still decode.
     var savedBodyOffsets: [BodyOffsetSave]? = nil
+
+    /// Construct-mode assembly (ground panel + fold angles). The 3D pose is
+    /// re-derived deterministically from these on load, so no mesh snapshot is
+    /// stored. Optional → older .stch files (and 2D-only projects) decode fine.
+    var savedConstructAssembly: ConstructAssembly? = nil
 }
 
 /// One body's manual move offset (MAS-125), persisted in `.stch`.
@@ -1952,6 +1958,44 @@ class AppState {
     }
     var distortionDataJSON: String = ""
     private var distortionTask: Task<Void, Never>?
+
+    // MARK: - Construct Mode (3D assembly workspace)
+    // The construct model (triangulated bar-and-hinge panels) as a JSON string
+    // pushed to `constructViewport.html`; the live XPBD solve runs there.
+    var constructModelJSON: String?
+    var constructModelToken: Int = 0          // bump to force the viewport to (re)load the model
+    var isBuildingConstructModel: Bool = false
+    var constructTool: ConstructTool = .select
+    var constructGroundPanel: Int = 0         // panel pinned to the ground plane
+    var constructFolds: [FoldSpec] = []       // controllable folds (one per panel/foldId group)
+    var constructFoldStateToken: Int = 0      // bump to push ground + fold angles to the viewport
+    var selectedFoldId: FoldSpec.ID?          // currently selected fold (inspector highlight)
+    var constructMaxStretchPct: Double = 0     // solver-quality HUD readout (should stay ~0)
+    var constructToolToken: Int = 0           // bump to push the active tool to the viewport
+    var triggerConstructHomeToken: Int = 0    // bump to recenter the construct camera
+
+    // Stitch flagship: sewing-hole chains (auto-detected from the sketch) and the
+    // seams the user stitches between them. Chains re-derive from the live sketch
+    // on every rebuild; seams are the persisted user decisions (which two chains,
+    // and the mismatch policy).
+    var constructHoleChains: [HoleChain] = []  // ordered hole runs, embedded in the mesh
+    var constructSeams: [StitchSeam] = []      // active stitched seams
+    var constructSeamStateToken: Int = 0       // bump to push seams to the viewport
+    var selectedChainForStitch: Int? = nil     // first chain picked while creating a seam
+    var constructShowThread: Bool = true       // render the stitching thread
+
+    // Drag brush (Phase 3): radius of the no-stretch grab brush, pushed live.
+    var constructBrushRadius: Double = 25
+    var constructBrushToken: Int = 0
+
+    // Fold stiffness 0…1: low rounds folds over a radius (soft bend), high keeps
+    // them tight. Real leather can't crease infinitely sharp.
+    var constructStiffness: Double = 0.6
+
+    // Fold lines added in 3D (re-fed to the triangulator on rebuild) + glue joints.
+    var constructUserFolds: [ConstructUserFold] = []
+    var constructGlues: [GlueJoint] = []
+    var selectedPanelForGlue: Int? = nil   // first panel picked while gluing
 
     // Phase 4: Globe UX / Interactivity & Overrides
     var anchorFace3D: SelectedFace? {
@@ -6933,7 +6977,18 @@ class AppState {
                 savedBodies3D: bodies3D.isEmpty ? nil : bodies3D,
                 savedBodyOffsets: bodyOffsets.isEmpty ? nil : bodyOffsets.map {
                     BodyOffsetSave(bodyIndex: $0.key, x: $0.value[0], y: $0.value[1], z: $0.value[2])
-                }
+                },
+                savedConstructAssembly: (constructFolds.isEmpty && constructGroundPanel == 0
+                                         && constructSeams.isEmpty && constructUserFolds.isEmpty
+                                         && constructGlues.isEmpty) ? nil :
+                    ConstructAssembly(
+                        groundPanel: constructGroundPanel,
+                        folds: constructFolds,
+                        stiffness: constructStiffness,
+                        seams: constructSeams.isEmpty ? nil : constructSeams,
+                        holeChains: constructHoleChains.isEmpty ? nil : constructHoleChains,
+                        userFolds: constructUserFolds.isEmpty ? nil : constructUserFolds,
+                        glues: constructGlues.isEmpty ? nil : constructGlues)
             )
 
             let encoder = JSONEncoder()
@@ -7026,6 +7081,17 @@ class AppState {
             self.bodies3D = validContainer.savedBodies3D ?? []
             self.bodyOffsets = Dictionary(uniqueKeysWithValues:
                 (validContainer.savedBodyOffsets ?? []).map { ($0.bodyIndex, [$0.x, $0.y, $0.z]) })
+            // Restore the construct assembly; entering construct mode rebuilds the
+            // mesh and re-applies these fold angles, reproducing the saved pose.
+            if let asm = validContainer.savedConstructAssembly {
+                self.constructGroundPanel = asm.groundPanel
+                self.constructFolds = asm.folds
+                self.constructStiffness = asm.stiffness ?? 0.6
+                self.constructSeams = asm.seams ?? []
+                self.constructHoleChains = asm.holeChains ?? []
+                self.constructUserFolds = asm.userFolds ?? []
+                self.constructGlues = asm.glues ?? []
+            }
             self.logEntries = validContainer.logEntries
             self.canvasScale = CGFloat(validContainer.canvasScale)
             self.canvasOffset = CGSize(width: CGFloat(validContainer.canvasOffsetX), height: CGFloat(validContainer.canvasOffsetY))

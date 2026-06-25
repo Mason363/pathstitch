@@ -543,6 +543,7 @@ struct TitleBarView: View {
                     case .twoD: return "2D"
                     case .batch: return "Batch"
                     case .threeD: return "3D"
+                    case .construct: return "Construct"
                     }
                 }()
                 
