@@ -17,6 +17,7 @@ struct ConstructViewport: NSViewRepresentable {
     let toolToken: Int
     let materialToken: Int
     let decalToken: Int
+    let stampToken: Int
     let homeToken: Int
     var state: AppState
 
@@ -56,6 +57,7 @@ struct ConstructViewport: NSViewRepresentable {
         context.coordinator.pushTool()
         context.coordinator.pushMaterial()
         context.coordinator.pushDecals()
+        context.coordinator.pushStamps()
         context.coordinator.pushHome()
     }
 
@@ -70,6 +72,7 @@ struct ConstructViewport: NSViewRepresentable {
         private var lastToolToken = -1
         private var lastMaterialToken = -1
         private var lastDecalToken = -1
+        private var lastStampToken = -1
         private var lastHomeToken = -1
 
         init(state: AppState) { self.state = state }
@@ -91,12 +94,14 @@ struct ConstructViewport: NSViewRepresentable {
                     self.lastToolToken = -1
                     self.lastMaterialToken = -1
                     self.lastDecalToken = -1
+                    self.lastStampToken = -1
                     self.pushModel()
                     self.pushControls()
                     self.pushSeams()
                     self.pushTool()
                     self.pushMaterial()
                     self.pushDecals()
+                    self.pushStamps()
                 }
             case "selectFold":
                 let panelId = json["panelId"] as? Int ?? 0
@@ -171,8 +176,17 @@ struct ConstructViewport: NSViewRepresentable {
             lastFoldToken = -1  // re-apply controls to the freshly loaded mesh
             lastSeamToken = -1  // re-apply seams to the freshly loaded mesh
             lastDecalToken = -1 // re-apply decals to the freshly loaded mesh
+            lastStampToken = -1 // re-apply stamps to the freshly loaded mesh
             let esc = Self.escape(json)
             webView.evaluateJavaScript("loadConstructModel(\"\(esc)\");", completionHandler: nil)
+        }
+
+        func pushStamps() {
+            guard ready, let webView = webView else { return }
+            guard lastStampToken != state.constructStampToken else { return }
+            lastStampToken = state.constructStampToken
+            let esc = Self.escape(state.constructStampsJSON)
+            webView.evaluateJavaScript("setConstructStamps(\"\(esc)\");", completionHandler: nil)
         }
 
         func pushControls() {

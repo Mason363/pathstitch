@@ -30,6 +30,16 @@ extension AppState {
         enterConstructMode()
     }
 
+    /// Assigns how an engulfed area is treated ("stamp" | "patch" | "cutout" |
+    /// "independent") and rebuilds so it takes effect. Drives the overlap chooser.
+    func setAreaTreatment(inner: String, mode: String) {
+        pushConstructUndo()
+        constructAreaTreatments[inner] = mode
+        pendingEngulfed.removeAll { $0["inner"] == inner }
+        hasUnsavedChanges = true
+        buildConstructModel()
+    }
+
     /// Triangulates the current panels + fold lines into a construct model and
     /// hands the JSON to the viewport. Folds are auto-detected from a fold/crease
     /// layer in the sketch (see `construct_ops._FOLD_LAYERS`); existing fold
@@ -47,6 +57,7 @@ extension AppState {
             ["panelId": $0.panelId, "seg": [[$0.x0, $0.y0], [$0.x1, $0.y1]]] as [String: Any]
         }
         let include = Array(constructIncludeHandles)   // empty = all areas
+        let treatments = constructAreaTreatments
         isBuildingConstructModel = true
 
         Task {
@@ -55,7 +66,8 @@ extension AppState {
                     module: "construct_ops",
                     op: "build_construct_model",
                     args: ["input": dxfURL.path, "ground_panel": ground,
-                           "extra_folds": extraFolds, "include_handles": include]
+                           "extra_folds": extraFolds, "include_handles": include,
+                           "area_treatments": treatments]
                 )
 
                 guard let data = res["data"] as? [String: Any],
@@ -97,11 +109,27 @@ extension AppState {
                     chainIds.contains($0.chainA) && chainIds.contains($0.chainB)
                 }
 
+                // Engulfed (nested) areas → those the user hasn't assigned a
+                // treatment to yet drive the chooser prompt. Stamps are surface
+                // outlines pushed to the viewport.
+                let engulfed = (data["engulfed"] as? [[String: String]]) ?? []
+                let undecided = engulfed.filter { e in
+                    guard let inner = e["inner"] else { return false }
+                    return self.constructAreaTreatments[inner] == nil
+                }
+                var stampsStr = "[]"
+                if let raw = data["stamps"],
+                   let sd = try? JSONSerialization.data(withJSONObject: raw),
+                   let s = String(data: sd, encoding: .utf8) { stampsStr = s }
+
                 await MainActor.run {
                     self.constructModelJSON = modelStr
                     self.constructFolds = newFolds
                     self.constructHoleChains = chains
                     self.constructSeams = survivingSeams
+                    self.pendingEngulfed = undecided
+                    self.constructStampsJSON = stampsStr
+                    self.constructStampToken += 1
                     self.constructModelToken += 1
                     self.constructFoldStateToken += 1   // re-apply ground + angles to the new mesh
                     self.constructSeamStateToken += 1   // re-apply seams to the new mesh
@@ -137,7 +165,9 @@ extension AppState {
                            seams: constructSeams, glues: constructGlues,
                            userFolds: constructUserFolds, materialHex: constructMaterialHex,
                            thicknessMm: constructThicknessMm, decals: constructDecals,
-                           decalXforms: constructDecalXforms)
+                           decalXforms: constructDecalXforms,
+                           includeHandles: constructIncludeHandles,
+                           areaTreatments: constructAreaTreatments)
     }
 
     /// Record the current assembly state before a mutating edit, so Cmd-Z can undo
@@ -154,6 +184,7 @@ extension AppState {
         a.groundPanel == b.groundPanel && a.folds == b.folds && a.seams == b.seams
         && a.glues == b.glues && a.userFolds == b.userFolds && a.materialHex == b.materialHex
         && a.thicknessMm == b.thicknessMm && a.decals == b.decals && a.decalXforms == b.decalXforms
+        && a.includeHandles == b.includeHandles && a.areaTreatments == b.areaTreatments
     }
 
     private func applyConstruct(_ s: ConstructUndoState) {
@@ -165,9 +196,14 @@ extension AppState {
         constructThicknessMm = s.thicknessMm
         constructDecals = s.decals
         constructDecalXforms = s.decalXforms
-        // userFolds change the topology → rebuild; otherwise just re-push controls.
+        // userFolds / include set / area treatments change the topology → rebuild;
+        // otherwise just re-push controls.
         let topologyChanged = (s.userFolds != constructUserFolds)
+            || (s.includeHandles != constructIncludeHandles)
+            || (s.areaTreatments != constructAreaTreatments)
         constructUserFolds = s.userFolds
+        constructIncludeHandles = s.includeHandles
+        constructAreaTreatments = s.areaTreatments
         if selectedFoldId != nil && !constructFolds.contains(where: { $0.id == selectedFoldId }) {
             selectedFoldId = nil
         }

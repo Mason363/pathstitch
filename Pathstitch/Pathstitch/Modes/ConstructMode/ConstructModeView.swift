@@ -17,6 +17,7 @@ struct ConstructModeView: View {
                     toolToken: state.constructToolToken,
                     materialToken: state.constructMaterialToken,
                     decalToken: state.constructDecalToken,
+                    stampToken: state.constructStampToken,
                     homeToken: state.triggerConstructHomeToken,
                     state: state
                 )
@@ -24,6 +25,7 @@ struct ConstructModeView: View {
                 // the single biggest clarity fix. Sits where the eye already is.
                 toolHUD
                     .padding(12)
+                if let first = state.pendingEngulfed.first { overlapChooser(first) }
                 if state.isBuildingConstructModel {
                     HStack(spacing: 8) {
                         ProgressView().controlSize(.small)
@@ -131,6 +133,43 @@ struct ConstructModeView: View {
         .background(RoundedRectangle(cornerRadius: 6).fill(Color.accent.opacity(0.10)))
         .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.accent.opacity(0.30), lineWidth: 1))
         .padding(.top, 12)
+    }
+
+    // One enclosed area sits inside another — ask how to treat the inner one.
+    @ViewBuilder
+    private func overlapChooser(_ e: [String: String]) -> some View {
+        let inner = e["inner"] ?? ""
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Overlapping area").font(PlasticityFont.label.weight(.semibold))
+                .foregroundColor(.text_primary).tracking(1)
+            Text("An area sits inside another. How should the inner one be treated?")
+                .font(PlasticityFont.label).foregroundColor(.text_secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            overlapOption(inner, "stamp", "Decoration stamp", "Printed/tooled outline on the surface — never cut, rides the fold.")
+            overlapOption(inner, "patch", "Raised patch", "A separate piece sitting on top (pocket / overlay).")
+            overlapOption(inner, "cutout", "Cut-out window", "A real hole through the outer panel.")
+            overlapOption(inner, "independent", "Independent panel", "Just another panel that happens to overlap in 2D.")
+        }
+        .padding(14)
+        .frame(width: 320, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.bg_panel.opacity(0.97)))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.accent.opacity(0.4), lineWidth: 1))
+        .shadow(color: .black.opacity(0.25), radius: 10, y: 3)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+    }
+
+    private func overlapOption(_ inner: String, _ mode: String, _ title: String, _ blurb: String) -> some View {
+        Button { state.setAreaTreatment(inner: inner, mode: mode) } label: {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title).font(PlasticityFont.label.weight(.semibold)).foregroundColor(.text_primary)
+                Text(blurb).font(PlasticityFont.label).foregroundColor(.text_secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(8)
+            .background(RoundedRectangle(cornerRadius: 6).fill(Color.bg_selected.opacity(0.6)))
+        }
+        .buttonStyle(.plain)
     }
 
     private var inspector: some View {

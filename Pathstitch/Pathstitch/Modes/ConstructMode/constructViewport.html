@@ -143,6 +143,8 @@ let creaseMark=null;      // marker dot for that first point
 let creaseLine=null;      // rubber-band preview from the first point to the cursor
 let holeMesh=null;        // InstancedMesh of all hole markers (rides the fold)
 let chainLineMesh=null;   // LineSegments linking each chain's holes (always shown)
+let STAMPS=[];            // decoration-stamp outlines [{panelId, closed, pts:[{tri,bary}]}]
+let stampMesh=null;       // LineSegments of all stamp outlines (ride the fold)
 let HOLE_SLOTS=[];        // per-instance {chainId, k} parallel to holeMesh
 let threadGroup=new THREE.Group(); scene.add(threadGroup);
 let seamReport=[];        // per-seam gap stats for the HUD
@@ -170,6 +172,7 @@ function clearPanels(){
   PANELS=[]; PANEL_BY_ID={};
   if(holeMesh){ root.remove(holeMesh); holeMesh.geometry.dispose(); holeMesh.material.dispose(); holeMesh=null; }
   if(chainLineMesh){ root.remove(chainLineMesh); chainLineMesh.geometry.dispose(); chainLineMesh.material.dispose(); chainLineMesh=null; }
+  if(stampMesh){ root.remove(stampMesh); stampMesh.geometry.dispose(); stampMesh.material.dispose(); stampMesh=null; }
   HOLE_SLOTS=[];
   clearThread();
 }
@@ -270,6 +273,7 @@ window.loadConstructModel=function(jsonStr){
     const rest3=pj.vertices.map(v=>[v[0],v[1],v[2]]);
     const panel={ id:pj.id, triangles:pj.triangles, hinges:pj.hinges, rest3,
                   v2d:pj.vertices2d||pj.vertices.map(v=>[v[0],v[2]]),
+                  patchOf:(pj.patchOf==null?-1:pj.patchOf),
                   X:rest3.map(v=>v.slice()) };
     // unique edges + rest lengths (the inextensible "bars")
     const seen=new Set(), edges=[];
@@ -578,9 +582,13 @@ function foldPanel(panel){
 function recomputePose(){
   for(const panel of PANELS) foldPanel(panel);   // each panel folds kinematically
   solveStitches();                                // seat & sew panels together
+  // Raised patches sit just above their container (re-applied each pose, so no
+  // drift). World-up offset reads right for the common flat-area pocket case.
+  for(const panel of PANELS){ if(panel.patchOf>=0){ const dy=THICKNESS*1.5+0.4; for(const v of panel.X){ v[1]+=dy; } } }
   for(const panel of PANELS) writePanelGeometry(panel);
   updateHoleInstances();
   updateChainLines();
+  updateStamps();
   updateThread();
   reportStretch();
   postSeamFit();
@@ -622,6 +630,34 @@ function updateChainLines(){
   g.setAttribute("color", new THREE.Float32BufferAttribute(colArr,3));
   chainLineMesh=new THREE.LineSegments(g, new THREE.LineBasicMaterial({vertexColors:true, transparent:true, opacity:0.85}));
   chainLineMesh.renderOrder=3; root.add(chainLineMesh);
+}
+// World position of an embedded point {tri,bary} on a panel's folded mesh.
+function embeddedWorld(panel, pt){
+  const t=panel.triangles[pt.tri]; if(!t) return [0,0,0];
+  const A=panel.X[t[0]], B=panel.X[t[1]], C=panel.X[t[2]], w=pt.bary;
+  return [A[0]*w[0]+B[0]*w[1]+C[0]*w[2],
+          A[1]*w[0]+B[1]*w[1]+C[1]*w[2],
+          A[2]*w[0]+B[2]*w[1]+C[2]*w[2]];
+}
+// Decoration stamps: each engulfed outline embedded in its outer panel's mesh,
+// drawn as a surface line that rides the fold (visual-only, never cut).
+function updateStamps(){
+  if(stampMesh){ root.remove(stampMesh); stampMesh.geometry.dispose(); stampMesh.material.dispose(); stampMesh=null; }
+  if(!STAMPS.length) return;
+  const pos=[];
+  for(const s of STAMPS){
+    const p=PANEL_BY_ID[s.panelId]; if(!p) continue;
+    const n=s.pts.length; if(n<2) continue;
+    const last=(s.closed!==false)?n:n-1;
+    for(let k=0;k<last;k++){
+      const a=embeddedWorld(p, s.pts[k]), b=embeddedWorld(p, s.pts[(k+1)%n]);
+      pos.push(a[0],a[1],a[2], b[0],b[1],b[2]);
+    }
+  }
+  if(!pos.length) return;
+  const g=new THREE.BufferGeometry(); g.setAttribute("position", new THREE.Float32BufferAttribute(pos,3));
+  stampMesh=new THREE.LineSegments(g, new THREE.LineBasicMaterial({color:0x2b2f36, transparent:true, opacity:0.9}));
+  stampMesh.renderOrder=2; root.add(stampMesh);
 }
 // Stitch rendering — make a sewn seam *read* like real saddle stitching:
 //   • running stitch: bright thread segments hole→hole along each chain (the
@@ -880,6 +916,11 @@ window.setConstructSeams=function(jsonStr){
   GLUES=c.glues||[];
   SHOW_THREAD=c.showThread!==false;
   SELECTED_CHAIN=(c.selectedChain==null?-1:c.selectedChain);
+  needsPose=true;
+};
+window.setConstructStamps=function(jsonStr){
+  let s; try{ s=JSON.parse(jsonStr); }catch(e){ return; }
+  STAMPS=Array.isArray(s)?s:[];
   needsPose=true;
 };
 

@@ -1997,6 +1997,14 @@ class AppState {
     // assemble every enclosed area (the default). Persisted in the assembly.
     var constructIncludeHandles: Set<String> = []
 
+    // Overlap handling: per-engulfed-area treatment (inner DXF handle → "stamp" |
+    // "patch" | "cutout" | "independent"). Persisted. `pendingEngulfed` holds the
+    // detected nestings the user hasn't decided yet (drives the chooser).
+    var constructAreaTreatments: [String: String] = [:]
+    var pendingEngulfed: [[String: String]] = []   // [{inner, outer}] undecided
+    var constructStampsJSON: String = "[]"          // surface outlines for the viewport
+    var constructStampToken: Int = 0
+
     // Fold lines added in 3D (re-fed to the triangulator on rebuild) + glue joints.
     var constructUserFolds: [ConstructUserFold] = []
     var constructGlues: [GlueJoint] = []
@@ -7045,7 +7053,8 @@ class AppState {
                 savedConstructAssembly: (constructFolds.isEmpty && constructGroundPanel == 0
                                          && constructSeams.isEmpty && constructUserFolds.isEmpty
                                          && constructGlues.isEmpty && constructDecals.isEmpty
-                                         && constructIncludeHandles.isEmpty) ? nil :
+                                         && constructIncludeHandles.isEmpty
+                                         && constructAreaTreatments.isEmpty) ? nil :
                     ConstructAssembly(
                         groundPanel: constructGroundPanel,
                         folds: constructFolds,
@@ -7060,7 +7069,8 @@ class AppState {
                             Dictionary(uniqueKeysWithValues: constructDecals.map { (String($0.key), $0.value) }),
                         decalFrames: constructDecalXforms.isEmpty ? nil :
                             Dictionary(uniqueKeysWithValues: constructDecalXforms.map { (String($0.key), $0.value) }),
-                        includeHandles: constructIncludeHandles.isEmpty ? nil : Array(constructIncludeHandles))
+                        includeHandles: constructIncludeHandles.isEmpty ? nil : Array(constructIncludeHandles),
+                        areaTreatments: constructAreaTreatments.isEmpty ? nil : constructAreaTreatments)
             )
 
             let encoder = JSONEncoder()
@@ -7171,6 +7181,7 @@ class AppState {
                 self.constructDecalXforms = Dictionary(uniqueKeysWithValues:
                     (asm.decalFrames ?? [:]).compactMap { k, v in Int(k).map { ($0, v) } })
                 self.constructIncludeHandles = Set(asm.includeHandles ?? [])
+                self.constructAreaTreatments = asm.areaTreatments ?? [:]
             }
             self.logEntries = validContainer.logEntries
             self.canvasScale = CGFloat(validContainer.canvasScale)
