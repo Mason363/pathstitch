@@ -695,6 +695,39 @@ function applyUserXf(panel){
     v[0]=c[0]+r[0]+xf.t[0]; v[1]=c[1]+r[1]+xf.t[1]; v[2]=c[2]+r[2]+xf.t[2];
   }
 }
+// Extract each rigid region's boundary loops (outer + any cut-out holes) as 3D
+// world polygons + a planar normal — the input for per-region solid export.
+function regionLoops(panel, region){
+  const ekey=(a,b)=>a<b?a+"_"+b:b+"_"+a;
+  const ec={};
+  for(const fi of region.faces){ const t=panel.triangles[fi];
+    for(const [a,b] of [[t[0],t[1]],[t[1],t[2]],[t[2],t[0]]]){ const k=ekey(a,b); ec[k]=(ec[k]||0)+1; } }
+  const adj={};
+  for(const k in ec){ if(ec[k]===1){ const [a,b]=k.split("_").map(Number); (adj[a]||(adj[a]=[])).push(b); (adj[b]||(adj[b]=[])).push(a); } }
+  const used=new Set(), loops=[];
+  for(const start in adj){ const s=+start; if((adj[s]||[]).every(n=>used.has(ekey(s,n)))) continue;
+    const loop=[s]; let prev=-1, cur=s, guard=0;
+    while(guard++<100000){
+      let nx=-1; for(const n of adj[cur]||[]){ if(n!==prev && !used.has(ekey(cur,n))){ nx=n; break; } }
+      if(nx<0) break; used.add(ekey(cur,nx)); if(nx===s) break; loop.push(nx); prev=cur; cur=nx;
+    }
+    if(loop.length>=3) loops.push(loop);
+  }
+  if(!loops.length) return null;
+  const polys=loops.map(L=>L.map(i=>[panel.X[i][0],panel.X[i][1],panel.X[i][2]]));
+  // outer = largest projected area; rest are holes
+  function area2(P){ let a=0; for(let i=0;i<P.length;i++){ const p=P[i], q=P[(i+1)%P.length]; a+=p[0]*q[2]-q[0]*p[2]; } return Math.abs(a); }
+  polys.sort((A,B)=>area2(B)-area2(A));
+  const t0=panel.triangles[region.faces[0]]; const A=panel.X[t0[0]],B=panel.X[t0[1]],C=panel.X[t0[2]];
+  return { outer:polys[0], holes:polys.slice(1), normal:norm(cross(sub(B,A),sub(C,A))) };
+}
+// All regions across all panels as solids-to-be (loops + normal), + thickness.
+window.gatherConstructExport=function(){
+  const regs=[];
+  for(const p of PANELS){ if(!p.tree) continue;
+    for(const region of p.tree.region){ const r=regionLoops(p, region); if(r && r.outer.length>=3) regs.push(r); } }
+  return JSON.stringify({ regions:regs, thickness:THICKNESS });
+};
 function recomputePose(){
   for(const panel of PANELS) foldPanel(panel);   // each panel folds kinematically
   for(const panel of PANELS) roundFolds(panel);  // soften creases per-fold (no stretch)

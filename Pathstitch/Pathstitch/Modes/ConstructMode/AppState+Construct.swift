@@ -383,6 +383,13 @@ extension AppState {
         // No token bump: the viewport already applied it live; this just persists.
     }
 
+    /// Requests an export (format "step" | "stl"); the viewport bridge gathers the
+    /// folded geometry, writes the file via OCC, and shows a save panel.
+    func exportConstruct(_ format: String) {
+        constructExportFormat = format
+        constructExportToken += 1
+    }
+
     /// Sets the transform gizmo mode (translate / rotate / scale) and pushes it.
     func setConstructTransformMode(_ m: String) {
         constructTransformMode = m

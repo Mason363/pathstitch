@@ -1,5 +1,6 @@
 import SwiftUI
 import WebKit
+import AppKit
 
 /// Swift↔JS bridge for the construct (assembly) viewport. Mirrors the proven
 /// `ThreeDViewport` pattern: token-gated `evaluateJavaScript` pushes out, a
@@ -21,6 +22,7 @@ struct ConstructViewport: NSViewRepresentable {
     let baseToken: Int
     let panelXfToken: Int
     let transformModeToken: Int
+    let exportToken: Int
     let snapActive: Bool   // mirrors the 2D snap toggle so changes re-push live
     let homeToken: Int
     var state: AppState
@@ -66,6 +68,7 @@ struct ConstructViewport: NSViewRepresentable {
         context.coordinator.pushPanelXf()
         context.coordinator.pushTransformMode()
         context.coordinator.pushSnap()
+        context.coordinator.pushExport()
         context.coordinator.pushHome()
     }
 
@@ -84,6 +87,7 @@ struct ConstructViewport: NSViewRepresentable {
         private var lastBaseToken = -1
         private var lastPanelXfToken = -1
         private var lastTransformModeToken = -1
+        private var lastExportToken = -1
         private var lastSnap: Bool? = nil
         private var lastHomeToken = -1
 
@@ -307,6 +311,50 @@ struct ConstructViewport: NSViewRepresentable {
             guard lastHomeToken != state.triggerConstructHomeToken else { return }
             lastHomeToken = state.triggerConstructHomeToken
             webView.evaluateJavaScript("recenterCamera();", completionHandler: nil)
+        }
+
+        // Export: pull the folded geometry from the viewport, build per-region solids
+        // via the OCC worker, then offer a save panel for the STEP/STL.
+        func pushExport() {
+            guard ready, let webView = webView else { return }
+            guard lastExportToken != state.constructExportToken else { return }
+            lastExportToken = state.constructExportToken
+            guard let fmt = state.constructExportFormat else { return }
+            webView.evaluateJavaScript("gatherConstructExport()") { result, _ in
+                guard let jsonStr = result as? String,
+                      let data = jsonStr.data(using: .utf8),
+                      let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let regions = obj["regions"] as? [[String: Any]], !regions.isEmpty else {
+                    DispatchQueue.main.async { self.state.errorMessage = "Nothing to export yet — assemble a model first." }
+                    return
+                }
+                let thickness = (obj["thickness"] as? Double) ?? self.state.constructThicknessMm
+                let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("assembly.\(fmt)")
+                Task {
+                    do {
+                        let res = try await PythonBridge.shared.run(
+                            module: "construct_ops", op: "export_assembly",
+                            args: ["regions": regions, "thickness": thickness, "format": fmt, "output": tmp.path])
+                        guard (res["data"] as? [String: Any]) != nil else {
+                            throw PythonBridgeError.invalidResponse((res["message"] as? String) ?? "Export failed")
+                        }
+                        await MainActor.run { self.presentSave(tmp, fmt: fmt) }
+                    } catch {
+                        await MainActor.run { self.state.errorMessage = "Export failed: \(error.localizedDescription)" }
+                    }
+                }
+            }
+        }
+
+        private func presentSave(_ tmp: URL, fmt: String) {
+            let panel = NSSavePanel()
+            panel.nameFieldStringValue = "assembly.\(fmt)"
+            panel.canCreateDirectories = true
+            panel.begin { resp in
+                guard resp == .OK, let url = panel.url else { return }
+                try? FileManager.default.removeItem(at: url)
+                try? FileManager.default.copyItem(at: tmp, to: url)
+            }
         }
 
         private static func escape(_ s: String) -> String {

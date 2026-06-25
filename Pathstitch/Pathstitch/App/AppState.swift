@@ -2024,6 +2024,11 @@ class AppState {
     var constructLeatherAreaMm2: Double = 0
     var constructReadoutPanels: Int = 0
 
+    // Export: format requested by the user; the viewport bridge gathers geometry
+    // and writes the file (STEP/STL) via OCC, then shows a save panel.
+    var constructExportFormat: String? = nil
+    var constructExportToken: Int = 0
+
     // Overlap handling: per-engulfed-area treatment (inner DXF handle → "stamp" |
     // "patch" | "cutout" | "independent"). Persisted. `pendingEngulfed` holds the
     // detected nestings the user hasn't decided yet (drives the chooser).

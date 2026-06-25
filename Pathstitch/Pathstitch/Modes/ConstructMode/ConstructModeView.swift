@@ -21,6 +21,7 @@ struct ConstructModeView: View {
                     baseToken: state.constructBaseToken,
                     panelXfToken: state.constructPanelXfToken,
                     transformModeToken: state.constructTransformModeToken,
+                    exportToken: state.constructExportToken,
                     snapActive: state.snapActive,
                     homeToken: state.triggerConstructHomeToken,
                     state: state
@@ -651,6 +652,17 @@ struct ConstructModeView: View {
                         .font(PlasticityFont.label).foregroundColor(.text_secondary)
                 }
             }
+
+            Divider().background(Color.border_subtle).padding(.vertical, 2)
+            Menu {
+                Button("STEP (.step)") { state.exportConstruct("step") }
+                Button("STL (.stl)") { state.exportConstruct("stl") }
+            } label: {
+                HStack { Image(systemName: "square.and.arrow.up"); Text("Export 3D…") }
+                    .frame(maxWidth: .infinity)
+            }
+            .menuStyle(.borderlessButton)
+            .disabled(state.constructReadoutPanels == 0)
         }
     }
 

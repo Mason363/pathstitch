@@ -837,7 +837,78 @@ def op_build_construct_model(args: Dict[str, Any]) -> Dict[str, Any]:
     }}
 
 
+def op_export_assembly(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Exports the folded assembly as per-region solids (STEP or STL) via OCC.
+
+    args: regions = [{outer:[[x,y,z],...], holes:[[...]], normal:[nx,ny,nz]}],
+          thickness (mm), format ("step"|"stl"), output (path).
+    Each planar region → a face (with holes) → extruded by thickness → solid; all
+    solids form a compound. Piecewise-flat leather exports exactly + CAD-editable.
+    """
+    fmt = str(args.get("format", "step")).lower()
+    out = args.get("output")
+    regions = args.get("regions") or []
+    th = float(args.get("thickness", 2.0)) or 2.0
+    if not out:
+        return {"status": "error", "message": "No output path."}
+    try:
+        from OCC.Core.gp import gp_Pnt, gp_Vec
+        from OCC.Core.BRepBuilderAPI import BRepBuilderAPI_MakePolygon, BRepBuilderAPI_MakeFace
+        from OCC.Core.BRepPrimAPI import BRepPrimAPI_MakePrism
+        from OCC.Core.TopoDS import TopoDS_Compound
+        from OCC.Core.BRep import BRep_Builder
+    except Exception as e:
+        return {"status": "error", "message": f"OpenCASCADE not available: {e}"}
+
+    builder = BRep_Builder()
+    comp = TopoDS_Compound()
+    builder.MakeCompound(comp)
+    made = 0
+    for reg in regions:
+        outer = reg.get("outer") or []
+        if len(outer) < 3:
+            continue
+        n = reg.get("normal") or [0, 1, 0]
+        try:
+            poly = BRepBuilderAPI_MakePolygon()
+            for p in outer:
+                poly.Add(gp_Pnt(float(p[0]), float(p[1]), float(p[2])))
+            poly.Close()
+            face_mk = BRepBuilderAPI_MakeFace(poly.Wire(), True)
+            for hole in (reg.get("holes") or []):
+                if len(hole) < 3:
+                    continue
+                hp = BRepBuilderAPI_MakePolygon()
+                for p in hole:
+                    hp.Add(gp_Pnt(float(p[0]), float(p[1]), float(p[2])))
+                hp.Close()
+                face_mk.Add(hp.Wire())
+            face = face_mk.Face()
+            vec = gp_Vec(n[0] * th, n[1] * th, n[2] * th)
+            solid = BRepPrimAPI_MakePrism(face, vec).Shape()
+            builder.Add(comp, solid)
+            made += 1
+        except Exception:
+            continue  # skip a degenerate/non-planar region; others still export
+    if made == 0:
+        return {"status": "error", "message": "No exportable solids (degenerate geometry)."}
+
+    try:
+        if fmt == "stl":
+            from OCC.Core.StlAPI import StlAPI_Writer
+            from OCC.Core.BRepMesh import BRepMesh_IncrementalMesh
+            BRepMesh_IncrementalMesh(comp, 0.2)
+            w = StlAPI_Writer(); w.SetASCIIMode(False); w.Write(comp, out)
+        else:
+            from OCC.Core.STEPControl import STEPControl_Writer, STEPControl_AsIs
+            w = STEPControl_Writer(); w.Transfer(comp, STEPControl_AsIs); w.Write(out)
+    except Exception as e:
+        return {"status": "error", "message": f"Write failed: {e}"}
+    return {"status": "ok", "data": {"solids": made, "output": out, "format": fmt}}
+
+
 OPERATIONS = {
     "build_construct_model": op_build_construct_model,
     "match_chains": op_match_chains,
+    "export_assembly": op_export_assembly,
 }
