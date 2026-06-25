@@ -142,7 +142,7 @@ struct ConstructViewport: NSViewRepresentable {
                 DispatchQueue.main.async {
                     switch self.state.constructTool {
                     case .ground: self.state.setConstructGround(panelId, basePoint: p2d)
-                    case .glue:   self.state.pickPanelForGlue(panelId)
+                    case .glue:   self.state.pickPanelForGlue(panelId, p2d)
                     default: break
                     }
                 }

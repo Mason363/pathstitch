@@ -543,24 +543,34 @@ extension AppState {
         buildConstructModel()
     }
 
-    /// Glue tool: pick panel A then panel B → weld their meeting edges.
-    func pickPanelForGlue(_ panelId: Int) {
+    /// Glue tool: pick a face/edge on panel A, then on panel B → bond per the
+    /// current glue mode. `p2d` is the clicked point (selects the face/edge).
+    func pickPanelForGlue(_ panelId: Int, _ p2d: [Double]? = nil) {
         if let first = selectedPanelForGlue {
-            selectedPanelForGlue = nil
-            if first != panelId { addGlue(panelA: first, panelB: panelId) }
+            let firstPt = selectedGluePoint
+            selectedPanelForGlue = nil; selectedGluePoint = nil
+            if first != panelId { addGlue(panelA: first, panelB: panelId, aPt: firstPt, bPt: p2d) }
             constructSeamStateToken += 1
         } else {
             selectedPanelForGlue = panelId
+            selectedGluePoint = p2d
             constructSeamStateToken += 1
         }
     }
 
-    func addGlue(panelA: Int, panelB: Int) {
+    /// Sets the glue mode (panel / face / edge) for the next bond.
+    func setConstructGlueMode(_ m: String) {
+        constructGlueMode = m
+        constructGlueModeToken += 1
+    }
+
+    func addGlue(panelA: Int, panelB: Int, aPt: [Double]? = nil, bPt: [Double]? = nil) {
         guard !constructGlues.contains(where: {
             ($0.panelA == panelA && $0.panelB == panelB) ||
             ($0.panelA == panelB && $0.panelB == panelA) }) else { return }
         pushConstructUndo()
-        constructGlues.append(GlueJoint(panelA: panelA, panelB: panelB))
+        constructGlues.append(GlueJoint(panelA: panelA, panelB: panelB,
+                                        mode: constructGlueMode, aPt: aPt, bPt: bPt))
         constructSeamStateToken += 1
         hasUnsavedChanges = true
     }
@@ -710,7 +720,12 @@ extension AppState {
             ["id": s.id.uuidString, "chainA": s.chainA, "chainB": s.chainB,
              "mode": s.mode.rawValue, "pairs": s.pairs, "reversed": s.reversed]
         }
-        let glues = constructGlues.map { ["panelA": $0.panelA, "panelB": $0.panelB] as [String: Any] }
+        let glues = constructGlues.map { g -> [String: Any] in
+            var o: [String: Any] = ["panelA": g.panelA, "panelB": g.panelB, "mode": g.mode]
+            if let a = g.aPt { o["aPt"] = a }
+            if let b = g.bPt { o["bPt"] = b }
+            return o
+        }
         var payload: [String: Any] = ["seams": seams, "glues": glues, "showThread": constructShowThread]
         if let sel = selectedChainForStitch { payload["selectedChain"] = sel }
         guard let d = try? JSONSerialization.data(withJSONObject: payload),

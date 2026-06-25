@@ -215,10 +215,29 @@ struct ConstructUndoState {
     var panelXf: [String: [Double]]
 }
 
-/// A glue/weld join: panel B is seated onto panel A where their edges meet and
-/// held rigidly coincident (no thread). For glue-tab designs.
+/// A glue/weld join seating panel B onto panel A. `mode` picks how they bond —
+/// "panel" (closest boundary run, general), "face" (lay the two clicked planes
+/// flat together), or "edge" (align the two clicked edges). `aPt`/`bPt` are the
+/// clicked 2D points on A and B that select the face/edge for those modes.
 struct GlueJoint: Codable, Identifiable, Hashable {
     var id: UUID = UUID()
     var panelA: Int
     var panelB: Int
+    var mode: String = "panel"
+    var aPt: [Double]? = nil
+    var bPt: [Double]? = nil
+
+    init(panelA: Int, panelB: Int, mode: String = "panel", aPt: [Double]? = nil, bPt: [Double]? = nil) {
+        self.panelA = panelA; self.panelB = panelB; self.mode = mode; self.aPt = aPt; self.bPt = bPt
+    }
+    // Tolerant decode so older .stch glues (no mode/aPt/bPt) still load.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = (try? c.decode(UUID.self, forKey: .id)) ?? UUID()
+        panelA = try c.decode(Int.self, forKey: .panelA)
+        panelB = try c.decode(Int.self, forKey: .panelB)
+        mode = (try? c.decode(String.self, forKey: .mode)) ?? "panel"
+        aPt = try? c.decode([Double].self, forKey: .aPt)
+        bPt = try? c.decode([Double].self, forKey: .bPt)
+    }
 }

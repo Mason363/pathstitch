@@ -580,17 +580,72 @@ function solveStitches(){
   // Glue (weld): seat panel B onto panel A along their *closest* boundary run —
   // exactly mating a glue tab to the panel it's glued onto. Rigid, no thread.
   for(const g of GLUES){
-    let A=g.panelA, B=g.panelB;
-    if(B===ground && A!==ground){ const t=A; A=B; B=t; }
+    let A=g.panelA, B=g.panelB, aPt=g.aPt, bPt=g.bPt;
+    if(B===ground && A!==ground){ const t=A; A=B; B=t; const tp=aPt; aPt=bPt; bPt=tp; }
     const pa=PANEL_BY_ID[A], pb=PANEL_BY_ID[B]; if(!pa||!pb||A===B) continue;
-    const ba=[...pa.boundary], bb=[...pb.boundary]; if(!ba.length||!bb.length) continue;
-    const pairs=[];
-    for(const j of bb){ let bi=-1,bd=1e18; for(const i of ba){ const d=len(sub(pb.X[j],pa.X[i])); if(d<bd){ bd=d; bi=i; } } pairs.push([bi,j,bd]); }
-    pairs.sort((x,y)=>x[2]-y[2]);
-    const keep=pairs.slice(0, Math.max(3, Math.floor(pairs.length*0.4)));
-    const src=keep.map(p=>pb.X[p[1]].slice()), dst=keep.map(p=>pa.X[p[0]].slice());
-    const RT=kabsch(src,dst); if(RT) applyRigidInPlace(pb, RT.R, RT.t);
+    const mode=g.mode||"panel";
+    if(mode==="face") seatFaceGlue(pa, pb, aPt, bPt);
+    else if(mode==="edge") seatEdgeGlue(pa, pb, aPt, bPt);
+    else seatPanelGlue(pa, pb);
   }
+}
+// Panel glue: seat B onto A along their closest boundary run (general catch-all).
+function seatPanelGlue(pa, pb){
+  const ba=[...pa.boundary], bb=[...pb.boundary]; if(!ba.length||!bb.length) return;
+  const pairs=[];
+  for(const j of bb){ let bi=-1,bd=1e18; for(const i of ba){ const d=len(sub(pb.X[j],pa.X[i])); if(d<bd){ bd=d; bi=i; } } pairs.push([bi,j,bd]); }
+  pairs.sort((x,y)=>x[2]-y[2]);
+  const keep=pairs.slice(0, Math.max(3, Math.floor(pairs.length*0.4)));
+  const src=keep.map(p=>pb.X[p[1]].slice()), dst=keep.map(p=>pa.X[p[0]].slice());
+  const RT=kabsch(src,dst); if(RT) applyRigidInPlace(pb, RT.R, RT.t);
+}
+// Which region of a panel contains a 2D point (else null).
+function regionOfPoint(panel, p2d){
+  if(!p2d || !panel.tree) return null;
+  for(const reg of panel.tree.region){ for(const fi of reg.faces){ const t=panel.triangles[fi];
+    const bc=bary3([p2d[0],0,p2d[1]], [panel.v2d[t[0]][0],0,panel.v2d[t[0]][1]], [panel.v2d[t[1]][0],0,panel.v2d[t[1]][1]], [panel.v2d[t[2]][0],0,panel.v2d[t[2]][1]]);
+    if(bc[0]>=-1e-3&&bc[1]>=-1e-3&&bc[2]>=-1e-3) return reg; } }
+  return null;
+}
+function regionPlane(panel, reg){
+  let c=[0,0,0],n=0; reg.verts.forEach(v=>{ c=add(c,panel.X[v]); n++; }); c=scl(c,1/Math.max(n,1));
+  const t0=panel.triangles[reg.faces[0]]; const A=panel.X[t0[0]],B=panel.X[t0[1]],C=panel.X[t0[2]];
+  return { c, n:norm(cross(sub(B,A),sub(C,A))) };
+}
+function nearestBoundaryEdge(panel, p2d){
+  if(!p2d) return null; let best=null, bd=1e18;
+  for(const [a,b] of panel.boundaryEdges){ const m=[(panel.v2d[a][0]+panel.v2d[b][0])/2,(panel.v2d[a][1]+panel.v2d[b][1])/2];
+    const d=(m[0]-p2d[0])**2+(m[1]-p2d[1])**2; if(d<bd){ bd=d; best=[a,b]; } }
+  return best;
+}
+// Shortest-arc quaternion rotating unit a → unit b.
+function quatFromTo(a,b){
+  const d=dot(a,b);
+  if(d>0.999999) return [0,0,0,1];
+  if(d<-0.999999){ let ax=cross([1,0,0],a); if(len(ax)<1e-6) ax=cross([0,1,0],a); ax=norm(ax); return [ax[0],ax[1],ax[2],0]; }
+  const c=cross(a,b); const w=1+d; const l=Math.hypot(c[0],c[1],c[2],w)||1; return [c[0]/l,c[1]/l,c[2]/l,w/l];
+}
+// Face glue: lay B's chosen face flat on A's chosen face (planes coincident,
+// normals opposed, offset by thickness) — "glue the two planes together".
+function seatFaceGlue(pa, pb, aPt, bPt){
+  const rA=regionOfPoint(pa,aPt)||(pa.tree&&pa.tree.region[pa.tree.rootR]);
+  const rB=regionOfPoint(pb,bPt)||(pb.tree&&pb.tree.region[pb.tree.rootR]); if(!rA||!rB) return seatPanelGlue(pa,pb);
+  const PA=regionPlane(pa,rA), PB=regionPlane(pb,rB);
+  const q=quatFromTo(PB.n, scl(PA.n,-1));
+  for(const v of pb.X){ const r=qrot(q,sub(v,PB.c)); v[0]=PB.c[0]+r[0]; v[1]=PB.c[1]+r[1]; v[2]=PB.c[2]+r[2]; }
+  const target=add(PA.c, scl(PA.n, THICKNESS)); const d=sub(target, PB.c);
+  for(const v of pb.X){ v[0]+=d[0]; v[1]+=d[1]; v[2]+=d[2]; }
+}
+// Edge glue: align B's chosen boundary edge onto A's, panels continuing in the
+// same surface direction (Kabsch on the two endpoints + a normal-direction point).
+function seatEdgeGlue(pa, pb, aPt, bPt){
+  const eA=nearestBoundaryEdge(pa,aPt), eB=nearestBoundaryEdge(pb,bPt); if(!eA||!eB) return seatPanelGlue(pa,pb);
+  const A0=pa.X[eA[0]],A1=pa.X[eA[1]], B0=pb.X[eB[0]],B1=pb.X[eB[1]];
+  const rA=regionOfPoint(pa,aPt), rB=regionOfPoint(pb,bPt);
+  const nA=rA?regionPlane(pa,rA).n:[0,1,0], nB=rB?regionPlane(pb,rB).n:[0,1,0];
+  const mA=scl(add(A0,A1),0.5), mB=scl(add(B0,B1),0.5);
+  const src=[B0,B1, add(mB,nB)], dst=[A0,A1, add(mA,nA)];
+  const RT=kabsch(src,dst); if(RT) applyRigidInPlace(pb, RT.R, RT.t);
 }
 
 // ---- pose: forward fold (rigid origami) + PBD relax, then stitch solve ------

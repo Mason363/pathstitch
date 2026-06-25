@@ -311,33 +311,58 @@ struct ConstructModeView: View {
 
     // MARK: Glue (weld) joints — for glue-tab construction
 
+    private let glueModes: [(String, String)] = [
+        ("panel", "Pieces"), ("face", "Faces"), ("edge", "Edges")
+    ]
+
     private var glueSection: some View {
         VStack(alignment: .leading, spacing: 6) {
             sectionHeader("Glue")
+            // How the bond seats — pick before clicking the two parts.
+            Picker("", selection: Binding(
+                get: { state.constructGlueMode },
+                set: { state.setConstructGlueMode($0) })) {
+                ForEach(glueModes, id: \.0) { key, label in Text(label).tag(key) }
+            }
+            .pickerStyle(.segmented).controlSize(.small).labelsHidden()
+            Text(glueModeBlurb(state.constructGlueMode))
+                .font(PlasticityFont.label).foregroundColor(.text_secondary.opacity(0.7))
+
             if state.constructTool == .glue {
                 if let p = state.selectedPanelForGlue {
-                    Text("Panel \(p) selected — click another panel to glue them.")
+                    Text("Panel \(p) picked — click the \(glueTarget(state.constructGlueMode)) on the other piece.")
                         .font(PlasticityFont.label).foregroundColor(.accent)
                 } else {
-                    Text("Glue tool — click two panels to weld their meeting edges.")
+                    Text("Glue tool — click the \(glueTarget(state.constructGlueMode)) on one piece, then the other.")
                         .font(PlasticityFont.label).foregroundColor(.text_secondary.opacity(0.8))
                 }
             } else {
                 Button { state.setConstructTool(.glue) } label: {
-                    HStack { Image(systemName: ConstructTool.glue.icon); Text("Glue panels") }
+                    HStack { Image(systemName: ConstructTool.glue.icon); Text("Glue tool") }
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(PlasticityButtonStyle(isEnabled: true))
             }
             ForEach(state.constructGlues) { g in
                 HStack {
-                    Text("Panel \(g.panelA) ⊕ \(g.panelB)").font(PlasticityFont.label).foregroundColor(.text_primary)
+                    Text("Panel \(g.panelA) ⊕ \(g.panelB) · \(g.mode)").font(PlasticityFont.label).foregroundColor(.text_primary)
                     Spacer()
                     Button { state.removeGlue(g.id) } label: { Image(systemName: "xmark.circle").font(.system(size: 11)) }
                         .buttonStyle(.plain).foregroundColor(.text_secondary)
                 }
             }
         }
+    }
+
+    private func glueModeBlurb(_ m: String) -> String {
+        switch m {
+        case "face": return "Lay the two chosen faces flat together (overlay / tab onto a panel)."
+        case "edge": return "Align the two chosen edges (join pieces along an edge)."
+        default:     return "Stick the two pieces together where they're nearest (general)."
+        }
+    }
+    private func glueTarget(_ m: String) -> String {
+        switch m { case "face": return "face"; case "edge": return "edge"; default: return "piece" }
     }
 
     private func foldRow(_ spec: FoldSpec) -> some View {

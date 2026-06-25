@@ -2041,6 +2041,9 @@ class AppState {
     var constructUserFolds: [ConstructUserFold] = []
     var constructGlues: [GlueJoint] = []
     var selectedPanelForGlue: Int? = nil   // first panel picked while gluing
+    var selectedGluePoint: [Double]? = nil // first pick's clicked face/edge point
+    var constructGlueMode: String = "panel" // panel | face | edge (how the bond seats)
+    var constructGlueModeToken: Int = 0
 
     // Mockup material (Phase 4): leather colour + thickness, pushed live.
     var constructMaterialHex: String = "8A5A2B"
