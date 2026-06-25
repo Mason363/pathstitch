@@ -160,6 +160,7 @@ const _IDENT=new THREE.Matrix4();
 
 function clearPanels(){
   for(const p of PANELS){
+    if(p.mat && p.mat.map){ p.mat.map.dispose(); }   // artwork texture
     if(p.shell){ root.remove(p.shell); p.shell.geometry.dispose(); }  // shares p.mat
     if(p.mesh){ root.remove(p.mesh); p.mesh.geometry.dispose(); p.mesh.material.dispose(); }
     if(p.foldLine){ root.remove(p.foldLine); p.foldLine.geometry.dispose(); p.foldLine.material.dispose(); }
@@ -336,6 +337,7 @@ function buildPanelMeshes(panel){
   geo.setAttribute("position", new THREE.BufferAttribute(pos,3));
   const idx=[]; for(const t of panel.triangles){ idx.push(t[0],t[1],t[2]); }
   geo.setIndex(idx);
+  geo.setAttribute("uv", new THREE.BufferAttribute(panelUVs(panel),2));  // for artwork map
   const mat=makeLeatherMaterial(MATERIAL_COLOR);
   const mesh=new THREE.Mesh(geo,mat); mesh.userData.panelId=panel.id;
   mesh.castShadow=true; mesh.receiveShadow=true;
@@ -667,6 +669,8 @@ function writePanelGeometry(panel){
     panel.shell.geometry.computeVertexNormals();
     panel.shell.geometry.computeBoundingSphere();
   }
+  // (artwork is the panel's own albedo map — UV-locked to the surface, so it
+  // rides every fold automatically; nothing extra to update here.)
   // wire
   const wp=panel.wire.geometry.attributes.position.array;
   panel.edges.forEach(([a,b],i)=>{ const A=panel.X[a],B=panel.X[b]; wp[i*6]=A[0];wp[i*6+1]=A[1];wp[i*6+2]=A[2]; wp[i*6+3]=B[0];wp[i*6+4]=B[1];wp[i*6+5]=B[2]; });
@@ -793,9 +797,68 @@ window.setConstructBrush=function(r){ BRUSH_R=(r&&r>0)?r:25; };
 // Mockup material controls (Phase 4).
 window.setConstructMaterial=function(hex){
   if(hex!=null) MATERIAL_COLOR=hex>>>0;
-  for(const p of PANELS){ if(p.mat) p.mat.color.setHex(MATERIAL_COLOR); }
+  // panels showing artwork keep white (the map is their albedo); others tint.
+  for(const p of PANELS){ if(p.mat && DECALS[p.id]===undefined) p.mat.color.setHex(MATERIAL_COLOR); }
 };
 window.setConstructThickness=function(t){ THICKNESS=Math.max(0, t||0); needsPose=true; };
+
+// ---- custom artwork decals (Phase 4) ---------------------------------------
+// A dropped image becomes a transparent overlay riding a panel's mesh (art on
+// top of the leather, leather showing through the PNG's transparency). UVs come
+// from the panel's flat 2D layout, so the art is positioned by the design. The
+// decal is visual-only — it never touches the 2D cut geometry.
+let DECALS={};  // panelId -> dataURL
+function panelUVs(panel){
+  const v=panel.v2d; let minx=1e18,miny=1e18,maxx=-1e18,maxy=-1e18;
+  for(const p of v){ if(p[0]<minx)minx=p[0]; if(p[1]<miny)miny=p[1]; if(p[0]>maxx)maxx=p[0]; if(p[1]>maxy)maxy=p[1]; }
+  const w=(maxx-minx)||1, h=(maxy-miny)||1, uv=new Float32Array(v.length*2);
+  for(let i=0;i<v.length;i++){ uv[i*2]=(v[i][0]-minx)/w; uv[i*2+1]=(v[i][1]-miny)/h; }
+  return uv;
+}
+function applyDecalToPanel(panel, dataURL){
+  DECALS[panel.id]=dataURL;
+  const img=new Image();
+  img.onload=function(){
+    // Composite the artwork over the current leather colour onto a canvas sized
+    // to the panel's aspect, then use it as the panel albedo (UVs map it to the
+    // flat layout, so it rides every fold). Transparent areas read as leather.
+    const v=panel.v2d; let mnx=1e18,mny=1e18,mxx=-1e18,mxy=-1e18;
+    for(const p of v){ if(p[0]<mnx)mnx=p[0]; if(p[1]<mny)mny=p[1]; if(p[0]>mxx)mxx=p[0]; if(p[1]>mxy)mxy=p[1]; }
+    const aw=(mxx-mnx)||1, ah=(mxy-mny)||1;
+    const W=512, H=Math.max(64, Math.round(512*ah/aw));
+    const cv=document.createElement("canvas"); cv.width=W; cv.height=H; const cx=cv.getContext("2d");
+    cx.fillStyle="#"+("000000"+MATERIAL_COLOR.toString(16)).slice(-6); cx.fillRect(0,0,W,H);
+    // WKWebView reports img.width/height as 0 at onload for data-URL images — use
+    // naturalWidth/Height (fallback to the canvas so the art always draws).
+    const iw=img.naturalWidth||img.width||W, ih=img.naturalHeight||img.height||H;
+    const r=Math.min(W/iw, H/ih)*0.9, dw=iw*r, dh=ih*r;
+    cx.drawImage(img, (W-dw)/2, (H-dh)/2, dw, dh);
+    const tex=new THREE.CanvasTexture(cv); tex.encoding=THREE.sRGBEncoding; tex.anisotropy=4; tex.flipY=true;
+    if(panel.mat.map) panel.mat.map.dispose();
+    panel.mat.map=tex; panel.mat.color.setHex(0xffffff); panel.mat.needsUpdate=true;
+  };
+  img.src=dataURL;
+}
+// Called from the drop handler with normalized device coords of the drop point.
+window.applyDroppedDecal=function(dataURL, ndcX, ndcY){
+  mouse.x=ndcX; mouse.y=ndcY; ray.setFromCamera(mouse,camera);
+  const hit=ray.intersectObjects(PANELS.map(p=>p.mesh),false)[0];
+  const panel = hit ? PANEL_BY_ID[hit.object.userData.panelId] : (PANELS[CONTROLS.groundPanel]||PANELS[0]);
+  if(panel){ applyDecalToPanel(panel, dataURL); post({op:"decalApplied", panelId:panel.id, dataURL:dataURL}); }
+};
+// Re-apply persisted decals (Swift pushes {panelId: dataURL}); also reconcile
+// removals — any panel with a decal not in the set has its overlay dropped.
+window.setConstructDecals=function(jsonStr){
+  let d; try{ d=JSON.parse(jsonStr); }catch(e){ return; }
+  d=d||{};
+  for(const p of PANELS){
+    if(d[p.id]!==undefined){ applyDecalToPanel(p, d[p.id]); }
+    else if(DECALS[p.id]!==undefined){   // remove artwork → back to plain leather
+      if(p.mat.map){ p.mat.map.dispose(); p.mat.map=null; }
+      p.mat.color.setHex(MATERIAL_COLOR); p.mat.needsUpdate=true; delete DECALS[p.id];
+    }
+  }
+};
 
 // ---- create a fold line in 3D (two clicks on a panel) ----------------------
 function bary3(p,a,b,c){

@@ -17,6 +17,7 @@ struct ConstructModeView: View {
                     toolToken: state.constructToolToken,
                     brushToken: state.constructBrushToken,
                     materialToken: state.constructMaterialToken,
+                    decalToken: state.constructDecalToken,
                     homeToken: state.triggerConstructHomeToken,
                     state: state
                 )
@@ -353,6 +354,18 @@ struct ConstructModeView: View {
                 in: 0.5...8, step: 0.1
             )
             .controlSize(.small)
+
+            Divider().background(Color.border_subtle).padding(.vertical, 2)
+            Text("Artwork").font(PlasticityFont.label).foregroundColor(.text_secondary).tracking(1)
+            Text("Drop an image (PNG/JPG) onto a panel to add it as artwork — visual only, it rides the fold and never changes the cut pattern.")
+                .font(PlasticityFont.label).foregroundColor(.text_secondary.opacity(0.8))
+            if !state.constructDecals.isEmpty {
+                Button { state.clearConstructDecals() } label: {
+                    HStack { Image(systemName: "trash"); Text("Clear artwork (\(state.constructDecals.count))") }
+                        .font(PlasticityFont.label)
+                }
+                .buttonStyle(.plain).foregroundColor(.text_secondary)
+            }
         }
     }
 

@@ -152,6 +152,22 @@ extension AppState {
         Int(constructMaterialHex.trimmingCharacters(in: CharacterSet(charactersIn: "#")), radix: 16) ?? 0x8A5A2B
     }
 
+    /// {panelId: dataURL} for the viewport to re-apply artwork decals.
+    var constructDecalsJSON: String {
+        var obj: [String: String] = [:]
+        for (pid, url) in constructDecals { obj[String(pid)] = url }
+        guard let d = try? JSONSerialization.data(withJSONObject: obj),
+              let s = String(data: d, encoding: .utf8) else { return "{}" }
+        return s
+    }
+
+    /// Clears all artwork decals (the viewport reconciles removals).
+    func clearConstructDecals() {
+        constructDecals.removeAll()
+        constructDecalToken += 1
+        hasUnsavedChanges = true
+    }
+
     /// Re-poses from the folded rest state, clearing any brush drape.
     func resetConstructDrape() {
         constructFoldStateToken += 1   // re-applying controls re-solves from rest

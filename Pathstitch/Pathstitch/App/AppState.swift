@@ -2002,6 +2002,11 @@ class AppState {
     var constructThicknessMm: Double = 2.0
     var constructMaterialToken: Int = 0
 
+    // Custom artwork decals (Phase 4): panelId → image data URL. Visual-only,
+    // ride the folded mesh, never touch the 2D cut geometry. Persisted in .stch.
+    var constructDecals: [Int: String] = [:]
+    var constructDecalToken: Int = 0
+
     // Phase 4: Globe UX / Interactivity & Overrides
     var anchorFace3D: SelectedFace? {
         didSet {
@@ -6985,7 +6990,7 @@ class AppState {
                 },
                 savedConstructAssembly: (constructFolds.isEmpty && constructGroundPanel == 0
                                          && constructSeams.isEmpty && constructUserFolds.isEmpty
-                                         && constructGlues.isEmpty) ? nil :
+                                         && constructGlues.isEmpty && constructDecals.isEmpty) ? nil :
                     ConstructAssembly(
                         groundPanel: constructGroundPanel,
                         folds: constructFolds,
@@ -6996,7 +7001,9 @@ class AppState {
                         seams: constructSeams.isEmpty ? nil : constructSeams,
                         holeChains: constructHoleChains.isEmpty ? nil : constructHoleChains,
                         userFolds: constructUserFolds.isEmpty ? nil : constructUserFolds,
-                        glues: constructGlues.isEmpty ? nil : constructGlues)
+                        glues: constructGlues.isEmpty ? nil : constructGlues,
+                        decals: constructDecals.isEmpty ? nil :
+                            Dictionary(uniqueKeysWithValues: constructDecals.map { (String($0.key), $0.value) }))
             )
 
             let encoder = JSONEncoder()
@@ -7103,6 +7110,8 @@ class AppState {
                     self.constructThicknessMm = mat.thicknessMm
                     self.constructMaterialHex = mat.colorHex
                 }
+                self.constructDecals = Dictionary(uniqueKeysWithValues:
+                    (asm.decals ?? [:]).compactMap { k, v in Int(k).map { ($0, v) } })
             }
             self.logEntries = validContainer.logEntries
             self.canvasScale = CGFloat(validContainer.canvasScale)

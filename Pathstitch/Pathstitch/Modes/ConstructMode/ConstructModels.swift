@@ -160,6 +160,8 @@ struct ConstructAssembly: Codable {
     var userFolds: [ConstructUserFold]? = nil
     /// Glue (weld) joints between panels — for glue-tab construction.
     var glues: [GlueJoint]? = nil
+    /// Artwork decals: panelId (as string) → image data URL. Visual-only.
+    var decals: [String: String]? = nil
 }
 
 /// A glue/weld join: panel B is seated onto panel A where their edges meet and

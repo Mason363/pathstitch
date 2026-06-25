@@ -17,6 +17,7 @@ struct ConstructViewport: NSViewRepresentable {
     let toolToken: Int
     let brushToken: Int
     let materialToken: Int
+    let decalToken: Int
     let homeToken: Int
     var state: AppState
 
@@ -56,6 +57,7 @@ struct ConstructViewport: NSViewRepresentable {
         context.coordinator.pushTool()
         context.coordinator.pushBrush()
         context.coordinator.pushMaterial()
+        context.coordinator.pushDecals()
         context.coordinator.pushHome()
     }
 
@@ -70,6 +72,7 @@ struct ConstructViewport: NSViewRepresentable {
         private var lastToolToken = -1
         private var lastBrushToken = -1
         private var lastMaterialToken = -1
+        private var lastDecalToken = -1
         private var lastHomeToken = -1
 
         init(state: AppState) { self.state = state }
@@ -91,12 +94,14 @@ struct ConstructViewport: NSViewRepresentable {
                     self.lastToolToken = -1
                     self.lastBrushToken = -1
                     self.lastMaterialToken = -1
+                    self.lastDecalToken = -1
                     self.pushModel()
                     self.pushControls()
                     self.pushSeams()
                     self.pushTool()
                     self.pushBrush()
                     self.pushMaterial()
+                    self.pushDecals()
                 }
             case "selectFold":
                 let panelId = json["panelId"] as? Int ?? 0
@@ -123,6 +128,16 @@ struct ConstructViewport: NSViewRepresentable {
                     if seg.count == 2 && seg[0].count == 2 && seg[1].count == 2 {
                         self.state.addConstructUserFold(panelId: panelId,
                             x0: seg[0][0], y0: seg[0][1], x1: seg[1][0], y1: seg[1][1])
+                    }
+                }
+            case "decalApplied":
+                let panelId = json["panelId"] as? Int ?? -1
+                let dataURL = json["dataURL"] as? String ?? ""
+                DispatchQueue.main.async {
+                    if panelId >= 0 && !dataURL.isEmpty {
+                        self.state.constructDecals[panelId] = dataURL
+                        self.lastDecalToken = self.state.constructDecalToken  // already applied in JS
+                        self.state.hasUnsavedChanges = true
                     }
                 }
             case "selectChain":
@@ -152,6 +167,7 @@ struct ConstructViewport: NSViewRepresentable {
             lastModelToken = state.constructModelToken
             lastFoldToken = -1  // re-apply controls to the freshly loaded mesh
             lastSeamToken = -1  // re-apply seams to the freshly loaded mesh
+            lastDecalToken = -1 // re-apply decals to the freshly loaded mesh
             let esc = Self.escape(json)
             webView.evaluateJavaScript("loadConstructModel(\"\(esc)\");", completionHandler: nil)
         }
@@ -194,6 +210,14 @@ struct ConstructViewport: NSViewRepresentable {
             webView.evaluateJavaScript("setConstructThickness(\(state.constructThicknessMm));", completionHandler: nil)
         }
 
+        func pushDecals() {
+            guard ready, let webView = webView else { return }
+            guard lastDecalToken != state.constructDecalToken else { return }
+            lastDecalToken = state.constructDecalToken
+            let esc = Self.escape(state.constructDecalsJSON)
+            webView.evaluateJavaScript("setConstructDecals(\"\(esc)\");", completionHandler: nil)
+        }
+
         func pushHome() {
             guard ready, let webView = webView else { return }
             guard lastHomeToken != state.triggerConstructHomeToken else { return }
@@ -231,6 +255,23 @@ final class ConstructDropWebView: WKWebView {
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
         let urls = fileURLs(sender)
         guard !urls.isEmpty else { return super.performDragOperation(sender) }
+        // An image dropped onto the assembly becomes an artwork decal on the panel
+        // under the cursor (visual-only, never added to the 2D geometry). Everything
+        // else (.dxf/.stch) is imported into the workspace as before.
+        let imageExts: Set<String> = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "tiff", "tif", "heic"]
+        if let img = urls.first(where: { imageExts.contains($0.pathExtension.lowercased()) }),
+           let data = try? Data(contentsOf: img) {
+            let pt = convert(sender.draggingLocation, from: nil)
+            let nx = Double(pt.x / max(bounds.width, 1)) * 2 - 1
+            let ny = Double(pt.y / max(bounds.height, 1)) * 2 - 1   // AppKit y is bottom-up = NDC y
+            let mimes = ["png": "image/png", "gif": "image/gif", "webp": "image/webp", "bmp": "image/bmp"]
+            let mime = mimes[img.pathExtension.lowercased()] ?? "image/jpeg"
+            let dataURL = "data:\(mime);base64,\(data.base64EncodedString())"
+            DispatchQueue.main.async {
+                self.evaluateJavaScript("applyDroppedDecal('\(dataURL)', \(nx), \(ny));", completionHandler: nil)
+            }
+            return true
+        }
         onFileDrop?(urls)
         return true
     }
