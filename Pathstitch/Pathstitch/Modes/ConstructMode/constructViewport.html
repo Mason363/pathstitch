@@ -61,7 +61,12 @@ renderer.shadowMap.type=THREE.PCFSoftShadowMap;
 
 const controls=new THREE.OrbitControls(camera, renderer.domElement);
 controls.enableDamping=true; controls.dampingFactor=0.08;
-controls.mouseButtons={ LEFT:null, MIDDLE:THREE.MOUSE.PAN, RIGHT:THREE.MOUSE.ROTATE };
+controls.screenSpacePanning=true;   // pan moves the object across the screen, intuitively
+// Standard CAD feel so the object is easy to move: left-drag orbits, right-drag
+// pans, scroll zooms. Clicks (near-zero movement) still fall through to tool
+// picking — only actual drags drive the camera.
+controls.mouseButtons={ LEFT:THREE.MOUSE.ROTATE, MIDDLE:THREE.MOUSE.DOLLY, RIGHT:THREE.MOUSE.PAN };
+controls.touches={ ONE:THREE.TOUCH.ROTATE, TWO:THREE.TOUCH.DOLLY_PAN };
 
 // Image-based lighting from a small procedural sky/studio gradient (soft, free).
 function makeEnv(){
