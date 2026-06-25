@@ -18,7 +18,13 @@ extension AppState {
     /// layer in the sketch (see `construct_ops._FOLD_LAYERS`); existing fold
     /// angles are preserved across rebuilds so a live edit doesn't reset the pose.
     func buildConstructModel() {
-        let dxfURL = ensureActiveDXFFileExists()
+        // Read-only snapshot of the live sketch — never mutates the 2D file/state
+        // (see snapshotSketchForWorker). No sketch yet → nothing to assemble; bail
+        // without writing or clobbering anything.
+        guard let dxfURL = snapshotSketchForWorker() else {
+            isBuildingConstructModel = false
+            return
+        }
         let ground = constructGroundPanel
         let extraFolds = constructUserFolds.map {
             ["panelId": $0.panelId, "seg": [[$0.x0, $0.y0], [$0.x1, $0.y1]]] as [String: Any]

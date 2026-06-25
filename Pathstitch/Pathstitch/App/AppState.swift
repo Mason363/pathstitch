@@ -5383,6 +5383,27 @@ class AppState {
         currentFilePath = url
         return url
     }
+
+    /// A **read-only** snapshot of the current sketch for the assembly worker.
+    /// Copies the live DXF to a dedicated temp file so Construct mode never mutates
+    /// `currentFilePath` / `entities` / `layers`. Previously the assembler called
+    /// `ensureActiveDXFFileExists()`, which — when there was no saved file — wrote
+    /// an *empty* DXF and reassigned `currentFilePath`; a later `reloadDXF()` then
+    /// read that empty file back and the 2D sketch "disappeared" after assembly.
+    /// Returns nil when there's nothing to assemble (caller skips, clobbers nothing).
+    func snapshotSketchForWorker() -> URL? {
+        guard let src = currentFilePath, FileManager.default.fileExists(atPath: src.path) else { return nil }
+        let tempDir = sessionTempDirectory
+        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let dst = tempDir.appendingPathComponent("construct_sketch.dxf")
+        do {
+            if FileManager.default.fileExists(atPath: dst.path) { try FileManager.default.removeItem(at: dst) }
+            try FileManager.default.copyItem(at: src, to: dst)
+            return dst
+        } catch {
+            return src   // worst case, read the original in place (still read-only)
+        }
+    }
     
     /// Insert a real-world template (centred at the model origin) on a dedicated
     /// `TEMPLATE` layer. Rect/rounded → rectangle op; circle → circle op; polygon
