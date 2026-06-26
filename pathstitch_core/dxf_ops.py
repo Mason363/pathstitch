@@ -1789,6 +1789,81 @@ def robust_shape_bounds(msp) -> Optional[Tuple[float, float, float, float]]:
             max(b[2] for b in kept), max(b[3] for b in kept))
 
 
+def _boxes_overlap(cx, cy, w, h, placed, gap):
+    """True if a w×h box centred at (cx,cy) overlaps any placed box by > 0.1 mm
+    after honouring `gap`. Touching exactly is allowed."""
+    c_xmin = cx - w / 2.0
+    c_xmax = cx + w / 2.0
+    c_ymin = cy - h / 2.0
+    c_ymax = cy + h / 2.0
+    for px1, py1, px2, py2 in placed:
+        if (c_xmin < px2 + gap - 0.1 and c_xmax > px1 - gap + 0.1 and
+                c_ymin < py2 + gap - 0.1 and c_ymax > py1 - gap + 0.1):
+            return True
+    return False
+
+
+def _boxes_near(b1, b2, tol):
+    """True if two (xmin,ymin,xmax,ymax) boxes touch or sit within `tol`."""
+    return (b1[0] <= b2[2] + tol and b1[2] >= b2[0] - tol and
+            b1[1] <= b2[3] + tol and b1[3] >= b2[1] - tol)
+
+
+def _best_mat_placement(w, h, placed, mat_w, mat_h, margin):
+    """Find the best centre for a w×h box on a finite cutting mat.
+
+    The mat occupies the (+,+) quadrant: [0,mat_w] × [0,mat_h] with its
+    bottom-left corner at the model origin. Pieces are never rotated or scaled.
+    Among non-overlapping candidates we strongly prefer ones that fit fully
+    inside the mat, filling from the bottom-left (rows bottom-up, then
+    left-to-right). Pieces that cannot fit are pushed just outside but kept as
+    close to the mat as possible. Returns (cx, cy) or None if no candidate is
+    free."""
+    cands = []
+    # Bottom-left grid fill inside the mat.
+    if mat_w > 0 and mat_h > 0:
+        step = max(margin, min(w, h) * 0.5, 5.0)
+        max_x = max(0.0, mat_w - w)
+        max_y = max(0.0, mat_h - h)
+        xs, x = [], 0.0
+        while x < max_x + step:
+            xs.append(min(x, max_x))
+            x += step
+        ys, y = [], 0.0
+        while y < max_y + step:
+            ys.append(min(y, max_y))
+            y += step
+        for yy in ys:
+            for xx in xs:
+                cands.append((xx + w / 2.0, yy + h / 2.0))
+    # Neighbour candidates around placed boxes help tight packing.
+    for p_xmin, p_ymin, p_xmax, p_ymax in placed:
+        cands.append((p_xmax + w / 2.0 + margin, p_ymin + h / 2.0))   # right, bottom-aligned
+        cands.append((p_xmin + w / 2.0, p_ymax + h / 2.0 + margin))   # above, left-aligned
+        cands.append((p_xmax + w / 2.0 + margin, p_ymax - h / 2.0))
+        cands.append((p_xmin + w / 2.0, p_ymin - h / 2.0 - margin))
+
+    row_weight = mat_w + 10.0   # so row (y) dominates column (x) in the fill order
+    best, best_score = None, float('inf')
+    for cx, cy in cands:
+        if _boxes_overlap(cx, cy, w, h, placed, margin):
+            continue
+        c_xmin = cx - w / 2.0
+        c_xmax = cx + w / 2.0
+        c_ymin = cy - h / 2.0
+        c_ymax = cy + h / 2.0
+        over = (max(0.0, -c_xmin) + max(0.0, c_xmax - mat_w) +
+                max(0.0, -c_ymin) + max(0.0, c_ymax - mat_h))
+        fill = c_ymin * row_weight + c_xmin
+        if over <= 1e-6:
+            score = fill                     # fully inside — pure bottom-left fill
+        else:
+            score = 1e9 + over * 1000.0 + fill   # overflow — hug the mat, stay close
+        if score < best_score:
+            best_score, best = score, (cx, cy)
+    return best
+
+
 def op_import_distribute(args: Dict[str, Any]) -> Dict[str, Any]:
     """Merges several DXF files into `primary`, arranging them in a compact,
     centred layout fitting viewport aspect ratio (around 1.5) close to the origin,
@@ -1799,6 +1874,12 @@ def op_import_distribute(args: Dict[str, Any]) -> Dict[str, Any]:
     secondaries = args.get("secondaries", [])
     layer_names = args.get("layer_names", [])
     margin_override = args.get("gap")
+    # Cutting mat: when enabled, pack pieces inside [0,mat_w]×[0,mat_h] (no
+    # rotation/scaling); overflow hugs the mat. Off = original origin-centred
+    # layout, byte-identical.
+    mat_w = float(args.get("mat_w", 0) or 0)
+    mat_h = float(args.get("mat_h", 0) or 0)
+    mat_enabled = bool(args.get("mat_enabled", False)) and mat_w > 0 and mat_h > 0
 
     if not primary_path or not os.path.exists(primary_path):
         return {"status": "error", "message": f"Primary file not found: {primary_path}"}
@@ -1862,7 +1943,18 @@ def op_import_distribute(args: Dict[str, Any]) -> Dict[str, Any]:
             fcx = (b[0] + b[2]) / 2.0
             fcy = (b[1] + b[3]) / 2.0
 
-            if not P:
+            if mat_enabled:
+                # Pack into the mat from the bottom-left; existing canvas content
+                # (the primary) is treated as an obstacle but never moved.
+                best = _best_mat_placement(w, h, P, mat_w, mat_h, margin)
+                if best is None:
+                    px_max = max((bx[2] for bx in P), default=mat_w)
+                    best = (px_max + w/2.0 + margin, h/2.0)
+                best_cx, best_cy = best
+                translate_doc(sec_doc, best_cx - fcx, best_cy - fcy)
+                B = (best_cx - w/2.0, best_cy - h/2.0, best_cx + w/2.0, best_cy + h/2.0)
+                P.append(B)
+            elif not P:
                 # Empty canvas: center first shape at (0, 0)
                 cx, cy = 0.0, 0.0
                 translate_doc(sec_doc, cx - fcx, cy - fcy)
@@ -1968,6 +2060,98 @@ def op_import_distribute(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"status": "ok", "data": {"merged": merged, "boxes": len(P), "handles_per_file": handles_per_file}}
     except Exception as e:
         return {"status": "error", "message": f"Failed to distribute import: {str(e)}"}
+
+
+def op_arrange_to_mat(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Re-pack the geometry already on the canvas into the cutting mat.
+
+    Groups modelspace entities into discrete pieces by spatial connectivity
+    (touching / near boxes are one piece), then places each piece inside
+    [0,mat_w]×[0,mat_h] from the bottom-left without rotating or scaling.
+    Pieces that don't fit are pushed just outside but kept close. Triggered by
+    the "Arrange to mat" button — never automatically, so it's non-destructive
+    until the user asks."""
+    input_path = args.get("input")
+    output_path = args.get("output") or input_path
+    mat_w = float(args.get("mat_w", 0) or 0)
+    mat_h = float(args.get("mat_h", 0) or 0)
+    margin = float(args.get("gap", 20.0) or 20.0)
+
+    if not input_path or not os.path.exists(input_path):
+        return {"status": "error", "message": f"File not found: {input_path}"}
+    if mat_w <= 0 or mat_h <= 0:
+        return {"status": "error", "message": "Cutting mat has no size."}
+
+    try:
+        doc = ezdxf.readfile(input_path)
+        msp = doc.modelspace()
+        ents = list(msp)
+        n = len(ents)
+        boxes = [_entity_bbox_with_points(e) for e in ents]
+
+        # Union-find clustering of entities whose boxes touch / sit within tol.
+        parent = list(range(n))
+
+        def find(i):
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+
+        def union(i, j):
+            ri, rj = find(i), find(j)
+            if ri != rj:
+                parent[ri] = rj
+
+        tol = max(margin * 0.5, 2.0)
+        idxs = [i for i in range(n) if boxes[i] is not None]
+        for a in range(len(idxs)):
+            i = idxs[a]
+            for b in range(a + 1, len(idxs)):
+                j = idxs[b]
+                if _boxes_near(boxes[i], boxes[j], tol):
+                    union(i, j)
+
+        clusters: Dict[int, list] = {}
+        for i in idxs:
+            clusters.setdefault(find(i), []).append(i)
+
+        # Largest pieces first — they're the hardest to place.
+        cluster_list = []
+        for members in clusters.values():
+            xs0 = min(boxes[i][0] for i in members)
+            ys0 = min(boxes[i][1] for i in members)
+            xs1 = max(boxes[i][2] for i in members)
+            ys1 = max(boxes[i][3] for i in members)
+            cluster_list.append((members, (xs0, ys0, xs1, ys1)))
+        cluster_list.sort(
+            key=lambda c: (c[1][2] - c[1][0]) * (c[1][3] - c[1][1]), reverse=True)
+
+        placed = []
+        moved = 0
+        for members, (xs0, ys0, xs1, ys1) in cluster_list:
+            w = xs1 - xs0
+            h = ys1 - ys0
+            best = _best_mat_placement(w, h, placed, mat_w, mat_h, margin)
+            if best is None:
+                px_max = max((bx[2] for bx in placed), default=mat_w)
+                best = (px_max + w / 2.0 + margin, h / 2.0)
+            cx, cy = best
+            dx = (cx - w / 2.0) - xs0
+            dy = (cy - h / 2.0) - ys0
+            if abs(dx) > 1e-9 or abs(dy) > 1e-9:
+                for i in members:
+                    try:
+                        ents[i].translate(dx, dy, 0)
+                    except Exception:
+                        pass
+            placed.append((cx - w / 2.0, cy - h / 2.0, cx + w / 2.0, cy + h / 2.0))
+            moved += 1
+
+        doc.saveas(output_path)
+        return {"status": "ok", "data": {"pieces": moved}}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to arrange to mat: {str(e)}"}
 
 
 def op_scale_all(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -2344,6 +2528,14 @@ def op_add_holes(args: Dict[str, Any]) -> Dict[str, Any]:
     hole_count = int(args.get("hole_count", 0) or 0)
     if distribution == "count" and hole_count > 0:
         enable_variable_spacing = False
+
+    # Chisel-step snapping (opt-in): round each contour's interval count to a whole
+    # multiple of the iron's prong count so a multi-prong chisel lands cleanly with
+    # uniform pitch. Ignored in count mode (exact count wins) and for 1-prong irons.
+    snap_to_chisel = bool(args.get("snap_to_chisel", False))
+    chisel_prongs = int(args.get("chisel_prongs", 1) or 1)
+    snap_to_chisel = snap_to_chisel and chisel_prongs > 1 and not (
+        distribution == "count" and hole_count > 0)
     
     # New customizable proximity and variable spacing parameters
     enable_line_proximity_filter = args.get("enable_line_proximity_filter", True)
@@ -2580,6 +2772,10 @@ def op_add_holes(args: Dict[str, Any]) -> Dict[str, Any]:
                 N = max(1, int(length / variable_spacing_min))
             elif pitch > variable_spacing_max:
                 N = int(math.ceil(length / variable_spacing_max))
+        if snap_to_chisel:
+            # Round the interval count to the nearest whole multiple of the prong
+            # count (at least one full chisel). step = length/N then stays uniform.
+            N = max(chisel_prongs, int(round(N / chisel_prongs)) * chisel_prongs)
         return max(1, N)
 
     def sample_offset_line(line: LineString, is_loop: bool, phase: float,
@@ -6439,6 +6635,7 @@ OPERATIONS = {
     "reflect_entities": op_reflect_entities,
     "append_dxf": op_append_dxf,
     "import_distribute": op_import_distribute,
+    "arrange_to_mat": op_arrange_to_mat,
     "normalize_dxf": op_normalize_dxf,
     "scale_all": op_scale_all,
     "export_dxf": op_export_dxf,

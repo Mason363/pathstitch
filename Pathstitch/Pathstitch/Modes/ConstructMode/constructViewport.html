@@ -144,6 +144,52 @@ const shadowCatcher=new THREE.Mesh(new THREE.PlaneGeometry(6000,6000),
 shadowCatcher.rotation.x=-Math.PI/2; shadowCatcher.position.y=-0.05; shadowCatcher.receiveShadow=true; scene.add(shadowCatcher);
 const grid=new THREE.GridHelper(600,60,0x3a3d42,0x2a2c30); grid.position.y=0; grid.material.opacity=0.5; grid.material.transparent=true; scene.add(grid);
 
+// ---- cutting mat / baseplate ----------------------------------------------
+// A finite work surface that mirrors the 2D cutting mat: occupies the (+,+)
+// quadrant (world x:[0,w], z:[0,h]) at y=0, since the flat layout maps model
+// 2D (x,y) -> world (x, 0, y). When enabled it replaces the infinite grid.
+let MAT={enabled:false, w:300, h:200, gridVisible:true, spacing:10};
+let matMesh=null, matGrid=null;
+function disposeMat(){
+  if(matMesh){ scene.remove(matMesh); matMesh.geometry.dispose(); matMesh.material.dispose(); matMesh=null; }
+  if(matGrid){ scene.remove(matGrid); matGrid.geometry.dispose(); matGrid.material.dispose(); matGrid=null; }
+}
+function rebuildMat(){
+  disposeMat();
+  const w=Math.max(1,MAT.w), h=Math.max(1,MAT.h);
+  // Plate: lies on the ground, bottom-left corner at the world origin.
+  matMesh=new THREE.Mesh(new THREE.PlaneGeometry(w,h),
+    new THREE.MeshStandardMaterial({color:0x23262b, roughness:0.95, metalness:0.0, side:THREE.DoubleSide}));
+  matMesh.rotation.x=-Math.PI/2; matMesh.position.set(w/2, -0.02, h/2); matMesh.receiveShadow=true;
+  scene.add(matMesh);
+  // Mat-local grid lines at the user's fixed spacing, in the X-Z plane.
+  if(MAT.gridVisible){
+    const sp=Math.max(1,MAT.spacing), pts=[];
+    for(let x=0; x<=w+1e-6; x+=sp){ pts.push(x,0,0, x,0,h); }
+    for(let z=0; z<=h+1e-6; z+=sp){ pts.push(0,0,z, w,0,z); }
+    const g=new THREE.BufferGeometry();
+    g.setAttribute("position", new THREE.Float32BufferAttribute(pts,3));
+    matGrid=new THREE.LineSegments(g, new THREE.LineBasicMaterial({color:0x3a3d42, transparent:true, opacity:0.6}));
+    matGrid.position.y=0.0; scene.add(matGrid);
+  }
+  updateMatVisibility();
+}
+// Mat shows only when enabled and not in a clean mockup beauty shot; the infinite
+// grid yields to the mat while it's on.
+function updateMatVisibility(){
+  const mock=(typeof RENDER_MODE!=="undefined" && RENDER_MODE==="mockup");
+  grid.visible = !mock && !MAT.enabled;
+  if(matMesh) matMesh.visible = !mock && MAT.enabled;
+  if(matGrid) matGrid.visible = !mock && MAT.enabled;
+}
+window.setConstructMat=function(jsonStr){
+  try{ const d=JSON.parse(jsonStr); if(d){
+    MAT.enabled=!!d.enabled; MAT.w=+d.w||MAT.w; MAT.h=+d.h||MAT.h;
+    MAT.gridVisible=(d.gridVisible!==false); MAT.spacing=+d.spacing||MAT.spacing;
+  } }catch(e){}
+  rebuildMat();
+};
+
 const root=new THREE.Group(); scene.add(root);
 
 // ---- procedural leather material (built-in, no network) --------------------
@@ -194,17 +240,31 @@ function makeLeatherMaterial(hex){
   if(LEATHER_TEX){ m.map=LEATHER_TEX; m.color.setHex(0xffffff); }
   return m;
 }
-// Switch the leather finish on every panel (matte / satin / glossy).
+// Shading mode, independent of edit/mockup: how each panel is drawn.
+//   realistic = PBR leather (default)   wireframe = edges only
+//   solid     = flat unlit fill         flat      = flat-shaded lit (no PBR sheen)
+let SHADER_MODE="realistic";
+function materialForMode(hex){
+  if(SHADER_MODE==="wireframe")
+    return new THREE.MeshBasicMaterial({color:0x9ad1ff, wireframe:true, side:THREE.DoubleSide});
+  if(SHADER_MODE==="solid")
+    return new THREE.MeshBasicMaterial({color:hex, side:THREE.DoubleSide});
+  if(SHADER_MODE==="flat")
+    return new THREE.MeshLambertMaterial({color:hex, side:THREE.DoubleSide, flatShading:true});
+  return makeLeatherMaterial(hex);   // realistic
+}
+// Switch the leather finish on every panel (matte / satin / glossy). Only the PBR
+// material carries a finish, so other shading modes are left untouched.
 window.setConstructFinish=function(name){
   FINISH=FINISHES[name]||FINISHES.satin;
-  for(const p of PANELS){ if(p.mat){ p.mat.roughness=FINISH.roughness; p.mat.clearcoat=FINISH.clearcoat; p.mat.clearcoatRoughness=FINISH.ccRough; p.mat.needsUpdate=true; } }
+  for(const p of PANELS){ if(p.mat && p.mat.isMeshPhysicalMaterial){ p.mat.roughness=FINISH.roughness; p.mat.clearcoat=FINISH.clearcoat; p.mat.clearcoatRoughness=FINISH.ccRough; p.mat.needsUpdate=true; } }
 };
 // Custom leather albedo (a photo / seamless texture) tiled across every plain-leather
 // panel; panels carrying artwork keep their own composited map. tiling = repeats per
 // panel. Pass an empty url to clear back to the tinted procedural leather.
 window.setConstructLeatherTexture=function(dataURL, tiling){
   tiling=(tiling>0?tiling:1);
-  const apply=()=>{ for(const p of PANELS){ if(p.mat){
+  const apply=()=>{ for(const p of PANELS){ if(p.mat && p.mat.isMeshPhysicalMaterial){
       p.mat.map=LEATHER_TEX||null; p.mat.color.setHex(LEATHER_TEX?0xffffff:MATERIAL_COLOR); p.mat.needsUpdate=true; } } };
   if(!dataURL){ if(LEATHER_TEX){ LEATHER_TEX.dispose(); LEATHER_TEX=null; } apply(); return; }
   const img=new Image();
@@ -466,7 +526,7 @@ function buildPanelMeshes(panel){
   const idx=[]; for(const t of panel.triangles){ idx.push(t[0],t[1],t[2]); }
   geo.setIndex(idx);
   geo.setAttribute("uv", new THREE.BufferAttribute(panelUVs(panel),2));  // for artwork map
-  const mat=makeLeatherMaterial(MATERIAL_COLOR);
+  const mat=materialForMode(MATERIAL_COLOR);
   const mesh=new THREE.Mesh(geo,mat); mesh.userData.panelId=panel.id;
   mesh.castShadow=true; mesh.receiveShadow=true;
   root.add(mesh); panel.mesh=mesh; panel.mat=mat;
@@ -1105,7 +1165,7 @@ function studioBG(){
 }
 function applyRenderMode(){
   const mock=(RENDER_MODE==="mockup");
-  grid.visible=!mock;
+  updateMatVisibility();   // grid / mat both depend on mockup state
   for(const p of PANELS){ if(p.wire) p.wire.visible=!mock; if(p.foldLine) p.foldLine.visible=!mock; }
   if(holeMesh) holeMesh.visible=!mock;
   if(chainLineMesh) chainLineMesh.visible=!mock;
@@ -1114,6 +1174,24 @@ function applyRenderMode(){
   document.getElementById("hud").style.display = mock ? "none" : "block";
 }
 window.setConstructRenderMode=function(m){ RENDER_MODE=(m==="mockup")?"mockup":"edit"; applyRenderMode(); };
+
+// Swap the shading of every panel (wireframe / solid / flat / realistic). Works
+// in both edit and mockup. Realistic re-honours the leather tint + custom map.
+window.setConstructShaderMode=function(name){
+  const allowed={wireframe:1, solid:1, flat:1, realistic:1};
+  SHADER_MODE = allowed[name] ? name : "realistic";
+  for(const p of PANELS){
+    if(!p.mesh) continue;
+    const old=p.mat;
+    const nm=materialForMode(MATERIAL_COLOR);
+    p.mat=nm; p.mesh.material=nm; if(p.shell) p.shell.material=nm;
+    if(old && old.dispose) old.dispose();
+  }
+  if(SHADER_MODE==="realistic"){
+    for(const p of PANELS){ if(p.mat && p.mat.isMeshPhysicalMaterial){
+      p.mat.map=LEATHER_TEX||null; p.mat.color.setHex(LEATHER_TEX?0xffffff:MATERIAL_COLOR); p.mat.needsUpdate=true; } }
+  }
+};
 
 // ---- custom artwork decals (Phase 4) ---------------------------------------
 // A dropped image becomes a transparent overlay riding a panel's mesh (art on

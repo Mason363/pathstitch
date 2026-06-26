@@ -23,6 +23,8 @@ struct ConstructModeView: View {
                     transformModeToken: state.constructTransformModeToken,
                     exportToken: state.constructExportToken,
                     renderToken: state.constructRenderToken,
+                    shaderToken: state.constructShaderToken,
+                    matToken: state.matToken,
                     lightingToken: state.constructLightingToken,
                     textureToken: state.constructTextureToken,
                     selFoldToken: state.constructSelFoldToken,
@@ -224,6 +226,11 @@ struct ConstructModeView: View {
                     // lighting (presentation) controls.
                     renderModeSection
 
+                    // Shading + cutting mat — display aids that apply in both Edit
+                    // and Mockup, so they sit above the mode-specific controls.
+                    shadingSection
+                    matSection
+
                     if state.constructArtworkMode {
                         artworkPanel
                     } else if state.constructRenderMode == "mockup" {
@@ -259,6 +266,57 @@ struct ConstructModeView: View {
                  : "Edit — fold lines, holes and gizmos shown for building. Switch to Mockup for a beauty render.")
                 .font(PlasticityFont.label).foregroundColor(.text_secondary.opacity(0.8))
                 .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    // MARK: Shading — how panels are drawn (independent of Edit/Mockup)
+
+    private let shaderModes: [(String, String)] = [
+        ("wireframe", "Wire"), ("solid", "Solid"), ("flat", "Flat"), ("realistic", "Realistic")
+    ]
+
+    private var shadingSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("SHADING").font(PlasticityFont.header).foregroundColor(.text_secondary)
+            Picker("", selection: Binding(
+                get: { state.constructShaderMode },
+                set: { state.setConstructShaderMode($0) })) {
+                ForEach(shaderModes, id: \.0) { key, label in Text(label).tag(key) }
+            }
+            .pickerStyle(.segmented).controlSize(.small).labelsHidden()
+            Text("How panels are drawn — works in both Edit and Mockup. Realistic is the PBR leather; Wire/Solid/Flat are inspection views.")
+                .font(PlasticityFont.label).foregroundColor(.text_secondary.opacity(0.8))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    // MARK: Cutting mat — finite baseplate shared with the 2D canvas
+
+    private var matSection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Toggle(isOn: Binding(
+                get: { state.matEnabled },
+                set: { state.matEnabled = $0; state.bumpMat() })) {
+                Text("Cutting mat").font(PlasticityFont.label).foregroundColor(.text_primary)
+            }
+            if state.matEnabled {
+                HStack(spacing: 6) {
+                    Text("W").font(PlasticityFont.label).foregroundColor(.text_secondary)
+                    TextField("W", value: Binding(get: { state.matWidthMm },
+                        set: { state.matWidthMm = $0; state.bumpMat() }), format: .number)
+                        .textFieldStyle(.roundedBorder).frame(width: 56)
+                    Text("H").font(PlasticityFont.label).foregroundColor(.text_secondary)
+                    TextField("H", value: Binding(get: { state.matHeightMm },
+                        set: { state.matHeightMm = $0; state.bumpMat() }), format: .number)
+                        .textFieldStyle(.roundedBorder).frame(width: 56)
+                    Text("mm").font(PlasticityFont.label).foregroundColor(.text_secondary)
+                }
+                Toggle(isOn: Binding(
+                    get: { state.matGridVisible },
+                    set: { state.matGridVisible = $0; state.bumpMat() })) {
+                    Text("Show mat grid").font(PlasticityFont.label).foregroundColor(.text_primary)
+                }
+            }
         }
     }
 

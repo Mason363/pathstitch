@@ -363,6 +363,14 @@ struct PathstitchApp: App {
                     .keyboardShortcut("-", modifiers: [.command])
                 Button("Zoom to Fit") { NSApp.activeAppState?.fitRequestToken += 1 }
                     .keyboardShortcut("0", modifiers: [.command])
+                // Scale the canvas to 1:1 with the physical display (no user input —
+                // reads the screen's real size). Toggles back to a normal fit.
+                Button((NSApp.activeAppState?.calibratedToScreen ?? false)
+                       ? "Actual Size (1:1) ✓" : "Actual Size (1:1)") {
+                    let st = NSApp.activeAppState
+                    if st?.calibratedToScreen == true { st?.uncalibrateScreen() }
+                    else { st?.calibrateToScreen(window: NSApp.keyWindow) }
+                }
                 Divider()
             }
 

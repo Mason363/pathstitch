@@ -1263,7 +1263,12 @@ struct DxfCanvasView: View {
         if state.gridVisible {
             drawGrid(context: context, size: size, bounds: modelBounds)
         }
-        
+
+        // Draw the cutting mat under the geometry but over the canvas grid.
+        if state.matEnabled {
+            drawMat(context: context, size: size, bounds: modelBounds)
+        }
+
         // Draw visual origin axes at (0,0)
         let originScreen = toScreen(dx: 0.0, dy: 0.0, size: size, bounds: modelBounds)
         var xAxisPath = SwiftUI.Path()
@@ -3880,7 +3885,53 @@ struct DxfCanvasView: View {
         // Draw major lines in one draw call
         context.stroke(majorPath, with: .color(Color.border_strong), lineWidth: 0.8)
     }
-    
+
+    /// Draw the finite cutting mat: a filled plate in the (+,+) quadrant with its
+    /// bottom-left corner at the model origin, an optional mat-local grid at the
+    /// user's spacing, and a clear border. Sizes follow the shared mat state so
+    /// the 2D mat and the Assembly mat always agree.
+    private func drawMat(context: GraphicsContext, size: CGSize, bounds: CGRect) {
+        let w = state.matWidthMm
+        let h = state.matHeightMm
+        guard w > 0, h > 0 else { return }
+
+        // Project the four mat corners (model mm) to screen points.
+        let bl = toScreen(dx: 0,  dy: 0,  size: size, bounds: bounds)   // bottom-left = origin
+        let tr = toScreen(dx: w,  dy: h,  size: size, bounds: bounds)   // top-right
+        let rect = CGRect(x: min(bl.x, tr.x), y: min(bl.y, tr.y),
+                          width: abs(tr.x - bl.x), height: abs(tr.y - bl.y))
+        let matPath = SwiftUI.Path(rect)
+
+        // Filled plate, faint so geometry on top stays legible.
+        context.fill(matPath, with: .color(Color.bg_input.opacity(0.5)))
+
+        // Mat-local grid, clipped to the mat rect, at the user's fixed spacing.
+        if state.matGridVisible {
+            let spacing = max(1.0, state.matGridSpacingMm)
+            var lines = SwiftUI.Path()
+            var x = spacing
+            while x < w - 1e-6 {
+                let a = toScreen(dx: x, dy: 0, size: size, bounds: bounds)
+                let b = toScreen(dx: x, dy: h, size: size, bounds: bounds)
+                lines.move(to: a); lines.addLine(to: b)
+                x += spacing
+            }
+            var y = spacing
+            while y < h - 1e-6 {
+                let a = toScreen(dx: 0, dy: y, size: size, bounds: bounds)
+                let b = toScreen(dx: w, dy: y, size: size, bounds: bounds)
+                lines.move(to: a); lines.addLine(to: b)
+                y += spacing
+            }
+            var clipped = context
+            clipped.clip(to: matPath)
+            clipped.stroke(lines, with: .color(Color.border_subtle), lineWidth: 0.5)
+        }
+
+        // Border last so it reads as the mat edge.
+        context.stroke(matPath, with: .color(Color.border_strong), lineWidth: 1.2)
+    }
+
     private func pointsOnArc(center: CGPoint, radius: Double, startAngle: Double, endAngle: Double, numSegments: Int = 16) -> [CGPoint] {
         var pts: [CGPoint] = []
         let sa = startAngle

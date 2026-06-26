@@ -485,6 +485,30 @@ extension AppState {
         hasUnsavedChanges = true
     }
 
+    /// How panels are shaded (wireframe / solid / flat / realistic), independent
+    /// of edit/mockup. Pushed live to the viewport.
+    func setConstructShaderMode(_ m: String) {
+        guard m != constructShaderMode else { return }
+        constructShaderMode = m
+        constructShaderToken += 1
+        hasUnsavedChanges = true
+    }
+
+    /// Cutting-mat config for the Assembly viewport — encodes the shared mat state
+    /// so the 3D mat matches the 2D mat exactly.
+    var constructMatJSON: String {
+        let obj: [String: Any] = [
+            "enabled": matEnabled,
+            "w": matWidthMm,
+            "h": matHeightMm,
+            "gridVisible": matGridVisible,
+            "spacing": matGridSpacingMm,
+        ]
+        guard let d = try? JSONSerialization.data(withJSONObject: obj),
+              let s = String(data: d, encoding: .utf8) else { return "{}" }
+        return s
+    }
+
     /// Leather finish preset (matte / satin / glossy); pushed with the material.
     func setConstructFinish(_ name: String) {
         guard name != constructFinish else { return }

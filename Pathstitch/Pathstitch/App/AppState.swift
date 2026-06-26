@@ -1,5 +1,6 @@
 import SwiftUI
 import Foundation
+import AppKit
 import UniformTypeIdentifiers
 import ZIPFoundation
 
@@ -716,7 +717,18 @@ struct ProjectSaveContainer: Codable {
     var holeCornerBehavior: String? = nil
     var holeSide: String? = nil
     var holeRowSpacing: Double? = nil
-    
+    var snapToChisel: Bool? = nil
+
+    // Cutting mat / baseplate (optional + defaulted = back-compatible with files
+    // saved before the mat existed). Shared by 2D and Assembly.
+    var matEnabled: Bool? = nil
+    var matWidthMm: Double? = nil
+    var matHeightMm: Double? = nil
+    var matGridVisible: Bool? = nil
+    var matGridSpacingMm: Double? = nil
+    // Assembly shading mode (wireframe | solid | flat | realistic).
+    var constructShaderMode: String? = nil
+
     // Glue tab settings
     var glueTabHeight: Double? = nil
     var glueTabType: String? = nil
@@ -971,9 +983,26 @@ class AppState {
                 patternPathHandle = nil
                 pickingPatternPath = false
             }
+            if currentTool == .addHoles {
+                // The sewing tool starts in single-segment selection — NOT chain
+                // select. We remember the chain-select state on entry so that a
+                // chain-select the user toggles ON *while in the tool* reverts when
+                // they leave, instead of leaking into every other tool. If chain
+                // select was already on before entering, it's left untouched on exit.
+                holesEntryChainSelection = chainSelectionEnabled
+            } else if oldValue == .addHoles {
+                if holesEntryChainSelection == false {
+                    chainSelectionEnabled = false
+                }
+                holesEntryChainSelection = nil
+            }
         }
     }
     var chainSelectionEnabled: Bool = false
+    /// Snapshot of `chainSelectionEnabled` taken when the sewing (Add Holes) tool
+    /// is entered, so a chain-select toggled on only for that tool session can be
+    /// reverted on exit. `nil` whenever the sewing tool isn't active.
+    private var holesEntryChainSelection: Bool? = nil
     /// Offset tool: emit construction (dashed reference) lines instead of normal
     /// solid sketch lines (MAS-109).
     var offsetConstruction: Bool = false
@@ -1057,6 +1086,23 @@ class AppState {
     var canvasScale: CGFloat = 1.0
     var canvasOffset: CGSize = .zero
     var gridVisible: Bool = true
+    // Cutting mat / baseplate — a finite work surface shared by the 2D canvas and
+    // the Assembly viewport so the two never disagree. Pinned to the (+,+)
+    // quadrant with its bottom-left corner at the model origin. Default OFF.
+    var matEnabled: Bool = false
+    var matWidthMm: Double = 300.0
+    var matHeightMm: Double = 200.0
+    var matGridVisible: Bool = true
+    var matGridSpacingMm: Double = 10.0
+    /// Bumped to push the current mat config into the Assembly WKWebView. The 2D
+    /// canvas reads the mat props directly each render, so it needs no token.
+    var matToken: Int = 0
+    func bumpMat() { matToken += 1; hasUnsavedChanges = true }
+    // "Calibrate to screen": when on, canvasScale is set so 1 model mm draws at 1
+    // real-world mm on the physical display. Transient + display-specific, so it
+    // is never persisted. preCalibrationScale restores the prior zoom on toggle-off.
+    var calibratedToScreen: Bool = false
+    var preCalibrationScale: CGFloat? = nil
     var threeDOrthographic: Bool = false
     /// Incremented to ask the 2D canvas to zoom/pan so all geometry is visible
     /// (e.g. after a multi-file distribute import). The canvas owns the view
@@ -1070,6 +1116,72 @@ class AppState {
     /// Step-zoom helpers used by the View menu (Zoom In / Zoom Out).
     func zoomIn()  { zoomStepFactor = 1.25; zoomStepToken += 1 }
     func zoomOut() { zoomStepFactor = 0.8;  zoomStepToken += 1 }
+
+    /// Set `canvasScale` so 1 model mm draws at 1 real-world mm on the physical
+    /// display — no user input required. Reads the display's physical size from
+    /// EDID via `CGDisplayScreenSize`. The canvas transform works in SwiftUI
+    /// points (not pixels), so the target is points-per-mm = frame.width(points)
+    /// / physicalWidth(mm); `backingScaleFactor` cancels out, so Retina is handled
+    /// automatically. Pass the window hosting the canvas so we calibrate to the
+    /// right screen.
+    func calibrateToScreen(window: NSWindow?) {
+        guard let screen = window?.screen ?? NSScreen.main,
+              let num = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber
+        else { return }
+        let displayID = CGDirectDisplayID(num.uint32Value)
+        let physMm = CGDisplayScreenSize(displayID)   // physical size in mm (EDID)
+        guard physMm.width > 0 else {
+            logAction("Calibrate to Screen",
+                      details: "Couldn't read this display's physical size (EDID unavailable); scale unchanged.")
+            return
+        }
+        let pointsPerMm = screen.frame.width / physMm.width
+        if preCalibrationScale == nil { preCalibrationScale = canvasScale }
+        canvasScale = pointsPerMm
+        calibratedToScreen = true
+    }
+
+    /// Leave 1:1 screen scale, restoring the zoom from before calibration (or a
+    /// clean re-fit as a fallback).
+    func uncalibrateScreen() {
+        if let s = preCalibrationScale { canvasScale = s }
+        preCalibrationScale = nil
+        calibratedToScreen = false
+        fitRequestToken += 1
+    }
+
+    /// Re-pack everything currently on the canvas into the cutting mat — the
+    /// popover's "Arrange to mat" button. Never runs automatically, so toggling
+    /// the mat on stays non-destructive; this only fires on explicit request.
+    func arrangeToMat() {
+        guard let url = currentFilePath, matWidthMm > 0, matHeightMm > 0 else { return }
+        saveToHistory()
+        isProcessing = true
+        let activeDxfURL = sessionTempDirectory.appendingPathComponent("active.dxf")
+        Task {
+            do {
+                let res = try await PythonBridge.shared.run(
+                    module: "dxf_ops", op: "arrange_to_mat",
+                    args: ["input": url.path, "output": activeDxfURL.path,
+                           "mat_w": matWidthMm, "mat_h": matHeightMm])
+                await MainActor.run {
+                    if let status = res["status"] as? String, status != "ok" {
+                        self.errorMessage = (res["message"] as? String) ?? "Arrange to mat failed."
+                        self.isProcessing = false
+                        return
+                    }
+                    self.currentFilePath = activeDxfURL
+                    self.reloadDXF(fitToContentAfter: true)
+                    self.hasUnsavedChanges = true
+                }
+            } catch {
+                await MainActor.run {
+                    self.errorMessage = error.localizedDescription
+                    self.isProcessing = false
+                }
+            }
+        }
+    }
     /// Bumped to request opening the Documentation window from a non-View
     /// context (e.g. the search palette). ContentView observes it.
     var openDocsToken: Int = 0
@@ -1106,15 +1218,21 @@ class AppState {
     // Place a stitch on (or as near as possible to) every corner sharper than
     // ~45°, flexing the spacing to land on it. On by default.
     var holeCornerHoles: Bool = true
+    // Opt-in (default off): round each path's hole count to a whole multiple of
+    // the selected iron's prong count so a multi-prong chisel lands cleanly with
+    // uniform pitch end-to-end.
+    var snapToChisel: Bool = false
     var holeSide: String = "left"
     var holeRowSpacing: Double = 3.0
     // Distance between the two staggered rows of a saddle stitch (only used when
     // holePattern == "saddle"). Separate from the legacy single-pattern spacing.
     var holeSaddleSpacing: Double = 3.0
-    // Chain selection (default on): on = holes run around the whole connected
-    // perimeter of the selected lines; off = holes only on each selected line, with
-    // per-end insets so the user controls how far the end holes sit from each tip.
-    var holeChainSelection: Bool = true
+    // Chain selection for the sewing tool is driven by the global
+    // `chainSelectionEnabled` toggle (the link button above the tool options),
+    // not a separate per-tool flag. When off, holes are placed only on each
+    // selected line with per-end insets controlling how far the end holes sit
+    // from each tip; when on, the selected connected lines are joined into one
+    // perimeter and holes run all the way around.
     var holeStartInset: Double = 0.0
     var holeEndInset: Double = 0.0
     // Corner treatment of the offset stitch line: false = sharp (mitre, default),
@@ -2084,6 +2202,10 @@ class AppState {
     // viewport, and persisted with the assembly.
     var constructRenderMode: String = "edit"        // "edit" | "mockup"
     var constructRenderToken: Int = 0
+    // How panels are shaded, independent of edit/mockup: wireframe | solid (flat
+    // unlit) | flat (flat-shaded lit) | realistic (PBR leather, default).
+    var constructShaderMode: String = "realistic"
+    var constructShaderToken: Int = 0
     var constructFinish: String = "satin"           // matte | satin | glossy (pushed w/ material)
     var constructLeatherTextureURL: String? = nil   // custom albedo data URL (visual only)
     var constructLeatherTiling: Double = 2          // repeats of the texture per panel
@@ -3628,7 +3750,13 @@ class AppState {
                         "primary": activeURL.path,
                         "secondaries": pairs.map { $0.temp },
                         "layer_names": layerNames,
-                        "output": activeURL.path
+                        "output": activeURL.path,
+                        // When the cutting mat is on, pack pieces inside it (no
+                        // rotation/scaling); overflow stays adjacent. Off = today's
+                        // origin-centred layout, byte-identical.
+                        "mat_enabled": self.matEnabled,
+                        "mat_w": self.matWidthMm,
+                        "mat_h": self.matHeightMm
                     ]
                 )
                 let handlesPerFile = (result["data"] as? [String: Any])?["handles_per_file"] as? [[String]] ?? []
@@ -5129,7 +5257,7 @@ class AppState {
             "side": holeSide,
             "row_spacing": holeRowSpacing,
             "saddle_spacing": holeSaddleSpacing,
-            "chain_selection": holeChainSelection,
+            "chain_selection": chainSelectionEnabled,
             "start_inset": holeStartInset,
             "end_inset": holeEndInset,
             "offset_corner_fillet": holeOffsetCornerFillet,
@@ -5148,8 +5276,16 @@ class AppState {
             "slit_length": holeSlitLength,
             "slit_width": holeSlitWidth,
             "slit_angle": holeSlitAngle,
-            "inverted": holeInverted
+            "inverted": holeInverted,
+            "snap_to_chisel": snapToChisel,
+            "chisel_prongs": selectedIronBladeCount
         ]
+    }
+
+    /// Prong count of the currently-selected pricking iron (1 if none matches).
+    /// Used to snap per-path hole counts to whole chisel steps.
+    var selectedIronBladeCount: Int {
+        PrickingIronStore.shared.all.first(where: { $0.id == prickingIronId })?.bladeCount ?? 1
     }
 
     /// Adopt an iron from the Pricking Iron Toolbox: copy its shape, slit size,
@@ -7121,6 +7257,13 @@ class AppState {
                 holeCornerBehavior: holeCornerBehavior,
                 holeSide: holeSide,
                 holeRowSpacing: holeRowSpacing,
+                snapToChisel: snapToChisel,
+                matEnabled: matEnabled,
+                matWidthMm: matWidthMm,
+                matHeightMm: matHeightMm,
+                matGridVisible: matGridVisible,
+                matGridSpacingMm: matGridSpacingMm,
+                constructShaderMode: constructShaderMode,
                 glueTabHeight: glueTabHeight,
                 glueTabType: glueTabType,
                 glueTabSide: glueTabSide,
@@ -7331,6 +7474,13 @@ class AppState {
             }
             if let hSide = validContainer.holeSide { self.holeSide = hSide }
             if let hRow = validContainer.holeRowSpacing { self.holeRowSpacing = hRow }
+            if let snap = validContainer.snapToChisel { self.snapToChisel = snap }
+            if let me = validContainer.matEnabled { self.matEnabled = me }
+            if let mw = validContainer.matWidthMm { self.matWidthMm = mw }
+            if let mh = validContainer.matHeightMm { self.matHeightMm = mh }
+            if let mgv = validContainer.matGridVisible { self.matGridVisible = mgv }
+            if let mgs = validContainer.matGridSpacingMm { self.matGridSpacingMm = mgs }
+            if let csm = validContainer.constructShaderMode { self.constructShaderMode = csm }
             if let gtHeight = validContainer.glueTabHeight { self.glueTabHeight = gtHeight }
             if let gtType = validContainer.glueTabType { self.glueTabType = gtType }
             if let gtSide = validContainer.glueTabSide { self.glueTabSide = gtSide }

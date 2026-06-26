@@ -384,7 +384,7 @@ struct ContentView: View {
         .onChange(of: state.holeSide) { _ in state.updateLivePreview() }
         .onChange(of: state.holeRowSpacing) { _ in state.updateLivePreview() }
         .onChange(of: state.holeSaddleSpacing) { _ in state.updateLivePreview() }
-        .onChange(of: state.holeChainSelection) { _ in state.updateLivePreview() }
+        .onChange(of: state.chainSelectionEnabled) { _ in state.updateLivePreview() }
         .onChange(of: state.holeStartInset) { _ in state.updateLivePreview() }
         .onChange(of: state.holeEndInset) { _ in state.updateLivePreview() }
         .onChange(of: state.holeOffsetCornerFillet) { _ in state.updateLivePreview() }
@@ -1474,6 +1474,11 @@ extension ContentView {
                 }
             }
 
+            Toggle("Snap to whole chisel steps", isOn: $state.snapToChisel)
+                .font(PlasticityFont.label)
+                .foregroundColor(Color.text_primary)
+                .help("Round each path's hole count to a whole multiple of the selected iron's prong count (\(state.selectedIronBladeCount)), so a multi-prong chisel lands cleanly with uniform pitch end to end. Off keeps the plain fixed-pitch fill.")
+
             Toggle("Preview seam (Stitching Simulator)", isOn: $state.showStitchSimulation)
                 .font(PlasticityFont.label)
                 .help("Thread the holes to preview the finished seam — overlay only, never alters geometry")
@@ -1485,6 +1490,7 @@ extension ContentView {
         .onChange(of: state.holeSlitWidth) { _ in state.updateLivePreview() }
         .onChange(of: state.holeSlitAngle) { _ in state.updateLivePreview() }
         .onChange(of: state.holeInverted) { _ in state.updateLivePreview() }
+        .onChange(of: state.snapToChisel) { _ in state.updateLivePreview() }
     }
 
     @ViewBuilder
@@ -1659,13 +1665,7 @@ extension ContentView {
                             .foregroundColor(Color.text_primary)
                             .help("Place a stitch on — or as near as possible to — every corner sharper than ~45°, flexing the spacing between holes so one lands on each corner. On by default.")
 
-                        Toggle("Chain selection (whole edge)", isOn: $state.holeChainSelection)
-                            .toggleStyle(.checkbox)
-                            .font(PlasticityFont.label)
-                            .foregroundColor(Color.text_primary)
-                            .help("On: the selected connected lines are joined into one perimeter and holes run all the way around. Off: holes are placed only on each line you selected, so you can stitch a single edge.")
-
-                        if !state.holeChainSelection {
+                        if !state.chainSelectionEnabled {
                             HStack {
                                 Text("Start inset (mm)")
                                     .font(PlasticityFont.label).foregroundColor(Color.text_primary)

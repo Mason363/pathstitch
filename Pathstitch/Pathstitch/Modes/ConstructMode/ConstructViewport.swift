@@ -24,6 +24,8 @@ struct ConstructViewport: NSViewRepresentable {
     let transformModeToken: Int
     let exportToken: Int
     let renderToken: Int       // edit ↔ mockup render mode
+    let shaderToken: Int       // shading mode (wireframe / solid / flat / realistic)
+    let matToken: Int          // cutting-mat config (shared with the 2D mat)
     let lightingToken: Int     // studio lighting changes
     let textureToken: Int      // custom leather texture / tiling
     let selFoldToken: Int      // selected-fold side highlight
@@ -80,6 +82,8 @@ struct ConstructViewport: NSViewRepresentable {
         context.coordinator.pushSnap()
         context.coordinator.pushExport()
         context.coordinator.pushRenderMode()
+        context.coordinator.pushShaderMode()
+        context.coordinator.pushMat()
         context.coordinator.pushLighting()
         context.coordinator.pushTexture()
         context.coordinator.pushSelFold()
@@ -106,6 +110,8 @@ struct ConstructViewport: NSViewRepresentable {
         private var lastTransformModeToken = -1
         private var lastExportToken = -1
         private var lastRenderToken = -1
+        private var lastShaderToken = -1
+        private var lastMatToken = -1
         private var lastLightingToken = -1
         private var lastTextureToken = -1
         private var lastSelFoldToken = -1
@@ -151,11 +157,15 @@ struct ConstructViewport: NSViewRepresentable {
                     self.pushTransformMode()
                     self.pushSnap()
                     self.lastRenderToken = -1
+                    self.lastShaderToken = -1
+                    self.lastMatToken = -1
                     self.lastLightingToken = -1
                     self.lastTextureToken = -1
                     self.lastSelFoldToken = -1
                     self.lastArtworkToken = -1
                     self.pushRenderMode()
+                    self.pushShaderMode()
+                    self.pushMat()
                     self.pushLighting()
                     self.pushTexture()
                     self.pushSelFold()
@@ -372,6 +382,21 @@ struct ConstructViewport: NSViewRepresentable {
             guard lastRenderToken != state.constructRenderToken else { return }
             lastRenderToken = state.constructRenderToken
             webView.evaluateJavaScript("setConstructRenderMode('\(state.constructRenderMode)');", completionHandler: nil)
+        }
+
+        func pushShaderMode() {
+            guard ready, let webView = webView else { return }
+            guard lastShaderToken != state.constructShaderToken else { return }
+            lastShaderToken = state.constructShaderToken
+            webView.evaluateJavaScript("setConstructShaderMode('\(state.constructShaderMode)');", completionHandler: nil)
+        }
+
+        func pushMat() {
+            guard ready, let webView = webView else { return }
+            guard lastMatToken != state.matToken else { return }
+            lastMatToken = state.matToken
+            let esc = Self.escape(state.constructMatJSON)
+            webView.evaluateJavaScript("setConstructMat(\"\(esc)\");", completionHandler: nil)
         }
 
         func pushLighting() {

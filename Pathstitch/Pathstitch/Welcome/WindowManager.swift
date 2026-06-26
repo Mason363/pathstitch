@@ -531,7 +531,8 @@ class PathstitchDocumentWindow: NSWindow {
 
 struct TitleBarView: View {
     let state: AppState
-    
+    @State private var showMatSettings = false
+
     var body: some View {
         HStack(spacing: 0) {
             // Left block (fixed width of 150px to clear traffic lights and mode text)
@@ -550,10 +551,10 @@ struct TitleBarView: View {
                 Text(modeShortStr)
                     .font(.system(size: 11, weight: .bold))
                     .foregroundColor(Color.accent)
-                
+
                 Spacer()
             }
-            .frame(width: 150)
+            .frame(width: 210)
             
             Spacer()
             
@@ -579,7 +580,7 @@ struct TitleBarView: View {
                 Spacer()
                 
                 if state.activeMode == .twoD {
-                    HStack(spacing: 12) {
+                    HStack(spacing: 10) {
                         Button(action: {
                             // Home = optimal framing, not a naive reset to 1:1 at
                             // the origin (MAS-67). Drives the canvas's robust
@@ -617,6 +618,41 @@ struct TitleBarView: View {
                         .buttonStyle(PlainButtonStyle())
                         .help(state.gridVisible ? "Grid: Visible" : "Grid: Hidden")
 
+                        // Cutting mat: toggle + a chevron that opens the size/grid
+                        // popover (and the Arrange-to-mat action).
+                        HStack(spacing: 3) {
+                            Button(action: { state.matEnabled.toggle() }) {
+                                Image(systemName: state.matEnabled ? "squareshape.split.3x3" : "square.dashed")
+                                    .foregroundColor(state.matEnabled ? Color.accent : Color.text_secondary)
+                                    .font(.system(size: 11))
+                            }
+                            .buttonStyle(PlainButtonStyle())
+                            .help(state.matEnabled ? "Cutting Mat: On" : "Cutting Mat: Off")
+
+                            Button(action: { showMatSettings.toggle() }) {
+                                Image(systemName: "chevron.down")
+                                    .foregroundColor(Color.text_secondary)
+                                    .font(.system(size: 8, weight: .bold))
+                            }
+                            .buttonStyle(PlainButtonStyle())
+                            .help("Cutting Mat Settings")
+                            .popover(isPresented: $showMatSettings, arrowEdge: .bottom) {
+                                MatSettingsPopover(state: state)
+                            }
+                        }
+
+                        // Calibrate the canvas to 1:1 physical size on this display.
+                        Button(action: {
+                            if state.calibratedToScreen { state.uncalibrateScreen() }
+                            else { state.calibrateToScreen(window: NSApp.keyWindow) }
+                        }) {
+                            Image(systemName: state.calibratedToScreen ? "ruler.fill" : "ruler")
+                                .foregroundColor(state.calibratedToScreen ? Color.accent : Color.text_secondary)
+                                .font(.system(size: 11))
+                        }
+                        .buttonStyle(PlainButtonStyle())
+                        .help(state.calibratedToScreen ? "Actual Size (1:1): On — click to restore fit" : "Calibrate to Screen (1:1)")
+
                         Button(action: { state.isLogTrayExpanded.toggle() }) {
                             Image(systemName: state.isLogTrayExpanded ? "terminal.fill" : "terminal")
                                 .foregroundColor(state.isLogTrayExpanded ? Color.accent : Color.text_secondary)
@@ -647,8 +683,60 @@ struct TitleBarView: View {
                     .padding(.trailing, 16)
                 }
             }
-            .frame(width: 150)
+            .frame(width: 210)
         }
         .frame(maxHeight: .infinity)
+    }
+}
+
+/// Compact settings popover for the cutting mat: size, grid, and a one-shot
+/// "Arrange to mat" re-pack. Reads/writes the shared mat state so the 2D mat and
+/// the Assembly mat stay in lock-step.
+struct MatSettingsPopover: View {
+    @Bindable var state: AppState
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Cutting Mat")
+                .font(.system(size: 12, weight: .bold))
+                .foregroundColor(Color.text_primary)
+
+            Toggle("Show mat", isOn: $state.matEnabled)
+
+            row("Width")  { TextField("W", value: $state.matWidthMm,  format: .number) }
+            row("Height") { TextField("H", value: $state.matHeightMm, format: .number) }
+
+            Toggle("Show mat grid", isOn: $state.matGridVisible)
+            row("Grid") { TextField("spacing", value: $state.matGridSpacingMm, format: .number) }
+
+            Divider()
+
+            Button(action: { state.arrangeToMat() }) {
+                Label("Arrange to mat", systemImage: "square.grid.2x2")
+            }
+            .help("Re-pack everything on the canvas to fit inside the mat (no rotation or scaling).")
+            .disabled(!state.matEnabled)
+        }
+        .padding(14)
+        .frame(width: 230)
+        .font(.system(size: 11))
+        .foregroundColor(Color.text_primary)
+        // Push live to the Assembly viewport when any mat field changes.
+        .onChange(of: state.matEnabled)        { _ in state.bumpMat() }
+        .onChange(of: state.matWidthMm)        { _ in state.bumpMat() }
+        .onChange(of: state.matHeightMm)       { _ in state.bumpMat() }
+        .onChange(of: state.matGridVisible)    { _ in state.bumpMat() }
+        .onChange(of: state.matGridSpacingMm)  { _ in state.bumpMat() }
+    }
+
+    /// One labelled numeric field, right-aligned with a trailing "mm".
+    private func row<Field: View>(_ label: String, @ViewBuilder _ field: () -> Field) -> some View {
+        HStack(spacing: 8) {
+            Text(label).frame(width: 56, alignment: .leading)
+            field()
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 80)
+            Text("mm").foregroundColor(Color.text_secondary)
+        }
     }
 }
