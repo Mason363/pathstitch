@@ -407,6 +407,9 @@ struct ContentView: View {
         }
         .onChange(of: state.holeVariableSpacingMax) { _ in state.updateLivePreview() }
         .onChange(of: state.holeEnableProximityFilter) { _ in state.updateLivePreview() }
+        .onChange(of: state.holeProximityDistance) { _ in state.updateLivePreview() }
+        .onChange(of: state.holeEnableLineProximityFilter) { _ in state.updateLivePreview() }
+        .onChange(of: state.holeLineProximityThreshold) { _ in state.updateLivePreview() }
         .onChange(of: state.holeEnableCornerInterpolation) { _ in state.updateLivePreview() }
 
     }
@@ -1914,7 +1917,7 @@ extension ContentView {
                             .toggleStyle(.checkbox)
                             .font(PlasticityFont.label)
                             .foregroundColor(Color.text_primary)
-                            .help("Filter out holes close to the ends of lines")
+                            .help("Remove holes that fall within the threshold of ANY other line in the drawing — every line is considered, not just the selected one")
                         
                         if state.holeEnableLineProximityFilter {
                             HStack {
@@ -1930,7 +1933,7 @@ extension ContentView {
                                     .cornerRadius(4)
                                     .foregroundColor(Color.text_primary)
                                     .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                                    .help("Line end proximity threshold distance in millimeters")
+                                    .help("Minimum clearance (mm) a hole must keep from any other line; holes closer than this are removed")
                             }
                             .padding(.leading, 8)
                         }

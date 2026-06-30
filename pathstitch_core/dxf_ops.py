@@ -2947,11 +2947,25 @@ def op_add_holes(args: Dict[str, Any]) -> Dict[str, Any]:
             else:
                 paths = seg_lines
 
-            # The selected shape's OTHER edges are not in `other_geoms` (its handle is
-            # excluded there). Add back only the edges that are FAR from the stitched
-            # path so holes near a far side of a narrow shape get filtered out — while
-            # skipping edges that touch the stitch path (the adjacent ones that share a
-            # corner), so the corner holes survive.
+            # When only some edge(s) of a shape are stitched, the shape's handle is in
+            # `handles` so the WHOLE shape was excluded from `other_geoms` above. Add
+            # back every edge that is NOT part of the stitched contour, as a full
+            # obstacle — so the line-proximity filter treats the selected shape's other
+            # edges exactly like any other line in the drawing ("take all lines into
+            # account"). Only the edges the holes are legitimately offset FROM (the
+            # contour) are skipped; a corner / first stitch that lands on or within the
+            # threshold of an adjacent edge is filtered like it should be (it is, after
+            # all, too close to a line). No corner-clearance carve-out — that is what
+            # let crowding corner holes slip through before.
+            def _is_contour_edge(edge: LineString) -> bool:
+                for p in paths:
+                    try:
+                        if edge.distance(p) <= 0.05 and edge.intersection(p).length > 0.5:
+                            return True
+                    except Exception:
+                        continue
+                return False
+
             for g in geoms:
                 try:
                     coords = list(g.coords)
@@ -2961,7 +2975,7 @@ def op_add_holes(args: Dict[str, Any]) -> Dict[str, Any]:
                     edge = LineString([coords[i], coords[i + 1]])
                     if edge.length < 1e-6:
                         continue
-                    if min((edge.distance(p) for p in paths), default=1.0) > 0.05:
+                    if not _is_contour_edge(edge):
                         other_geoms.append(edge)
 
     # Drop redundant near-collinear vertices before the hot loop. Arc length is

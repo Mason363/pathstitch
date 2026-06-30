@@ -259,6 +259,64 @@ def test_segment_multi_corner():
     print(f"Segment multi-corner OK: {len(holes)} holes mitered across the corner")
 
 
+def test_segment_override_adjacent_clearance():
+    """Selecting one edge of a TAPERED shape, where a non-stitched edge converges
+    back toward the selected edge, must filter the holes that crowd that edge — even
+    though it shares a corner with the selection. Regression for adjacent edges being
+    skipped wholesale (so the converging far end was never an obstacle)."""
+    out = tempfile.NamedTemporaryFile(suffix=".dxf", delete=False); out.close()
+    doc = ezdxf.new(dxfversion="R2010"); m = doc.modelspace()
+    # Tapered strip: bottom edge (0,0)->(120,5) is selected; the top edge
+    # (120,9)->(0,0.001) converges toward it, closing to ~0 mm near x=120.
+    pts = [(0, 0), (120, 5), (120, 9), (0, 0.001)]
+    poly = m.add_lwpolyline(pts, dxfattribs={"closed": True})
+    path = _save(doc)
+    holes = _run(poly.dxf.handle, path, out.name, hole_spacing=6.0, side="left",
+                 segment_override=[[0.0, 0.0], [120.0, 5.0]])
+    # The three non-selected edges; with the line-proximity filter on (default 1 mm),
+    # no surviving hole may sit within 1 mm of any of them.
+    others = [LineString([(120, 5), (120, 9)]),
+              LineString([(120, 9), (0, 0.001)]),
+              LineString([(0, 0.001), (0, 0)])]
+    crowders = [(x, y) for x, y in holes
+                if min(e.distance(Point(x, y)) for e in others) < 1.0]
+    assert not crowders, f"holes left crowding a non-selected edge: {crowders}"
+    assert len(holes) > 3, f"clearance filter removed too much ({len(holes)} holes)"
+    print(f"Segment override clearance OK: {len(holes)} holes, none crowding a "
+          f"converging edge")
+
+
+def test_segment_override_filters_all_lines():
+    """With the line-proximity filter on, a single-edge selection must respect the
+    threshold against EVERY other line in the drawing — the shape's own adjacent
+    edges included, right up to the shared corner (no corner-clearance carve-out) —
+    and a larger threshold must clear more holes near the ends. Regression for corner
+    stitches that sat on an adjacent edge slipping past the filter."""
+    doc = ezdxf.new(dxfversion="R2010"); m = doc.modelspace()
+    poly = m.add_lwpolyline([(0, 0), (100, 0), (100, 30), (0, 30)],
+                            dxfattribs={"closed": True})
+    path = _save(doc)
+    others = [LineString([(100, 0), (100, 30)]),   # adjacent (right)
+              LineString([(100, 30), (0, 30)]),    # opposite (top)
+              LineString([(0, 30), (0, 0)])]       # adjacent (left)
+
+    def run(thr):
+        out = tempfile.NamedTemporaryFile(suffix=".dxf", delete=False); out.close()
+        return _run(poly.dxf.handle, path, out.name, hole_spacing=8.0, side="left",
+                    segment_override=[[0.0, 0.0], [100.0, 0.0]],
+                    enable_proximity_filter=False,
+                    line_proximity_threshold=thr)
+
+    for thr in (1.0, 3.0, 5.0):
+        holes = run(thr)
+        bad = [(x, y) for x, y in holes
+               if min(e.distance(Point(x, y)) for e in others) < thr]
+        assert not bad, f"thr={thr}: holes within {thr} mm of another line: {bad}"
+    # the wider clearance must drop at least as many holes as the tight one
+    assert len(run(5.0)) <= len(run(1.0)), "wider threshold didn't clear more holes"
+    print("Segment override honors line threshold against all edges; scales with it")
+
+
 def test_concave_in_band_even():
     """An L-shaped (concave) contour must keep holes in the offset band and evenly
     spaced — the old side-flip/scatter bug hit concave shapes hardest."""
@@ -405,6 +463,8 @@ def run():
     test_end_modes()
     test_segment_override()
     test_segment_multi_corner()
+    test_segment_override_adjacent_clearance()
+    test_segment_override_filters_all_lines()
     test_iron_shapes_emit_closed_paths()
     test_iron_oval_is_ellipse()
     test_iron_slit_orientation()
