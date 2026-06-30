@@ -238,6 +238,10 @@ struct ContentView: View {
     @State private var isMoreToolsHovered = false
     @State private var showMoreTools = false
     @State private var offsetMode = "curve" // "curve" or "bbox"
+    // Active-tool options panel (decluttered-shell handoff): the ⓘ help popover is
+    // collapsed by default and reset whenever the tool changes — a tool is used
+    // hundreds of times and shouldn't cost that height every time.
+    @State private var toolHelpOpen = false
     @State private var customLayerName: String = ""
     @State private var selectedExistingLayer: String = ""
     @State private var rotationAngle: Double = 90.0
@@ -759,618 +763,286 @@ extension ContentView {
     @ViewBuilder
     private var selectionSection: some View {
         if state.currentTool == .select {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Image(systemName: "cursorarrow.and.square.on.square.dashed")
-                        .foregroundColor(Color.accent)
-                    Text("SELECTION DETAILS")
-                        .font(PlasticityFont.header)
-                        .foregroundColor(Color.text_primary)
-                        .tracking(0.5)
-                    Spacer()
-                }
-                .padding(.bottom, 4)
-                
-                VStack(alignment: .leading, spacing: 8) {
-                    if state.selectedHandles.isEmpty {
-                        Text("No selection")
-                            .font(PlasticityFont.body)
-                            .foregroundColor(Color.text_muted)
-                            .padding(.vertical, 4)
-                    } else {
-                        HStack {
-                            Text("\(state.selectedHandles.count) selected")
-                                .font(PlasticityFont.body)
-                                .foregroundColor(Color.text_primary)
-                            Spacer()
-                            Button("Deselect") {
-                                state.selectedHandles.removeAll()
-                            }
-                            .buttonStyle(LinkButtonStyle())
+            VStack(alignment: .leading, spacing: 14) {
+                TOToolTitle(icon: "cursorarrow.and.square.on.square.dashed", title: "Selection",
+                            help: "Inspect and edit the current selection — assign it to a layer, rotate it, combine closed paths, or edit a rectangle's exact dimensions.",
+                            helpOpen: $toolHelpOpen)
+
+                if state.selectedHandles.isEmpty {
+                    TOStatus(color: .to_textFaint, text: "Nothing selected", hint: "click geometry on the canvas")
+                } else {
+                    HStack(spacing: 8) {
+                        TOStatus(color: .to_accent, text: "\(state.selectedHandles.count) selected")
+                        Button("Deselect") { state.selectedHandles.removeAll() }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(Color.to_accent)
                             .help("Deselect all selected entities on the canvas")
-                        }
-                        .padding(.vertical, 4)
+                    }
 
-                        // Boolean combine (MAS-144): surface Union/Subtract/
-                        // Intersect without right-clicking, when 2+ watertight
-                        // closed paths are selected.
-                        if state.selectionCanBoolean {
-                            VStack(alignment: .leading, spacing: 6) {
-                                Divider().background(Color.border_subtle).padding(.vertical, 4)
-                                Text("COMBINE")
-                                    .font(PlasticityFont.label)
-                                    .fontWeight(.bold)
-                                    .foregroundColor(Color.accent)
-                                HStack(spacing: 6) {
-                                    Button("Union") { state.booleanCombineSelection("union") }
-                                        .buttonStyle(PlasticityButtonStyle(isEnabled: true))
-                                        .help("Merge the selected closed paths into one")
-                                    Button("Subtract") { state.booleanCombineSelection("subtract") }
-                                        .buttonStyle(PlasticityButtonStyle(isEnabled: true))
-                                        .help("Cut the other selected paths out of the largest one")
-                                    Button("Intersect") { state.booleanCombineSelection("intersect") }
-                                        .buttonStyle(PlasticityButtonStyle(isEnabled: true))
-                                        .help("Keep only the overlapping region")
-                                }
-                            }
-                            .padding(.bottom, 6)
+                    // Boolean combine (MAS-144): Union/Subtract/Intersect for 2+
+                    // watertight closed paths.
+                    if state.selectionCanBoolean {
+                        TODivider()
+                        TOGroupLabel("Combine")
+                        HStack(spacing: 6) {
+                            TOSecondaryButton(title: "Union") { state.booleanCombineSelection("union") }
+                            TOSecondaryButton(title: "Subtract") { state.booleanCombineSelection("subtract") }
+                            TOSecondaryButton(title: "Intersect") { state.booleanCombineSelection("intersect") }
                         }
+                    }
 
-                        if state.selectedHandles.count == 1,
-                           let handle = state.selectedHandles.first,
-                           let wMeasure = state.measurements.first(where: { $0.entityHandle == handle && $0.dimensionType == "width" }),
-                           let hMeasure = state.measurements.first(where: { $0.entityHandle == handle && $0.dimensionType == "height" }) {
-                            
-                            VStack(alignment: .leading, spacing: 6) {
-                                Divider().background(Color.border_subtle).padding(.vertical, 4)
-                                
-                                Text("RECTANGLE DIMENSIONS")
-                                    .font(PlasticityFont.label)
-                                    .fontWeight(.bold)
-                                    .foregroundColor(Color.accent)
-                                
-                                HStack {
-                                    Text("Width (mm)")
-                                        .font(PlasticityFont.label)
-                                        .foregroundColor(Color.text_secondary)
-                                    Spacer()
-                                    TextField("Width", value: Binding<Double>(
-                                        get: { wMeasure.distanceMm },
-                                        set: { state.updateRectangleDimensions(handle: handle, width: $0, height: nil, filletRadius: nil) }
-                                    ), format: .number)
-                                    .textFieldStyle(PlainTextFieldStyle())
-                                    .padding(4)
-                                    .frame(width: 80)
-                                    .background(Color.bg_input)
-                                    .cornerRadius(4)
-                                    .foregroundColor(Color.text_primary)
-                                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                                }
-                                
-                                HStack {
-                                    Text("Height (mm)")
-                                        .font(PlasticityFont.label)
-                                        .foregroundColor(Color.text_secondary)
-                                    Spacer()
-                                    TextField("Height", value: Binding<Double>(
-                                        get: { hMeasure.distanceMm },
-                                        set: { state.updateRectangleDimensions(handle: handle, width: nil, height: $0, filletRadius: nil) }
-                                    ), format: .number)
-                                    .textFieldStyle(PlainTextFieldStyle())
-                                    .padding(4)
-                                    .frame(width: 80)
-                                    .background(Color.bg_input)
-                                    .cornerRadius(4)
-                                    .foregroundColor(Color.text_primary)
-                                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                                }
-                                
-                                HStack {
-                                    Text("Corner Fillet (mm)")
-                                        .font(PlasticityFont.label)
-                                        .foregroundColor(Color.text_secondary)
-                                    Spacer()
-                                    TextField("Fillet", value: Binding<Double>(
-                                        get: { wMeasure.filletRadius },
-                                        set: { state.updateRectangleDimensions(handle: handle, width: nil, height: nil, filletRadius: $0) }
-                                    ), format: .number)
-                                    .textFieldStyle(PlainTextFieldStyle())
-                                    .padding(4)
-                                    .frame(width: 80)
-                                    .background(Color.bg_input)
-                                    .cornerRadius(4)
-                                    .foregroundColor(Color.text_primary)
-                                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                                }
-                            }
-                            .padding(.bottom, 6)
+                    if state.selectedHandles.count == 1,
+                       let handle = state.selectedHandles.first,
+                       let wMeasure = state.measurements.first(where: { $0.entityHandle == handle && $0.dimensionType == "width" }),
+                       let hMeasure = state.measurements.first(where: { $0.entityHandle == handle && $0.dimensionType == "height" }) {
+                        TODivider()
+                        TOGroupLabel("Rectangle dimensions")
+                        TORow(label: "Width (mm)") {
+                            TextField("Width", value: Binding<Double>(
+                                get: { wMeasure.distanceMm },
+                                set: { state.updateRectangleDimensions(handle: handle, width: $0, height: nil, filletRadius: nil) }),
+                                format: .number).toFieldStyle(width: 80)
                         }
-                        
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("ASSIGN TO LAYER")
-                                .font(PlasticityFont.label)
-                                .foregroundColor(Color.text_secondary)
-                            
-                            Picker("", selection: $selectedExistingLayer) {
-                                Text("Select existing layer...").tag("")
-                                ForEach(state.layers) { layer in
-                                    Text(layer.name).tag(layer.name)
-                                }
-                            }
-                            .pickerStyle(DefaultPickerStyle())
-                            .labelsHidden()
-                            .help("Select an existing layer to assign selected entities to")
-                            .onChange(of: selectedExistingLayer) { val in
-                                if !val.isEmpty {
-                                    customLayerName = val
-                                }
-                            }
-                            
-                            HStack {
-                                TextField("New layer name", text: $customLayerName)
-                                    .textFieldStyle(PlainTextFieldStyle())
-                                    .padding(6)
-                                    .background(Color.bg_input)
-                                    .cornerRadius(4)
-                                    .foregroundColor(Color.text_primary)
-                                    .font(PlasticityFont.body)
-                                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                                    .help("Enter a name to assign selected entities to a new layer")
-                                
-                                Button("Assign") {
-                                    state.assignSelectedToLayer(customLayerName)
-                                    customLayerName = ""
-                                    selectedExistingLayer = ""
-                                }
-                                .buttonStyle(BorderedButtonStyle())
-                                .disabled(customLayerName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                                .help("Assign selected entities to the specified layer name")
+                        TORow(label: "Height (mm)") {
+                            TextField("Height", value: Binding<Double>(
+                                get: { hMeasure.distanceMm },
+                                set: { state.updateRectangleDimensions(handle: handle, width: nil, height: $0, filletRadius: nil) }),
+                                format: .number).toFieldStyle(width: 80)
+                        }
+                        TORow(label: "Corner fillet (mm)") {
+                            TextField("Fillet", value: Binding<Double>(
+                                get: { wMeasure.filletRadius },
+                                set: { state.updateRectangleDimensions(handle: handle, width: nil, height: nil, filletRadius: $0) }),
+                                format: .number).toFieldStyle(width: 80)
+                        }
+                    }
+
+                    TODivider()
+                    TOGroupLabel("Assign to layer")
+                    TOSelect(options: [("", "Select existing layer…")] + state.layers.map { ($0.name, $0.name) },
+                             selection: $selectedExistingLayer) {
+                        if !selectedExistingLayer.isEmpty { customLayerName = selectedExistingLayer }
+                    }
+                    HStack(spacing: 8) {
+                        TextField("New layer name", text: $customLayerName)
+                            .toFieldStyle(height: 34).frame(maxWidth: .infinity)
+                        TOSecondaryButton(title: "Assign",
+                                          enabled: !customLayerName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) {
+                            state.assignSelectedToLayer(customLayerName)
+                            customLayerName = ""
+                            selectedExistingLayer = ""
+                        }
+                        .frame(width: 90)
+                    }
+
+                    TODivider()
+                    TOGroupLabel("Rotate selection")
+                    TORow(label: "Angle (°)") {
+                        TextField("Angle", value: $rotationAngle, format: .number).toFieldStyle(width: 80)
+                    }
+                    HStack(spacing: 8) {
+                        TOSecondaryButton(title: "Rotate", enabled: state.selectionCenterModel != nil) {
+                            if let c = state.selectionCenterModel {
+                                state.rotateSelected(angleDegrees: rotationAngle, center: [Double(c.x), Double(c.y)])
                             }
                         }
-                        
-                        VStack(alignment: .leading, spacing: 6) {
-                            Divider().background(Color.border_subtle).padding(.vertical, 4)
-                            
-                            Text("ROTATE SELECTION")
-                                .font(PlasticityFont.label)
-                                .fontWeight(.bold)
-                                .foregroundColor(Color.accent)
-                            
-                            HStack {
-                                Text("Angle (degrees)")
-                                    .font(PlasticityFont.label)
-                                    .foregroundColor(Color.text_secondary)
-                                Spacer()
-                                TextField("Angle", value: $rotationAngle, format: .number)
-                                    .textFieldStyle(PlainTextFieldStyle())
-                                    .padding(4)
-                                    .frame(width: 80)
-                                    .background(Color.bg_input)
-                                    .cornerRadius(4)
-                                    .foregroundColor(Color.text_primary)
-                                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+                        TOSecondaryButton(title: "+90°", enabled: state.selectionCenterModel != nil) {
+                            if let c = state.selectionCenterModel {
+                                state.rotateSelected(angleDegrees: 90.0, center: [Double(c.x), Double(c.y)])
                             }
-                            
-                            HStack(spacing: 8) {
-                                Button("Rotate") {
-                                    if let center = state.selectionCenterModel {
-                                        state.rotateSelected(angleDegrees: rotationAngle, center: [Double(center.x), Double(center.y)])
-                                    }
-                                }
-                                .buttonStyle(BorderedButtonStyle())
-                                .disabled(state.selectionCenterModel == nil)
-                                .help("Rotate selected entities by the specified angle around their center")
-                                
-                                Button("+90°") {
-                                    if let center = state.selectionCenterModel {
-                                        state.rotateSelected(angleDegrees: 90.0, center: [Double(center.x), Double(center.y)])
-                                    }
-                                }
-                                .buttonStyle(BorderedButtonStyle())
-                                .disabled(state.selectionCenterModel == nil)
-                                
-                                Button("-90°") {
-                                    if let center = state.selectionCenterModel {
-                                        state.rotateSelected(angleDegrees: -90.0, center: [Double(center.x), Double(center.y)])
-                                    }
-                                }
-                                .buttonStyle(BorderedButtonStyle())
-                                .disabled(state.selectionCenterModel == nil)
+                        }
+                        TOSecondaryButton(title: "−90°", enabled: state.selectionCenterModel != nil) {
+                            if let c = state.selectionCenterModel {
+                                state.rotateSelected(angleDegrees: -90.0, center: [Double(c.x), Double(c.y)])
                             }
                         }
                     }
                 }
             }
-            .padding(8)
-            .background(Color.bg_input.opacity(0.4))
-            .cornerRadius(4)
-            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_subtle, lineWidth: 1))
         }
     }
 
     @ViewBuilder
     private var dimensionEditorSection: some View {
         if state.currentTool == .select, let selected = state.selectedMeasurement {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("DIMENSION EDITOR")
-                        .font(PlasticityFont.header)
-                        .foregroundColor(Color.text_secondary)
-                        .tracking(0.5)
+            VStack(alignment: .leading, spacing: 12) {
+                TODivider()
+                HStack(spacing: 8) {
+                    TOGroupLabel("Dimension editor")
                     Spacer()
-                    Button("Clear") {
-                        state.selectedMeasurement = nil
-                    }
-                    .buttonStyle(LinkButtonStyle())
-                    .help("Deselect the current active measurement/dimension line")
+                    Button("Clear") { state.selectedMeasurement = nil }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(Color.to_accent)
+                        .help("Deselect the current active measurement/dimension line")
                 }
-                
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(selected.isAutoDimension ? "Auto-Dimension Line" : "Manual Measurement")
-                        .font(PlasticityFont.label)
-                        .foregroundColor(Color.text_secondary)
-                    
-                    if let dimType = selected.dimensionType {
-                        Text("Type: \(dimType.capitalized)")
-                            .font(PlasticityFont.label)
-                            .foregroundColor(Color.text_muted)
-                    }
-                    
-                    HStack {
-                        Text("Length (mm)")
-                            .font(PlasticityFont.label)
-                            .foregroundColor(Color.text_secondary)
-                        Spacer()
-                    }
-                    
-                    let binding = Binding<Double>(
-                        get: { selected.distanceMm },
-                        set: { newValue in
-                            if selected.isAutoDimension {
-                                state.updateSelectedDimensionValue(newValue: newValue)
-                            } else {
-                                if let idx = state.measurements.firstIndex(where: { $0.id == selected.id }) {
-                                    state.measurements[idx].distanceMm = newValue
-                                    state.selectedMeasurement?.distanceMm = newValue
-                                }
-                            }
+                TOHint(text: selected.isAutoDimension ? "Auto-dimension line" : "Manual measurement"
+                       + (selected.dimensionType.map { " · \($0.capitalized)" } ?? ""))
+
+                let binding = Binding<Double>(
+                    get: { selected.distanceMm },
+                    set: { newValue in
+                        if selected.isAutoDimension {
+                            state.updateSelectedDimensionValue(newValue: newValue)
+                        } else if let idx = state.measurements.firstIndex(where: { $0.id == selected.id }) {
+                            state.measurements[idx].distanceMm = newValue
+                            state.selectedMeasurement?.distanceMm = newValue
                         }
-                    )
-                    
+                    })
+                TORow(label: "Length (mm)") {
                     TextField("Dimension", value: binding, format: .number)
-                        .textFieldStyle(PlainTextFieldStyle())
-                        .padding(6)
-                        .background(Color.bg_input)
-                        .cornerRadius(4)
-                        .foregroundColor(Color.text_primary)
-                        .font(PlasticityFont.body)
-                        .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+                        .toFieldStyle(width: 90)
                         .disabled(!selected.isAutoDimension && selected.entityHandle == nil)
-                        .help("Edit the dimension measurement value in millimeters")
                 }
             }
-            .padding(8)
-            .background(Color.bg_input.opacity(0.4))
-            .cornerRadius(4)
-            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_subtle, lineWidth: 1))
         }
     }
 
     @ViewBuilder
     private var activeToolDetailsSection: some View {
-        if state.currentTool == .offset || state.currentTool == .addThickness || state.currentTool == .cleanup || state.currentTool == .measure || state.currentTool == .sketchLine || state.currentTool == .sketchCircle || state.currentTool == .sketchRectangle || state.currentTool == .sketchText {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("ACTIVE TOOL DETAILS")
-                        .font(PlasticityFont.header)
-                        .foregroundColor(Color.text_secondary)
-                        .tracking(0.5)
+        VStack(alignment: .leading, spacing: 14) {
+            if state.currentTool == .addThickness {
+                TOToolTitle(icon: "square.on.square", title: "Add Thickness",
+                            help: "Adds thickness to selected zero-width lines (or all lines if none selected), turning each centerline into a closed, cuttable outline. Lines that already have thickness are skipped.",
+                            helpOpen: $toolHelpOpen)
+                TORow(label: "Thickness (mm)") {
+                    TextField("Thickness", value: $state.addThicknessWidth, format: .number)
+                        .toFieldStyle(width: 90)
+                        .onSubmit { if state.addThicknessWidth > 0 { state.addThickness(exitAfterApply: true) } }
                 }
-
-                if state.currentTool == .addThickness {
+                TOPresetChips(values: [2, 3, 4, 5, 6], value: $state.addThicknessWidth, unit: "")
+                HStack(spacing: 8) {
+                    TOPrimaryButton(title: "Add Thickness", enabled: state.addThicknessWidth > 0) {
+                        state.addThickness(exitAfterApply: true)
+                    }
+                    TOSecondaryButton(title: "Cancel", tint: .to_textMut) { state.currentTool = .select }
+                        .frame(width: 96)
+                }
+                TOSecondaryButton(title: "Apply (keep tool)", enabled: state.addThicknessWidth > 0) {
+                    state.addThickness()
+                }
+            } else if state.currentTool == .offset {
+                TOToolTitle(icon: "square.on.square.dashed", title: "Offset",
+                            help: "Parallel-offset the selected paths. Curve makes a true parallel curve; BBox offsets the bounding box with optional rounded corners. Press Enter to apply and exit.",
+                            helpOpen: $toolHelpOpen)
+                if state.selectedHandles.isEmpty {
+                    TOStatus(color: .to_textFaint, text: "Nothing selected", hint: "select paths to offset")
+                } else {
+                    let n = state.selectedHandles.count
+                    TOStatus(color: .to_accent, text: "\(n) path\(n == 1 ? "" : "s") selected")
+                }
+                VStack(alignment: .leading, spacing: 8) {
+                    TOLabel("Offset mode")
+                    TOSegmented(options: [("curve", "Curve"), ("bbox", "BBox")], selection: $offsetMode)
+                        .frame(width: 150)
+                }
+                if offsetMode == "curve" {
+                    TORow(label: "Offset distance (mm)") {
+                        TextField("Distance", value: $state.offsetDistance, format: .number)
+                            .toFieldStyle(width: 90)
+                            .onSubmit { if !state.selectedHandles.isEmpty { state.applyOffset(exitAfterApply: true) } }
+                    }
+                    TOPresetChips(values: [2, 3, 4, 5, 6], value: $state.offsetDistance, unit: "")
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Adds thickness to selected zero-width lines (or all lines if none selected), turning each centerline into a closed, cuttable outline. Lines that already have thickness are skipped.")
-                            .font(PlasticityFont.label)
-                            .foregroundColor(Color.text_secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-
-                        Text("Thickness (mm)")
-                            .font(PlasticityFont.label)
-                            .foregroundColor(Color.text_secondary)
-
-                        TextField("Thickness", value: $state.addThicknessWidth, format: .number)
-                            .textFieldStyle(PlainTextFieldStyle())
-                            .padding(6)
-                            .background(Color.bg_input)
-                            .cornerRadius(4)
-                            .foregroundColor(Color.text_primary)
-                            .font(PlasticityFont.body)
-                            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                            .help("Total width of the thickened outline in millimeters")
-                            .onSubmit {
-                                if state.addThicknessWidth > 0 { state.addThickness(exitAfterApply: true) }
-                            }
-
-                        quickValues([2, 3, 4, 5, 6], $state.addThicknessWidth, unit: " mm")
-
+                        TOLabel("Side")
+                        TOSegmented(options: [("outer", "Outward"), ("inner", "Inward")], selection: $state.offsetSide)
+                    }
+                    TOSecondaryButton(title: "Flip direction", icon: "arrow.left.arrow.right") {
+                        state.flipOffsetDirection()
+                    }
+                    VStack(alignment: .leading, spacing: 8) {
+                        TOLabel("Geometry type")
+                        TOSegmented(options: [(false, "Normal"), (true, "Construction")],
+                                    selection: $state.offsetConstruction)
+                    }
+                    HStack(spacing: 8) {
+                        TOPrimaryButton(title: "Apply Offset", enabled: !state.selectedHandles.isEmpty) {
+                            state.applyOffset(exitAfterApply: true)
+                        }
+                        TOSecondaryButton(title: "Cancel", tint: .to_textMut) { state.cancelOffsetTool() }
+                            .frame(width: 96)
+                    }
+                    TOSecondaryButton(title: "Apply (keep tool)", enabled: !state.selectedHandles.isEmpty) {
+                        state.applyOffset()
+                    }
+                } else {
+                    TORow(label: "Offset distance (mm)") {
+                        TextField("Distance", value: $state.bboxOffsetDistance, format: .number)
+                            .toFieldStyle(width: 90)
+                    }
+                    TORow(label: "Corner fillet radius (mm)") {
+                        TextField("Fillet", value: $state.bboxOffsetFillet, format: .number)
+                            .toFieldStyle(width: 90)
+                    }
+                    TOPrimaryButton(title: "Apply BBox Offset") { state.applyBBoxOffset() }
+                }
+            } else if state.currentTool == .cleanup {
+                TOToolTitle(icon: "wand.and.rays", title: "Cleanup",
+                            help: "Join segment endpoints that fall within the tolerance gap, and clean up overlapping geometry.",
+                            helpOpen: $toolHelpOpen)
+                TORow(label: "Tolerance (mm)") {
+                    TextField("Tolerance", value: $state.cleanupTolerance, format: .number)
+                        .toFieldStyle(width: 90)
+                }
+                TOPresetChips(values: [0.1, 0.25, 0.5, 1.0], value: $state.cleanupTolerance, unit: "")
+                TOPrimaryButton(title: "Apply Join / Cleanup", enabled: state.currentFilePath != nil) {
+                    state.applyCleanup()
+                }
+            } else if state.currentTool == .measure {
+                TOToolTitle(icon: "ruler", title: "Measure",
+                            help: "Click two points on the canvas to measure the distance between them.",
+                            helpOpen: $toolHelpOpen)
+                let manual = state.measurements.filter { !$0.isAutoDimension }
+                if manual.isEmpty {
+                    TOStatus(color: .to_textFaint, text: "No measurements taken")
+                } else {
+                    ForEach(manual, id: \.id) { item in
                         HStack(spacing: 8) {
-                            Button("OK") {
-                                state.addThickness(exitAfterApply: true)
-                            }
-                            .buttonStyle(PlasticityButtonStyle(isEnabled: state.addThicknessWidth > 0))
-                            .disabled(state.addThicknessWidth <= 0)
-                            .help("Add thickness and exit the tool")
-
-                            Button("Cancel") {
-                                state.currentTool = .select
-                            }
-                            .buttonStyle(PlasticityButtonStyle(isEnabled: true))
-                            .help("Drop the tool without changing geometry (Esc)")
-                        }
-
-                        Button("Apply (keep tool)") {
-                            state.addThickness()
-                        }
-                        .buttonStyle(PlasticityButtonStyle(isEnabled: state.addThicknessWidth > 0))
-                        .disabled(state.addThicknessWidth <= 0)
-                        .help("Add thickness but stay in the tool")
-                    }
-                }
-
-                if state.currentTool == .offset {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Offset Mode")
-                            .font(PlasticityFont.label)
-                            .foregroundColor(Color.text_secondary)
-                        
-                        Picker("", selection: $offsetMode) {
-                            Text("Curve").tag("curve")
-                            Text("BBox").tag("bbox")
-                        }
-                        .pickerStyle(SegmentedPickerStyle())
-                        .help("Choose between parallel curve offset and bounding box (BBox) offset")
-                        
-                        if offsetMode == "curve" {
-                            Text("Offset Distance (mm)")
-                                .font(PlasticityFont.label)
-                                .foregroundColor(Color.text_secondary)
-                            
-                            TextField("Distance", value: $state.offsetDistance, format: .number)
-                                .textFieldStyle(PlainTextFieldStyle())
-                                .padding(6)
-                                .background(Color.bg_input)
-                                .cornerRadius(4)
-                                .foregroundColor(Color.text_primary)
-                                .font(PlasticityFont.body)
-                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                                .help("Offset distance in millimeters")
-                                // Enter commits and exits the single-action Offset
-                                // tool, returning to Select (MAS-111).
-                                .onSubmit {
-                                    if !state.selectedHandles.isEmpty { state.applyOffset(exitAfterApply: true) }
-                                }
-
-                            quickValues([2, 3, 4, 5, 6], $state.offsetDistance, unit: " mm")
-
-                            Text("Side")
-                                .font(PlasticityFont.label)
-                                .foregroundColor(Color.text_secondary)
-                            
-                            Picker("", selection: $state.offsetSide) {
-                                Text("Outward").tag("outer")
-                                Text("Inward").tag("inner")
-                            }
-                            .pickerStyle(SegmentedPickerStyle())
-                            .help("Offset outward (grow) or inward (shrink). Defaults to outward.")
-
-                            // Flip the offset to the opposite side (MAS-109).
+                            TOLabel("Distance")
+                            Spacer(minLength: 8)
+                            Text(String(format: "%.2f mm", item.distanceMm))
+                                .font(.system(size: 12.5, weight: .semibold)).monospacedDigit()
+                                .foregroundColor(Color.to_warn)
                             Button {
-                                state.flipOffsetDirection()
+                                if let idx = state.measurements.firstIndex(where: { $0.id == item.id }) {
+                                    if state.selectedMeasurement?.id == item.id { state.selectedMeasurement = nil }
+                                    state.measurements.remove(at: idx)
+                                }
                             } label: {
-                                Label("Flip Direction", systemImage: "arrow.left.arrow.right")
+                                Image(systemName: "xmark.circle").foregroundColor(Color.to_textMut)
                             }
-                            .buttonStyle(PlasticityButtonStyle(isEnabled: true))
-                            .help("Invert the positive/negative side of the offset")
-
-                            Text("Geometry Type")
-                                .font(PlasticityFont.label)
-                                .foregroundColor(Color.text_secondary)
-                            Picker("", selection: $state.offsetConstruction) {
-                                Text("Normal").tag(false)
-                                Text("Construction").tag(true)
-                            }
-                            .pickerStyle(SegmentedPickerStyle())
-                            .help("Normal — solid sketch lines. Construction — dashed reference lines.")
-
-                            HStack(spacing: 8) {
-                                Button("OK") {
-                                    state.applyOffset(exitAfterApply: true)
-                                }
-                                .buttonStyle(PlasticityButtonStyle(isEnabled: !state.selectedHandles.isEmpty))
-                                .disabled(state.selectedHandles.isEmpty)
-                                .help("Commit the offset and exit the tool")
-
-                                Button("Cancel") {
-                                    state.cancelOffsetTool()
-                                }
-                                .buttonStyle(PlasticityButtonStyle(isEnabled: true))
-                                .help("Drop the tool without generating geometry (Esc)")
-                            }
-
-                            Button("Apply (keep tool)") {
-                                state.applyOffset()
-                            }
-                            .buttonStyle(PlasticityButtonStyle(isEnabled: !state.selectedHandles.isEmpty))
-                            .disabled(state.selectedHandles.isEmpty)
-                            .help("Commit the offset but stay in the tool to offset again")
-                        } else {
-                            Text("Offset Distance (mm)")
-                                .font(PlasticityFont.label)
-                                .foregroundColor(Color.text_secondary)
-                            
-                            TextField("Distance", value: $state.bboxOffsetDistance, format: .number)
-                                .textFieldStyle(PlainTextFieldStyle())
-                                .padding(6)
-                                .background(Color.bg_input)
-                                .cornerRadius(4)
-                                .foregroundColor(Color.text_primary)
-                                .font(PlasticityFont.body)
-                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                                .help("Bounding box offset distance in millimeters")
-                            
-                            Text("Corner Fillet Radius (mm)")
-                                .font(PlasticityFont.label)
-                                .foregroundColor(Color.text_secondary)
-                            
-                            TextField("Fillet Radius", value: $state.bboxOffsetFillet, format: .number)
-                                .textFieldStyle(PlainTextFieldStyle())
-                                .padding(6)
-                                .background(Color.bg_input)
-                                .cornerRadius(4)
-                                .foregroundColor(Color.text_primary)
-                                .font(PlasticityFont.body)
-                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                                .help("Radius for rounding bounding box corners in millimeters")
-                            
-                            Button("Apply BBox Offset") {
-                                state.applyBBoxOffset()
-                            }
-                            .buttonStyle(PlasticityButtonStyle(isEnabled: true))
-                            .help("Apply bounding box offset with rounded corners around selected path entities")
+                            .buttonStyle(.plain).help("Delete this measurement line")
                         }
                     }
-                } else if state.currentTool == .cleanup {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Cleanup Tolerance (mm)")
-                            .font(PlasticityFont.label)
-                            .foregroundColor(Color.text_secondary)
-                        
-                        TextField("Tolerance", value: $state.cleanupTolerance, format: .number)
-                            .textFieldStyle(PlainTextFieldStyle())
-                            .padding(6)
-                            .background(Color.bg_input)
-                            .cornerRadius(4)
-                            .foregroundColor(Color.text_primary)
-                            .font(PlasticityFont.body)
-                            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                            .help("Endpoint distance tolerance gap in millimeters to join segments")
-
-                        quickValues([0.1, 0.25, 0.5, 1.0], $state.cleanupTolerance, unit: " mm")
-
-                        Button("Apply Join/Cleanup") {
-                            state.applyCleanup()
-                        }
-                        .buttonStyle(PlasticityButtonStyle(isEnabled: state.currentFilePath != nil))
-                        .disabled(state.currentFilePath == nil)
-                        .help("Join segment endpoints and clean up overlapping geometries")
-                    }
-                } else if state.currentTool == .measure {
-                    VStack(alignment: .leading, spacing: 8) {
-                        if state.measurements.isEmpty {
-                            Text("No measurements taken")
-                                .font(PlasticityFont.body)
-                                .foregroundColor(Color.text_muted)
-                                .padding(.vertical, 4)
-                        } else {
-                            ForEach(state.measurements.filter { !$0.isAutoDimension }, id: \.id) { item in
-                                HStack {
-                                    Text("Dist:")
-                                        .foregroundColor(Color.text_secondary)
-                                    Text(String(format: "%.2f mm", item.distanceMm))
-                                        .foregroundColor(Color.status_warn)
-                                        .fontWeight(.medium)
-                                    Spacer()
-                                    Button(action: {
-                                        if let idx = state.measurements.firstIndex(where: { $0.id == item.id }) {
-                                            if state.selectedMeasurement?.id == item.id {
-                                                state.selectedMeasurement = nil
-                                            }
-                                            state.measurements.remove(at: idx)
-                                        }
-                                    }) {
-                                        Image(systemName: "xmark.circle")
-                                            .foregroundColor(Color.text_secondary)
-                                    }
-                                    .buttonStyle(PlainButtonStyle())
-                                    .help("Delete this measurement line")
-                                }
-                                .font(PlasticityFont.body)
-                                .padding(.vertical, 2)
-                            }
-                            
-                            Button("Clear All") {
-                                state.measurements.removeAll { !$0.isAutoDimension }
-                                state.selectedMeasurement = nil
-                                state.activeMeasureStart = nil
-                            }
-                            .buttonStyle(PlasticityButtonStyle(isEnabled: true))
-                            .help("Clear all manual measurements from the canvas")
-                        }
-                    }
-                } else if state.currentTool == .sketchLine {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("LINE SKETCH TOOL")
-                            .font(PlasticityFont.label)
-                            .foregroundColor(Color.accent)
-                        if state.isLearnModeEnabled {
-                            Text("Drag to draw.")
-                                .font(PlasticityFont.body)
-                                .foregroundColor(Color.text_secondary)
-                        }
-                    }
-                } else if state.currentTool == .sketchCircle {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("CIRCLE SKETCH TOOL")
-                            .font(PlasticityFont.label)
-                            .foregroundColor(Color.accent)
-                        if state.isLearnModeEnabled {
-                            Text("Drag from the center outward.")
-                                .font(PlasticityFont.body)
-                                .foregroundColor(Color.text_secondary)
-                        }
-                    }
-                } else if state.currentTool == .sketchRectangle {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("RECTANGLE SKETCH TOOL")
-                            .font(PlasticityFont.label)
-                            .foregroundColor(Color.accent)
-                        Text("Fillet Radius (mm)")
-                            .font(PlasticityFont.label)
-                            .foregroundColor(Color.text_secondary)
-                        
-                        TextField("Fillet Radius", value: $state.sketchFilletRadius, format: .number)
-                            .textFieldStyle(PlainTextFieldStyle())
-                            .padding(6)
-                            .background(Color.bg_input)
-                            .cornerRadius(4)
-                            .foregroundColor(Color.text_primary)
-                            .font(PlasticityFont.body)
-                            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                            .help("Fillet radius in millimeters for rounding sketched rectangle corners")
-                        
-                        if state.isLearnModeEnabled {
-                            Text("Drag corner-to-corner.")
-                                .font(PlasticityFont.body)
-                                .foregroundColor(Color.text_secondary)
-                        }
-                    }
-                } else if state.currentTool == .sketchText {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("TEXT SKETCH TOOL")
-                            .font(PlasticityFont.label)
-                            .foregroundColor(Color.accent)
-                        if state.isLearnModeEnabled {
-                            Text("Drag a box, then type.")
-                                .font(PlasticityFont.body)
-                                .foregroundColor(Color.text_secondary)
-                        }
+                    TOSecondaryButton(title: "Clear all", tint: .to_textMut) {
+                        state.measurements.removeAll { !$0.isAutoDimension }
+                        state.selectedMeasurement = nil
+                        state.activeMeasureStart = nil
                     }
                 }
+            } else if state.currentTool == .sketchLine {
+                TOToolTitle(icon: "line.diagonal", title: "Line",
+                            help: "Drag on the canvas to draw a line.", helpOpen: $toolHelpOpen)
+                if state.isLearnModeEnabled { TOHint(text: "Drag to draw.") }
+            } else if state.currentTool == .sketchCircle {
+                TOToolTitle(icon: "circle", title: "Circle",
+                            help: "Drag from the center outward to draw a circle.", helpOpen: $toolHelpOpen)
+                if state.isLearnModeEnabled { TOHint(text: "Drag from the center outward.") }
+            } else if state.currentTool == .sketchRectangle {
+                TOToolTitle(icon: "rectangle", title: "Rectangle",
+                            help: "Drag corner-to-corner to draw a rectangle. Set a fillet radius to round its corners.",
+                            helpOpen: $toolHelpOpen)
+                TORow(label: "Fillet radius (mm)") {
+                    TextField("Fillet", value: $state.sketchFilletRadius, format: .number)
+                        .toFieldStyle(width: 90)
+                }
+                if state.isLearnModeEnabled { TOHint(text: "Drag corner-to-corner.") }
+            } else if state.currentTool == .sketchText {
+                TOToolTitle(icon: "textformat", title: "Text",
+                            help: "Drag a box on the canvas, then type.", helpOpen: $toolHelpOpen)
+                if state.isLearnModeEnabled { TOHint(text: "Drag a box, then type.") }
             }
-            .padding(8)
-            .background(Color.bg_input.opacity(0.2))
-            .cornerRadius(4)
-            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_subtle, lineWidth: 1))
         }
     }
 
@@ -1403,110 +1075,10 @@ extension ContentView {
         }
     }
 
-    /// Horizontal gallery of pricking irons + the live slit shape controls.
-    private var prickingIronPicker: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("PRICKING IRON")
-                .font(PlasticityFont.label)
-                .foregroundColor(Color.text_secondary)
-                .tracking(0.5)
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(PrickingIronStore.shared.all) { iron in
-                        let selected = state.prickingIronId == iron.id
-                        VStack(spacing: 3) {
-                            ironSlitGlyph(shape: iron.shape)
-                                .frame(width: 34, height: 30)
-                            Text(iron.name)
-                                .font(.system(size: 8))
-                                .lineLimit(1)
-                                .foregroundColor(Color.text_secondary)
-                                .frame(width: 52)
-                        }
-                        .padding(4)
-                        .background(selected ? Color.accent.opacity(0.18) : Color.bg_input)
-                        .cornerRadius(6)
-                        .overlay(RoundedRectangle(cornerRadius: 6)
-                            .stroke(selected ? Color.accent : Color.border_strong, lineWidth: 1))
-                        .onTapGesture { state.applyPrickingIron(iron) }
-                        .help("\(iron.name) — \(iron.shape), pitch \(String(format: "%.2f", iron.pitch)) mm")
-                    }
-                }
-                .padding(.vertical, 2)
-            }
-
-            HStack {
-                Text("Shape")
-                    .font(PlasticityFont.label)
-                    .foregroundColor(Color.text_primary)
-                Spacer()
-                Picker("", selection: $state.holeShape) {
-                    Text("Round").tag("round")
-                    Text("Diamond").tag("diamond")
-                    Text("French").tag("french")
-                    Text("Flat").tag("flat")
-                    Text("Oval").tag("oval")
-                }
-                .labelsHidden()
-                .frame(width: 150)
-                .help("Slit cross-section punched at each stitch")
-            }
-
-            if state.holeShape != "round" {
-                HStack {
-                    Text("Slit L×W (mm)")
-                        .font(PlasticityFont.label)
-                        .foregroundColor(Color.text_primary)
-                    Spacer()
-                    TextField("L", value: $state.holeSlitLength, format: .number)
-                        .textFieldStyle(PlainTextFieldStyle()).padding(4).frame(width: 48)
-                        .background(Color.bg_input).cornerRadius(4)
-                        .foregroundColor(Color.text_primary)
-                        .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                    TextField("W", value: $state.holeSlitWidth, format: .number)
-                        .textFieldStyle(PlainTextFieldStyle()).padding(4).frame(width: 48)
-                        .background(Color.bg_input).cornerRadius(4)
-                        .foregroundColor(Color.text_primary)
-                        .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                }
-                HStack {
-                    Text("Angle / Invert")
-                        .font(PlasticityFont.label)
-                        .foregroundColor(Color.text_primary)
-                    Spacer()
-                    TextField("°", value: $state.holeSlitAngle, format: .number)
-                        .textFieldStyle(PlainTextFieldStyle()).padding(4).frame(width: 48)
-                        .background(Color.bg_input).cornerRadius(4)
-                        .foregroundColor(Color.text_primary)
-                        .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                    Toggle("", isOn: $state.holeInverted)
-                        .labelsHidden()
-                        .help("Mirror the slant (left vs right iron)")
-                }
-            }
-
-            Toggle("Snap to whole chisel steps", isOn: $state.snapToChisel)
-                .font(PlasticityFont.label)
-                .foregroundColor(Color.text_primary)
-                .help("Round each path's hole count to a whole multiple of the selected iron's prong count (\(state.selectedIronBladeCount)), so a multi-prong chisel lands cleanly with uniform pitch end to end. Off keeps the plain fixed-pitch fill.")
-
-            Toggle("Preview seam (Stitching Simulator)", isOn: $state.showStitchSimulation)
-                .font(PlasticityFont.label)
-                .help("Thread the holes to preview the finished seam — overlay only, never alters geometry")
-
-            Divider().padding(.vertical, 2)
-        }
-        .onChange(of: state.holeShape) { _ in state.updateLivePreview() }
-        .onChange(of: state.holeSlitLength) { _ in state.updateLivePreview() }
-        .onChange(of: state.holeSlitWidth) { _ in state.updateLivePreview() }
-        .onChange(of: state.holeSlitAngle) { _ in state.updateLivePreview() }
-        .onChange(of: state.holeInverted) { _ in state.updateLivePreview() }
-        .onChange(of: state.snapToChisel) { _ in state.updateLivePreview() }
-    }
-
-    /// Single-line (chain-off) endpoint controls for the sewing tool: how the run is
-    /// anchored between the tips (end-placement mode) and how far the first / last
-    /// holes sit in from each tip (margin, in mm or × pitch, linked or per-end).
+    /// Single-line (chain-off) endpoint controls for the sewing tool: how the run
+    /// is anchored between the tips (end-placement mode) and how far the first /
+    /// last holes sit in from each tip (margin, in mm or × pitch, linked or
+    /// per-end). Reskinned to the decluttered-shell control library.
     @ViewBuilder
     private var holeSingleLineControls: some View {
         // Canonical insets stay in mm; these bindings convert for the active unit.
@@ -1525,495 +1097,276 @@ extension ContentView {
                 state.holeEndInset = mm
             })
 
-        HStack {
-            Text("End placement")
-                .font(PlasticityFont.label).foregroundColor(Color.text_primary)
-            Spacer()
-            Picker("", selection: $state.holeEndMode) {
-                Text("Spread").tag("ends")
-                Text("From start").tag("fill")
-                Text("Centered").tag("even")
-            }
-            .pickerStyle(SegmentedPickerStyle())
-            .frame(width: 200)
-            .help("How holes are anchored between the line's two ends. Spread: evenly distributed with a hole on each tip (spacing flexes to fit). From start: exact spacing from the start tip, the leftover gap falls at the far end. Centered: exact spacing with equal margins at both ends.")
+        VStack(alignment: .leading, spacing: 8) {
+            TOLabel("End placement")
+            TOSegmented(options: [("ends", "Spread"), ("fill", "From start"), ("even", "Centered")],
+                        selection: $state.holeEndMode)
         }
-
-        HStack {
-            Text("Margin unit")
-                .font(PlasticityFont.label).foregroundColor(Color.text_primary)
-            Spacer()
-            Picker("", selection: $state.holeInsetUnit) {
-                Text("mm").tag("mm")
-                Text("× pitch").tag("pitch")
-            }
-            .pickerStyle(SegmentedPickerStyle())
-            .frame(width: 120)
-            .help("Type the margins in millimetres, or as a multiple of the stitch spacing (e.g. 0.5× = half a stitch).")
+        TORow(label: "Margin unit") {
+            TOSegmented(options: [("mm", "mm"), ("pitch", "× pitch")], selection: $state.holeInsetUnit)
+                .frame(width: 130)
         }
-
         if state.holeInsetLinked {
-            HStack {
-                Text("Margin (\(state.holeInsetUnitLabel))")
-                    .font(PlasticityFont.label).foregroundColor(Color.text_primary)
-                Spacer()
-                TextField("Margin", value: bothMargin, format: .number.precision(.fractionLength(0...2)))
-                    .frame(width: 60).textFieldStyle(.roundedBorder)
+            TORow(label: "Margin (\(state.holeInsetUnitLabel))") {
+                TextField("Margin", value: bothMargin,
+                          format: .number.precision(.fractionLength(0...2)))
+                    .toFieldStyle(width: 70)
             }
-            .help("How far the first AND last holes sit in from each tip of the line.")
-            Toggle("Set ends separately", isOn: Binding(
+            TOCheck(label: "Set ends separately", isOn: Binding(
                 get: { !state.holeInsetLinked },
-                set: { state.holeInsetLinked = !$0 }))
-                .toggleStyle(.checkbox)
-                .font(PlasticityFont.label)
-                .foregroundColor(Color.text_secondary)
+                set: { state.holeInsetLinked = !$0 }), labelColor: .to_textTer)
         } else {
-            HStack {
-                Text("Start (\(state.holeInsetUnitLabel))")
-                    .font(PlasticityFont.label).foregroundColor(Color.text_primary)
-                Spacer()
-                TextField("Start", value: startMargin, format: .number.precision(.fractionLength(0...2)))
-                    .frame(width: 60).textFieldStyle(.roundedBorder)
+            TORow(label: "Start (\(state.holeInsetUnitLabel))") {
+                TextField("Start", value: startMargin,
+                          format: .number.precision(.fractionLength(0...2)))
+                    .toFieldStyle(width: 70)
             }
-            .help("How far the FIRST hole sits in from the line's start point.")
-            HStack {
-                Text("End (\(state.holeInsetUnitLabel))")
-                    .font(PlasticityFont.label).foregroundColor(Color.text_primary)
-                Spacer()
-                TextField("End", value: endMargin, format: .number.precision(.fractionLength(0...2)))
-                    .frame(width: 60).textFieldStyle(.roundedBorder)
+            TORow(label: "End (\(state.holeInsetUnitLabel))") {
+                TextField("End", value: endMargin,
+                          format: .number.precision(.fractionLength(0...2)))
+                    .toFieldStyle(width: 70)
             }
-            .help("How far the LAST hole sits in from the line's end point.")
-            Toggle("Link both ends", isOn: $state.holeInsetLinked)
-                .toggleStyle(.checkbox)
-                .font(PlasticityFont.label)
-                .foregroundColor(Color.text_secondary)
+            TOCheck(label: "Link both ends", isOn: $state.holeInsetLinked, labelColor: .to_textTer)
         }
     }
+
+    // MARK: - Holes Sewing — decluttered-shell flagship (design handoff)
+    //
+    // The tool title + ⓘ help, the live selection status, and the "Apply Sewing
+    // Holes" action are pinned by the shell (see activeToolChrome / activeToolFooter).
+    // What remains here is the single scrolling settings region: full-width
+    // collapsible sections that bleed their dividers and header rows to the panel
+    // edge, exactly one of which (Spacing & Pattern) opens by default.
 
     @ViewBuilder
     private var holesSewingSection: some View {
-        if state.currentTool == .select || state.currentTool == .addHoles {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Image(systemName: "circle.dashed")
-                        .foregroundColor(Color.accent)
-                    Text("HOLES SEWING")
-                        .font(PlasticityFont.header)
-                        .foregroundColor(Color.text_primary)
-                        .tracking(0.5)
-                    Spacer()
-                }
+        let ironName = PrickingIronStore.shared.iron(id: state.prickingIronId)?.name ?? "—"
+        let distLabel = state.holeDistribution == "count" ? "Count" : "Fill"
+        let spacingVal: String = state.holeDistribution == "count"
+            ? "\(state.holeCount) holes"
+            : "\(toNum(state.holeEnableVariableSpacing ? state.holeVariableSpacingMin : state.holeSpacing, maxFrac: 1)) mm"
 
-                if state.currentTool == .addHoles {
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack(alignment: .top, spacing: 6) {
-                            Image(systemName: state.sewingChainSelection ? "link" : "hand.tap")
-                                .font(.system(size: 11)).foregroundColor(Color.accent)
-                            Text(state.sewingChainSelection
-                                 ? "Whole-outline mode. Click a shape to stitch its entire outline; link button (A) toggles per-edge."
-                                 : "Click an edge to stitch it. Click more to add (they miter at corners); click again to remove. Link button (A) = whole outline.")
-                                .font(PlasticityFont.label)
-                                .foregroundColor(Color.text_secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                            Spacer(minLength: 0)
-                        }
-                        if !state.sewingChainSelection && !state.sewingEdges.isEmpty {
-                            Text("\(state.sewingEdges.count) edge\(state.sewingEdges.count == 1 ? "" : "s") selected")
-                                .font(PlasticityFont.label).fontWeight(.semibold)
-                                .foregroundColor(Color.accent)
-                        }
-                    }
-                    .padding(7)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(RoundedRectangle(cornerRadius: 4).fill(Color.accent.opacity(0.08)))
-                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.accent.opacity(0.25), lineWidth: 1))
-                }
-
-                prickingIronPicker
-
-                VStack(alignment: .leading, spacing: 8) {
-                        holesSubheader("BASICS")
-                        HStack {
-                            Text("Offset Distance (mm)")
-                                .font(PlasticityFont.label)
-                                .foregroundColor(Color.text_primary)
-                            Spacer()
-                            TextField("Offset", value: $state.holeOffsetDistance, format: .number.precision(.fractionLength(0...2)))
-                                .textFieldStyle(PlainTextFieldStyle())
-                                .padding(4)
-                                .frame(width: 80)
-                                .background(Color.bg_input)
-                                .cornerRadius(4)
-                                .foregroundColor(Color.text_primary)
-                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                                .help("Distance from boundary path to place sewing holes in millimeters")
-                        }
-                        
-                        HStack {
-                            Text("Hole Diameter (mm)")
-                                .font(PlasticityFont.label)
-                                .foregroundColor(Color.text_primary)
-                            Spacer()
-                            TextField("Diameter", value: $state.holeDiameter, format: .number)
-                                .textFieldStyle(PlainTextFieldStyle())
-                                .padding(4)
-                                .frame(width: 80)
-                                .background(Color.bg_input)
-                                .cornerRadius(4)
-                                .foregroundColor(Color.text_primary)
-                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                                .help("Diameter of each sewing hole in millimeters")
-                        }
-                        
-                        holesSubheader("SPACING & PATTERN")
-                        HStack {
-                            Text("Distribution")
-                                .font(PlasticityFont.label)
-                                .foregroundColor(Color.text_primary)
-                            Spacer()
-                            Picker("", selection: $state.holeDistribution) {
-                                Text("Fill").tag("spacing")
-                                Text("Count").tag("count")
-                            }
-                            .pickerStyle(SegmentedPickerStyle())
-                            .frame(width: 120)
-                            .help("Fill the path at a fixed spacing, or place an exact number of evenly-spaced holes")
-                        }
-
-                        if state.holeDistribution == "count" {
-                            HStack {
-                                Text("Hole Count")
-                                    .font(PlasticityFont.label)
-                                    .foregroundColor(Color.text_primary)
-                                Spacer()
-                                TextField("Count", value: $state.holeCount, format: .number)
-                                    .textFieldStyle(PlainTextFieldStyle())
-                                    .padding(4)
-                                    .frame(width: 80)
-                                    .background(Color.bg_input)
-                                    .cornerRadius(4)
-                                    .foregroundColor(Color.text_primary)
-                                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                                    .help("Exact number of evenly-spaced holes per contour")
-                            }
-                        } else {
-                            // Spacing control. A 1–20 mm slider is the primary
-                            // control. With Variable Spacing off it drives the single
-                            // hole spacing; with it on it slides BOTH the min and max
-                            // together, keeping their gap fixed. The numeric fields
-                            // edit the same values and the slider tracks them. The box
-                            // below the slider shows / edits the slider's value.
-                            let spacingSlider = Binding<Double>(
-                                get: {
-                                    state.holeEnableVariableSpacing
-                                        ? state.holeVariableSpacingMin
-                                        : state.holeSpacing
-                                },
-                                set: { raw in
-                                    let v = min(20.0, max(1.0, raw))
-                                    if state.holeEnableVariableSpacing {
-                                        let gap = max(0.0, state.holeVariableSpacingMax - state.holeVariableSpacingMin)
-                                        state.holeVariableSpacingMin = v
-                                        state.holeVariableSpacingMax = v + gap
-                                    } else {
-                                        state.holeSpacing = v
-                                    }
-                                }
-                            )
-                            if !state.holeEnableVariableSpacing {
-                                HStack {
-                                    Text("Hole Spacing (mm)")
-                                        .font(PlasticityFont.label)
-                                        .foregroundColor(Color.text_primary)
-                                    Spacer()
-                                    TextField("Spacing", value: $state.holeSpacing, format: .number)
-                                        .textFieldStyle(PlainTextFieldStyle())
-                                        .padding(4)
-                                        .frame(width: 80)
-                                        .background(Color.bg_input)
-                                        .cornerRadius(4)
-                                        .foregroundColor(Color.text_primary)
-                                        .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                                        .help("Distance between consecutive sewing holes in millimeters")
-                                }
-                            }
-                            VStack(alignment: .leading, spacing: 4) {
-                                HStack(spacing: 8) {
-                                    Text("1")
-                                        .font(PlasticityFont.label)
-                                        .foregroundColor(Color.text_muted)
-                                    Slider(value: spacingSlider, in: 1...20)
-                                    Text("20")
-                                        .font(PlasticityFont.label)
-                                        .foregroundColor(Color.text_muted)
-                                }
-                                HStack {
-                                    Spacer()
-                                    TextField("", value: spacingSlider, format: .number.precision(.fractionLength(0...1)))
-                                        .textFieldStyle(PlainTextFieldStyle())
-                                        .multilineTextAlignment(.center)
-                                        .padding(4)
-                                        .frame(width: 64)
-                                        .background(Color.bg_input)
-                                        .cornerRadius(4)
-                                        .foregroundColor(Color.text_primary)
-                                        .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                                    Text("mm")
-                                        .font(PlasticityFont.label)
-                                        .foregroundColor(Color.text_secondary)
-                                    Spacer()
-                                }
-                            }
-                            .help(state.holeEnableVariableSpacing
-                                  ? "Spacing slider (1–20 mm). Slides the min and max together, keeping their gap. Edit Min / Max below for fine control."
-                                  : "Spacing slider (1–20 mm). Sets the distance between holes; the field above edits the same value.")
-                        }
-
-                        HStack {
-                            Text("Pattern Style")
-                                .font(PlasticityFont.label)
-                                .foregroundColor(Color.text_primary)
-                            Spacer()
-                            Picker("", selection: $state.holePattern) {
-                                Text("Single").tag("single")
-                                Text("Saddle").tag("saddle")
-                            }
-                            .pickerStyle(SegmentedPickerStyle())
-                            .frame(width: 120)
-                            .help("Choose between a single row or double-row saddle stitch hole pattern")
-                        }
-                        
-                        holesSubheader("CORNERS & ENDS")
-                        Toggle("Hole at Corners", isOn: $state.holeCornerHoles)
-                            .toggleStyle(.checkbox)
-                            .font(PlasticityFont.label)
-                            .foregroundColor(Color.text_primary)
-                            .help("Place a stitch on — or as near as possible to — every corner sharper than ~45°, flexing the spacing between holes so one lands on each corner. On by default.")
-
-                        if !state.sewingChainSelection {
-                            holeSingleLineControls
-                        }
-
-                        HStack {
-                            Text("Offset Corners")
-                                .font(PlasticityFont.label)
-                                .foregroundColor(Color.text_primary)
-                            Spacer()
-                            Picker("", selection: $state.holeOffsetCornerFillet) {
-                                Text("Sharp").tag(false)
-                                Text("Rounded").tag(true)
-                            }
-                            .pickerStyle(SegmentedPickerStyle())
-                            .frame(width: 140)
-                            .help("Corner treatment of the offset stitch line: Sharp keeps crisp corners (default); Rounded fillets them so holes follow a smooth arc.")
-                        }
-
-                        HStack {
-                            Text("Side")
-                                .font(PlasticityFont.label)
-                                .foregroundColor(Color.text_primary)
-                            Spacer()
-                            Picker("", selection: $state.holeSide) {
-                                if state.holeHandleIsRadial {
-                                    // Circles / arcs / curves: outer/inner is
-                                    // unambiguous; left/right is not (and disagreed
-                                    // with the dashed preview).
-                                    Text("Outer").tag("outer")
-                                    Text("Inner").tag("inner")
-                                    Text("Both").tag("both")
-                                } else {
-                                    Text("Left").tag("left")
-                                    Text("Right").tag("right")
-                                    Text("Both").tag("both")
-                                }
-                            }
-                            .pickerStyle(SegmentedPickerStyle())
-                            .frame(width: 180)
-                            .help("Choose the side(s) of the path to distribute holes. Closed curves use outer / inner; open paths use left / right.")
-                        }
-
-                        if state.holePattern == "saddle" {
-                            HStack {
-                                Text("Saddle Row Distance (mm)")
-                                    .font(PlasticityFont.label)
-                                    .foregroundColor(Color.text_primary)
-                                Spacer()
-                                TextField("Distance", value: $state.holeSaddleSpacing, format: .number)
-                                    .textFieldStyle(PlainTextFieldStyle())
-                                    .padding(4)
-                                    .frame(width: 80)
-                                    .background(Color.bg_input)
-                                    .cornerRadius(4)
-                                    .foregroundColor(Color.text_primary)
-                                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                                    .help("Distance in millimeters between the two staggered rows of a saddle stitch")
-                            }
-                        }
-
-                        Toggle("Variable Spacing", isOn: $state.holeEnableVariableSpacing)
-                            .toggleStyle(.checkbox)
-                            .font(PlasticityFont.label)
-                            .foregroundColor(Color.text_primary)
-                            .help("Enable variable spacing to fit holes perfectly along segment lengths")
-                        
-                        if state.holeEnableVariableSpacing {
-                            HStack {
-                                Text("  Min / Max (mm)")
-                                    .font(PlasticityFont.label)
-                                    .foregroundColor(Color.text_primary)
-                                Spacer()
-                                TextField("Min", value: $state.holeVariableSpacingMin, format: .number)
-                                    .textFieldStyle(PlainTextFieldStyle())
-                                    .padding(4)
-                                    .frame(width: 45)
-                                    .background(Color.bg_input)
-                                    .cornerRadius(4)
-                                    .foregroundColor(Color.text_primary)
-                                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                                    .help("Minimum spacing allowed between holes in millimeters")
-                                Text("/")
-                                TextField("Max", value: $state.holeVariableSpacingMax, format: .number)
-                                    .textFieldStyle(PlainTextFieldStyle())
-                                    .padding(4)
-                                    .frame(width: 45)
-                                    .background(Color.bg_input)
-                                    .cornerRadius(4)
-                                    .foregroundColor(Color.text_primary)
-                                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                                    .help("Maximum spacing allowed between holes in millimeters")
-                            }
-                            .padding(.leading, 8)
-                        }
-                        
-                        DisclosureGroup {
-                        Toggle("Proximity Filter", isOn: $state.holeEnableProximityFilter)
-                            .toggleStyle(.checkbox)
-                            .font(PlasticityFont.label)
-                            .foregroundColor(Color.text_primary)
-                            .help("Filter out generated holes that are too close to other canvas paths")
-                            .padding(.top, 4)
-                        
-                        if state.holeEnableProximityFilter {
-                            HStack {
-                                Text("  Distance (mm)")
-                                    .font(PlasticityFont.label)
-                                    .foregroundColor(Color.text_primary)
-                                Spacer()
-                                TextField("Distance", value: $state.holeProximityDistance, format: .number)
-                                    .textFieldStyle(PlainTextFieldStyle())
-                                    .padding(4)
-                                    .frame(width: 60)
-                                    .background(Color.bg_input)
-                                    .cornerRadius(4)
-                                    .foregroundColor(Color.text_primary)
-                                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                                    .help("Proximity detection threshold radius in millimeters")
-                            }
-                            .padding(.leading, 8)
-                        }
-                        
-                        Toggle("Line Proximity Filter", isOn: $state.holeEnableLineProximityFilter)
-                            .toggleStyle(.checkbox)
-                            .font(PlasticityFont.label)
-                            .foregroundColor(Color.text_primary)
-                            .help("Remove holes that fall within the threshold of ANY other line in the drawing — every line is considered, not just the selected one")
-                        
-                        if state.holeEnableLineProximityFilter {
-                            HStack {
-                                Text("  Threshold (mm)")
-                                    .font(PlasticityFont.label)
-                                    .foregroundColor(Color.text_primary)
-                                Spacer()
-                                TextField("Threshold", value: $state.holeLineProximityThreshold, format: .number)
-                                    .textFieldStyle(PlainTextFieldStyle())
-                                    .padding(4)
-                                    .frame(width: 60)
-                                    .background(Color.bg_input)
-                                    .cornerRadius(4)
-                                    .foregroundColor(Color.text_primary)
-                                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                                    .help("Minimum clearance (mm) a hole must keep from any other line; holes closer than this are removed")
-                            }
-                            .padding(.leading, 8)
-                        }
-                        
-                        Divider().background(Color.border_subtle)
-
-                        // Proximity Avoidance / Keep-Out (MAS-120 Phase 1).
-                        Text("KEEP-OUT AVOIDANCE")
-                            .font(PlasticityFont.label).fontWeight(.bold).foregroundColor(Color.accent)
-                        Toggle("Avoid Keep-Out Zones", isOn: $state.holeEnableAvoidance)
-                            .toggleStyle(.checkbox)
-                            .font(PlasticityFont.label)
-                            .foregroundColor(Color.text_primary)
-                            .help("Suppress stitch holes within the clearance radius of tagged hardware/keep-out geometry")
-                        if state.holeEnableAvoidance {
-                            HStack {
-                                Text("  Clearance (mm)")
-                                    .font(PlasticityFont.label).foregroundColor(Color.text_primary)
-                                Spacer()
-                                TextField("Clearance", value: $state.holeAvoidanceRadius, format: .number)
-                                    .textFieldStyle(PlainTextFieldStyle())
-                                    .padding(4).frame(width: 60)
-                                    .background(Color.bg_input).cornerRadius(4)
-                                    .foregroundColor(Color.text_primary)
-                                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                            }
-                            .padding(.leading, 8)
-                            HStack {
-                                Text("  Tagged: \(state.sewingKeepoutHandles.count)")
-                                    .font(PlasticityFont.label).foregroundColor(Color.text_secondary)
-                                Spacer()
-                                Button("Tag Selected") {
-                                    state.sewingKeepoutHandles.formUnion(state.selectedHandles)
-                                }
-                                .buttonStyle(PlasticityButtonStyle(isEnabled: !state.selectedHandles.isEmpty))
-                                .disabled(state.selectedHandles.isEmpty)
-                                .help("Mark the selected geometry as keep-out elements")
-                                if !state.sewingKeepoutHandles.isEmpty {
-                                    Button("Clear") { state.sewingKeepoutHandles.removeAll() }
-                                        .buttonStyle(PlasticityButtonStyle(isEnabled: true))
-                                }
-                            }
-                            .padding(.leading, 8)
-                        }
-                        } label: {
-                            holesSubheader("FILTERS & KEEP-OUT")
-                        }
-                        .tint(Color.accent)
-
-                        // NOTE: the "Apply Sewing Holes" action is rendered as a
-                        // pinned footer (holesApplyFooter) below the scrolling
-                        // panel so it stays reachable no matter how many advanced
-                        // options are expanded — see the inspector VSplitView.
-                    }
-                    .padding(.vertical, 4)
+        VStack(spacing: 0) {
+            TOSection("Pricking Iron", summary: ironName) {
+                holesIronControls
             }
-            .padding(8)
-            .background(Color.bg_input.opacity(0.4))
-            .cornerRadius(4)
-            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_subtle, lineWidth: 1))
+            TOSection("Basics",
+                      summary: "\(toNum(state.holeOffsetDistance)) · \(toNum(state.holeDiameter)) mm") {
+                holesBasicsControls
+            }
+            // The one section that defines "what this tool is doing right now" —
+            // opens automatically the first time the tool is activated.
+            TOSection("Spacing & Pattern", isDefault: true,
+                      summary: "\(spacingVal) · \(distLabel)", defaultOpen: true) {
+                holesSpacingControls
+            }
+            TOSection("Corners & Ends", summary: state.holeCornerHoles ? "On" : "Off") {
+                holesCornersControls
+            }
+            TOSection("Filters & Keep-Out", summary: holesFiltersSummary) {
+                holesFiltersControls
+            }
         }
     }
 
-    /// Primary Sewing-Holes action, pinned beneath the (scrolling) options panel
-    /// so it's always visible regardless of how tall the parameter list grows.
+    /// Pricking iron chip selector + slit shape controls.
     @ViewBuilder
-    private var holesApplyFooter: some View {
-        VStack(spacing: 0) {
-            Divider().background(Color.border_subtle)
-            Button("Apply Sewing Holes") {
-                state.applySewingHoles()
+    private var holesIronControls: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(PrickingIronStore.shared.all) { iron in
+                    TOChipCard(
+                        name: iron.name,
+                        sub: "\(toNum(iron.pitch)) mm · \(iron.bladeCount) prong",
+                        active: state.prickingIronId == iron.id,
+                        action: { state.applyPrickingIron(iron) }
+                    ) {
+                        ironSlitGlyph(shape: iron.shape).frame(width: 16, height: 22)
+                    }
+                    .frame(width: 118)
+                }
             }
-            .buttonStyle(PlasticityButtonStyle(isEnabled: !state.selectedHandles.isEmpty))
-            .disabled(state.selectedHandles.isEmpty)
-            .help("Generate sewing holes along selected paths using these parameters")
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .frame(maxWidth: .infinity)
+            .padding(.vertical, 1)
         }
-        .background(Color.bg_panel)
+        TORow(label: "Hole shape") {
+            TOSelect(options: [("round", "Round"), ("diamond", "Diamond"), ("french", "French"),
+                               ("flat", "Flat"), ("oval", "Oval")],
+                     selection: $state.holeShape) { state.updateLivePreview() }
+        }
+        if state.holeShape != "round" {
+            TORow(label: "Slit L × W (mm)") {
+                HStack(spacing: 6) {
+                    TextField("L", value: $state.holeSlitLength, format: .number)
+                        .toFieldStyle(width: 50)
+                        .onChange(of: state.holeSlitLength) { _ in state.updateLivePreview() }
+                    TextField("W", value: $state.holeSlitWidth, format: .number)
+                        .toFieldStyle(width: 50)
+                        .onChange(of: state.holeSlitWidth) { _ in state.updateLivePreview() }
+                }
+            }
+            TORow(label: "Slit angle (°)") {
+                TextField("°", value: $state.holeSlitAngle, format: .number)
+                    .toFieldStyle(width: 64)
+                    .onChange(of: state.holeSlitAngle) { _ in state.updateLivePreview() }
+            }
+            TOCheck(label: "Invert slant (left vs right iron)", isOn: $state.holeInverted) {
+                state.updateLivePreview()
+            }
+        }
+        TOCheck(label: "Snap to whole chisel steps", isOn: $state.snapToChisel) {
+            state.updateLivePreview()
+        }
+        TOCheck(label: "Preview seam in Simulator", isOn: $state.showStitchSimulation)
+    }
+
+    /// Offset distance, hole diameter, and which side(s) the holes go on.
+    @ViewBuilder
+    private var holesBasicsControls: some View {
+        TORow(label: "Offset distance") {
+            TOStepper(value: $state.holeOffsetDistance, unit: "mm", step: 0.5, range: 0...100, maxFrac: 2)
+        }
+        TORow(label: "Hole diameter") {
+            TOStepper(value: $state.holeDiameter, unit: "mm", step: 0.1, range: 0.2...20, maxFrac: 2)
+        }
+        VStack(alignment: .leading, spacing: 8) {
+            TOLabel("Side")
+            if state.holeHandleIsRadial {
+                TOSegmented(options: [("outer", "Outer"), ("inner", "Inner"), ("both", "Both")],
+                            selection: $state.holeSide)
+            } else {
+                TOSegmented(options: [("left", "Left"), ("right", "Right"), ("both", "Both")],
+                            selection: $state.holeSide)
+            }
+        }
+    }
+
+    /// Distribution, spacing / count, pattern style, and variable spacing.
+    @ViewBuilder
+    private var holesSpacingControls: some View {
+        // With Variable Spacing off the slider drives the single hole spacing; with
+        // it on it slides BOTH min and max together, keeping their gap fixed.
+        let spacingSlider = Binding<Double>(
+            get: { state.holeEnableVariableSpacing ? state.holeVariableSpacingMin : state.holeSpacing },
+            set: { raw in
+                let v = min(20.0, max(1.0, raw))
+                if state.holeEnableVariableSpacing {
+                    let gap = max(0.0, state.holeVariableSpacingMax - state.holeVariableSpacingMin)
+                    state.holeVariableSpacingMin = v
+                    state.holeVariableSpacingMax = v + gap
+                } else {
+                    state.holeSpacing = v
+                }
+            })
+
+        TORow(label: "Distribution") {
+            TOSegmented(options: [("spacing", "Fill"), ("count", "Count")],
+                        selection: $state.holeDistribution)
+                .frame(width: 150)
+        }
+        if state.holeDistribution == "count" {
+            TORow(label: "Hole count") {
+                TextField("Count", value: $state.holeCount, format: .number)
+                    .toFieldStyle(width: 80)
+            }
+        } else {
+            TOSlider(value: spacingSlider, range: 1...20, unit: "mm",
+                     minLabel: "1", maxLabel: "20", maxFrac: 1)
+        }
+        TORow(label: "Pattern style") {
+            TOSegmented(options: [("single", "Single"), ("saddle", "Saddle")],
+                        selection: $state.holePattern)
+                .frame(width: 150)
+        }
+        if state.holePattern == "saddle" {
+            TORow(label: "Saddle row distance") {
+                TOStepper(value: $state.holeSaddleSpacing, unit: "mm", step: 0.2, range: 0...20, maxFrac: 2)
+            }
+        }
+        TOCheck(label: "Variable spacing",
+                isOn: $state.holeEnableVariableSpacing,
+                sub: "Flex the spacing so holes fit each segment length exactly.")
+        if state.holeEnableVariableSpacing {
+            TORow(label: "Min / Max (mm)") {
+                HStack(spacing: 6) {
+                    TextField("Min", value: $state.holeVariableSpacingMin, format: .number)
+                        .toFieldStyle(width: 52)
+                    Text("/").font(.system(size: 13)).foregroundColor(Color.to_textMut)
+                    TextField("Max", value: $state.holeVariableSpacingMax, format: .number)
+                        .toFieldStyle(width: 52)
+                }
+            }
+        }
+    }
+
+    /// Corner handling + (for single edges) end placement.
+    @ViewBuilder
+    private var holesCornersControls: some View {
+        TOCheck(label: "Force a hole at every corner",
+                isOn: $state.holeCornerHoles,
+                sub: "Guarantees a stitch lands exactly on each corner point.")
+        VStack(alignment: .leading, spacing: 8) {
+            TOLabel("Offset corners")
+            TOSegmented(options: [(false, "Sharp"), (true, "Rounded")],
+                        selection: $state.holeOffsetCornerFillet)
+        }
+        if !state.sewingChainSelection {
+            holeSingleLineControls
+        }
+    }
+
+    private var holesFiltersSummary: String {
+        var n = 0
+        if state.holeEnableProximityFilter { n += 1 }
+        if state.holeEnableLineProximityFilter { n += 1 }
+        if state.holeEnableAvoidance { n += 1 }
+        return n == 0 ? "Off" : "\(n) on"
+    }
+
+    /// Proximity filters + hardware keep-out avoidance.
+    @ViewBuilder
+    private var holesFiltersControls: some View {
+        TOCheck(label: "Proximity filter",
+                isOn: $state.holeEnableProximityFilter,
+                sub: "Drop holes that fall too close to other holes.")
+        if state.holeEnableProximityFilter {
+            TORow(label: "Distance (mm)") {
+                TextField("Distance", value: $state.holeProximityDistance, format: .number)
+                    .toFieldStyle(width: 64)
+            }
+        }
+        TOCheck(label: "Line proximity filter",
+                isOn: $state.holeEnableLineProximityFilter,
+                sub: "Remove holes within the threshold of any other line in the drawing.")
+        if state.holeEnableLineProximityFilter {
+            TORow(label: "Threshold (mm)") {
+                TextField("Threshold", value: $state.holeLineProximityThreshold, format: .number)
+                    .toFieldStyle(width: 64)
+            }
+        }
+        Rectangle().fill(Color.to_divider).frame(height: 1)
+        TOCheck(label: "Avoid keep-out zones",
+                isOn: $state.holeEnableAvoidance,
+                sub: "Suppress holes within the clearance radius of tagged hardware / keep-out geometry.")
+        if state.holeEnableAvoidance {
+            TORow(label: "Clearance (mm)") {
+                TextField("Clearance", value: $state.holeAvoidanceRadius, format: .number)
+                    .toFieldStyle(width: 64)
+            }
+            HStack(spacing: 8) {
+                TOLabel("Tagged: \(state.sewingKeepoutHandles.count)", color: .to_textTer)
+                Spacer(minLength: 8)
+                TOSecondaryButton(title: "Tag selected", enabled: !state.selectedHandles.isEmpty) {
+                    state.sewingKeepoutHandles.formUnion(state.selectedHandles)
+                }
+                .frame(width: 110)
+                if !state.sewingKeepoutHandles.isEmpty {
+                    TOSecondaryButton(title: "Clear", tint: .to_textMut) {
+                        state.sewingKeepoutHandles.removeAll()
+                    }
+                    .frame(width: 64)
+                }
+            }
+        }
     }
 
     /// Binds the radius field to the active corner's value, applying live so the
@@ -2039,345 +1392,190 @@ extension ContentView {
     private var filletSection: some View {
         let isChamfer = state.currentTool == .chamfer
         let activeCorners = state.filletSelectedHandle.flatMap { state.parametricShapes[$0]?.corners.count } ?? 0
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                CornerGlyph(rounded: !isChamfer)
-                    .stroke(style: StrokeStyle(lineWidth: 1.6, lineCap: .round, lineJoin: .round))
-                    .foregroundColor(Color.accent)
-                    .frame(width: 14, height: 14)
-                Text(isChamfer ? "CHAMFER" : "FILLET")
-                    .font(PlasticityFont.header)
-                    .foregroundColor(Color.text_primary)
-                    .tracking(0.5)
-            }
+        VStack(alignment: .leading, spacing: 14) {
+            TOToolTitle(icon: isChamfer ? "scissors" : "circle.bottomrighthalf.filled",
+                        title: isChamfer ? "Chamfer" : "Fillet",
+                        help: isChamfer
+                            ? "Select a shape (or click its corners), then set a setback. Each corner can carry its own value — drag the corner arrow or edit it here."
+                            : "Select a shape (or click its corners), then set a radius. Each corner can carry its own value — drag the corner arrow or edit it here. G1 is a true arc; G2 is a smoother curvature-continuous blend.",
+                        helpOpen: $toolHelpOpen)
 
             if !isChamfer {
-                Text("Continuity")
-                    .font(PlasticityFont.label)
-                    .foregroundColor(Color.text_secondary)
-                Picker("", selection: $state.filletContinuity) {
-                    Text("G1").tag("G1")
-                    Text("G2").tag("G2")
+                VStack(alignment: .leading, spacing: 8) {
+                    TOLabel("Continuity")
+                    TOSegmented(options: [("G1", "G1"), ("G2", "G2")], selection: $state.filletContinuity)
+                        .frame(width: 150)
                 }
-                .pickerStyle(SegmentedPickerStyle())
-                .help("G1 — true circular arc. G2 — curvature-continuous blend (smoother).")
             }
 
-            Text(isChamfer ? "Setback (mm) — active corner" : "Radius (mm) — active corner")
-                .font(PlasticityFont.label)
-                .foregroundColor(Color.text_secondary)
-            // Edits ONLY the active (last-selected) corner — fillets are individual
-            // (MAS-91). Esc unfocuses so single-key shortcuts work again.
-            TextField("Value", value: filletFieldValue, format: .number)
-                .textFieldStyle(PlainTextFieldStyle())
-                .focused($isFilletFieldFocused)
-                .padding(6)
-                .background(Color.bg_input)
-                .cornerRadius(4)
-                .foregroundColor(Color.text_primary)
-                .font(PlasticityFont.body)
-                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                .onSubmit { state.setActiveCornerValue(state.filletToolRadius) }
+            TORow(label: isChamfer ? "Setback (mm)" : "Radius (mm)") {
+                // Edits ONLY the active (last-selected) corner — fillets are
+                // individual (MAS-91). Esc unfocuses so shortcuts work again.
+                TextField("Value", value: filletFieldValue, format: .number)
+                    .focused($isFilletFieldFocused)
+                    .toFieldStyle(width: 90)
+                    .onSubmit { state.setActiveCornerValue(state.filletToolRadius) }
+            }
+            TOPresetChips(values: [2, 3, 5, 8, 10],
+                          value: Binding(get: { state.filletToolRadius },
+                                         set: { state.filletToolRadius = $0 }),
+                          onPick: { if activeCorners > 0 { state.setActiveCornerValue($0) } })
 
-            quickValues([2, 3, 5, 8, 10],
-                        Binding(get: { state.filletToolRadius },
-                                set: { state.filletToolRadius = $0 }),
-                        unit: " mm",
-                        onPick: { if activeCorners > 0 { state.setActiveCornerValue($0) } })
-
-            Text(activeCorners == 0
-                 ? "Select a shape (or click its corners) to \(isChamfer ? "chamfer" : "fillet")."
-                 : "\(activeCorners) corner\(activeCorners == 1 ? "" : "s") selected — they share this radius. Drag the corner arrow or edit the value.")
-                .font(PlasticityFont.label)
-                .foregroundColor(Color.text_muted)
+            if activeCorners == 0 {
+                TOStatus(color: .to_textFaint, text: "No corners selected",
+                         hint: "select a shape to \(isChamfer ? "chamfer" : "fillet")")
+            } else {
+                TOStatus(color: .to_accent,
+                         text: "\(activeCorners) corner\(activeCorners == 1 ? "" : "s") selected",
+                         hint: "they share this value")
+            }
 
             if let notice = state.cornerLimitNotice {
-                Text(notice)
-                    .font(PlasticityFont.label)
-                    .foregroundColor(Color.status_err)
-                    .fixedSize(horizontal: false, vertical: true)
+                TOWarning(title: notice, color: .to_warn)
             }
         }
     }
 
     private var paperFoldingSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Image(systemName: "scissors")
-                    .foregroundColor(Color.accent)
-                Text("PAPER FOLDING")
-                    .font(PlasticityFont.header)
-                    .foregroundColor(Color.text_primary)
-                    .tracking(0.5)
-                Spacer()
+        VStack(alignment: .leading, spacing: 14) {
+            TOToolTitle(icon: "scissors", title: "Paper Folding",
+                        help: "Turn selected segments into dashed crease folds, or generate glue tabs along selected paths for paper / leather modeling.",
+                        helpOpen: $toolHelpOpen)
+
+            TOGroupLabel("Crease pattern")
+            TOHint(text: "Turns selected segments into dashed crease folds.")
+            TOPrimaryButton(title: "Apply Dashed Creases", enabled: !state.selectedHandles.isEmpty) {
+                state.applyDashedCreases()
             }
 
-            if true {
-                    VStack(alignment: .leading, spacing: 10) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("CREASE PATTERN")
-                                .font(PlasticityFont.label)
-                                .fontWeight(.bold)
-                                .foregroundColor(Color.accent)
-                            Text("Turns selected segments into dashed crease folds.")
-                                .font(PlasticityFont.label)
-                                .foregroundColor(Color.text_secondary)
-                            Button("Apply Dashed Creases") {
-                                state.applyDashedCreases()
-                            }
-                            .buttonStyle(PlasticityButtonStyle(isEnabled: !state.selectedHandles.isEmpty))
-                            .disabled(state.selectedHandles.isEmpty)
-                            .help("Convert selected segments into dashed crease folds for paper/leather modeling")
-                        }
-                        
-                        Divider().background(Color.border_subtle)
-                        
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("GLUE TABS")
-                                .font(PlasticityFont.label)
-                                .fontWeight(.bold)
-                                .foregroundColor(Color.accent)
-                            
-                            HStack {
-                                Text("Tab Height (mm)")
-                                    .font(PlasticityFont.label)
-                                    .foregroundColor(Color.text_secondary)
-                                Spacer()
-                                TextField("Height", value: $state.glueTabHeight, format: .number)
-                                    .textFieldStyle(PlainTextFieldStyle())
-                                    .padding(4)
-                                    .frame(width: 80)
-                                    .background(Color.bg_input)
-                                    .cornerRadius(4)
-                                    .foregroundColor(Color.text_primary)
-                                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                                    .help("Height of the generated glue tabs in millimeters")
-                            }
-                            
-                            HStack {
-                                Text("Tab Type")
-                                    .font(PlasticityFont.label)
-                                    .foregroundColor(Color.text_secondary)
-                                Spacer()
-                                Picker("", selection: $state.glueTabType) {
-                                    Text("Trapezoid").tag("trapezoid")
-                                    Text("Triangle").tag("triangle")
-                                }
-                                .pickerStyle(SegmentedPickerStyle())
-                                .frame(width: 140)
-                                .help("Choose the shape of the generated glue tabs: trapezoidal or triangular")
-                            }
-                            
-                            HStack {
-                                Text("Side")
-                                    .font(PlasticityFont.label)
-                                    .foregroundColor(Color.text_secondary)
-                                Spacer()
-                                Picker("", selection: $state.glueTabSide) {
-                                    Text("Left").tag("left")
-                                    Text("Right").tag("right")
-                                }
-                                .pickerStyle(SegmentedPickerStyle())
-                                .frame(width: 140)
-                                .help("Select the side of the path to place the glue tabs (left or right)")
-                            }
-
-                            HStack {
-                                Text("Start Offset (mm)")
-                                    .font(PlasticityFont.label)
-                                    .foregroundColor(Color.text_secondary)
-                                Spacer()
-                                TextField("Start Offset", value: $state.glueTabStartOffset, format: .number)
-                                    .textFieldStyle(PlainTextFieldStyle())
-                                    .padding(4)
-                                    .frame(width: 80)
-                                    .background(Color.bg_input)
-                                    .cornerRadius(4)
-                                    .foregroundColor(Color.text_primary)
-                                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                                    .help("Offset distance from the starting point of the segment in millimeters")
-                            }
-
-                            HStack {
-                                Text("End Offset (mm)")
-                                    .font(PlasticityFont.label)
-                                    .foregroundColor(Color.text_secondary)
-                                Spacer()
-                                TextField("End Offset", value: $state.glueTabEndOffset, format: .number)
-                                    .textFieldStyle(PlainTextFieldStyle())
-                                    .padding(4)
-                                    .frame(width: 80)
-                                    .background(Color.bg_input)
-                                    .cornerRadius(4)
-                                    .foregroundColor(Color.text_primary)
-                                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                                    .help("Offset distance from the ending point of the segment in millimeters")
-                            }
-                            
-                            Button("Apply Glue Tabs") {
-                                state.applyGlueTabs()
-                            }
-                            .buttonStyle(PlasticityButtonStyle(isEnabled: !state.selectedHandles.isEmpty))
-                            .disabled(state.selectedHandles.isEmpty)
-                            .help("Generate glue tabs along selected paths using these parameters")
-                        }
-                    }
-                    .padding(.vertical, 4)
-                }
+            TODivider()
+            TOGroupLabel("Glue tabs")
+            TORow(label: "Tab height (mm)") {
+                TextField("Height", value: $state.glueTabHeight, format: .number).toFieldStyle(width: 80)
             }
-            .padding(8)
-            .background(Color.bg_input.opacity(0.4))
-            .cornerRadius(4)
-            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_subtle, lineWidth: 1))
+            VStack(alignment: .leading, spacing: 8) {
+                TOLabel("Tab type")
+                TOSegmented(options: [("trapezoid", "Trapezoid"), ("triangle", "Triangle")],
+                            selection: $state.glueTabType)
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                TOLabel("Side")
+                TOSegmented(options: [("left", "Left"), ("right", "Right")], selection: $state.glueTabSide)
+                    .frame(width: 150)
+            }
+            TORow(label: "Start offset (mm)") {
+                TextField("Start", value: $state.glueTabStartOffset, format: .number).toFieldStyle(width: 80)
+            }
+            TORow(label: "End offset (mm)") {
+                TextField("End", value: $state.glueTabEndOffset, format: .number).toFieldStyle(width: 80)
+            }
+            TOPrimaryButton(title: "Apply Glue Tabs", enabled: !state.selectedHandles.isEmpty) {
+                state.applyGlueTabs()
+            }
+        }
     }
 
     @ViewBuilder
     private var patterningSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Image(systemName: "square.grid.3x3")
-                    .foregroundColor(Color.accent)
-                Text("PATTERNING")
-                    .font(PlasticityFont.header)
-                    .foregroundColor(Color.text_primary)
-                    .tracking(0.5)
-                Spacer()
+        VStack(alignment: .leading, spacing: 14) {
+            TOToolTitle(icon: "square.grid.3x3", title: "Patterning",
+                        help: "Repeat the selected geometry in a rectangular grid, a circular array, or along a guide path. Drag the on-canvas arrows, or set exact values below.",
+                        helpOpen: $toolHelpOpen)
+            if state.selectedHandles.isEmpty {
+                TOStatus(color: .to_textFaint, text: "Nothing selected", hint: "select geometry to pattern")
             }
 
-            if true {
-                VStack(alignment: .leading, spacing: 10) {
-                    if state.selectedHandles.isEmpty {
-                        Text("Select geometry to pattern.")
-                            .font(PlasticityFont.label)
-                            .foregroundColor(Color.text_secondary)
-                    }
-                    Picker("", selection: $state.patternMode) {
-                        Text("Rect").tag("rectangular")
-                        Text("Circular").tag("circular")
-                        Text("Path").tag("path")
-                    }
-                    .pickerStyle(SegmentedPickerStyle())
+            VStack(alignment: .leading, spacing: 8) {
+                TOLabel("Pattern type")
+                TOSegmented(options: [("rectangular", "Rect"), ("circular", "Circular"), ("path", "Path")],
+                            selection: $state.patternMode)
+            }
 
-                    if state.patternMode == "rectangular" {
-                        Text("Drag the on-canvas arrows, or set values:")
-                            .font(PlasticityFont.label).foregroundColor(Color.text_muted)
-
-                        // Number of copies (per axis), with steppers (MAS-157).
-                        HStack {
-                            Text("Copies X / Y").font(PlasticityFont.label).foregroundColor(Color.text_secondary)
-                            Spacer()
-                            patternStepperField(Binding(get: { Double(state.patternCountX) }, set: { state.patternCountX = max(1, Int($0)) }), step: 1, minValue: 1, isInt: true)
-                            Text("×")
-                            patternStepperField(Binding(get: { Double(state.patternCountY) }, set: { state.patternCountY = max(1, Int($0)) }), step: 1, minValue: 1, isInt: true)
-                        }
-
-                        // Choose how the distance between copies is specified.
-                        Picker("", selection: $state.patternDistanceMode) {
-                            Text("Spacing").tag("spacing")
-                            Text("Extent").tag("extent")
-                        }
-                        .pickerStyle(SegmentedPickerStyle())
-                        .help("Spacing — gap between adjacent copies. Extent — total distance from the first to the last copy.")
-
-                        if state.patternDistanceMode == "spacing" {
-                            HStack {
-                                Text("Spacing X / Y").font(PlasticityFont.label).foregroundColor(Color.text_secondary)
-                                Spacer()
-                                patternStepperField($state.patternSpacingX, step: 1)
-                                Text("/")
-                                patternStepperField($state.patternSpacingY, step: 1)
-                            }
-                        } else {
-                            HStack {
-                                Text("Extent X / Y").font(PlasticityFont.label).foregroundColor(Color.text_secondary)
-                                Spacer()
-                                patternStepperField($state.patternExtentX, step: 1)
-                                Text("/")
-                                patternStepperField($state.patternExtentY, step: 1)
-                            }
-                            Text("≈ \(state.effectivePatternSpacingX, specifier: "%.1f") / \(state.effectivePatternSpacingY, specifier: "%.1f") mm between copies")
-                                .font(PlasticityFont.label).foregroundColor(Color.text_muted)
-                        }
-
-                        Button("Apply Pattern") {
-                            state.applyPatternGrid(columns: state.patternCountX, rows: state.patternCountY,
-                                                   colSpacing: state.effectivePatternSpacingX, rowSpacing: state.effectivePatternSpacingY)
-                        }
-                        .buttonStyle(PlasticityButtonStyle(isEnabled: !state.selectedHandles.isEmpty))
-                        .disabled(state.selectedHandles.isEmpty)
-                    } else if state.patternMode == "circular" {
-                        HStack {
-                            Text("Copies").font(PlasticityFont.label).foregroundColor(Color.text_secondary)
-                            Spacer()
-                            patternStepperField(Binding(get: { Double(state.patternCircCount) }, set: { state.patternCircCount = max(2, Int($0)) }), step: 1, minValue: 2, isInt: true)
-                        }
-                        HStack {
-                            Text("Total Angle (°)").font(PlasticityFont.label).foregroundColor(Color.text_secondary)
-                            Spacer()
-                            patternStepperField($state.patternCircAngle, step: 5)
-                        }
-                        Button {
-                            state.pickingPatternPivot = true
-                        } label: {
-                            Label(state.patternPivotModel == nil ? "Pick Center…" : "Re-pick Center…", systemImage: "scope")
-                        }
-                        .buttonStyle(PlasticityButtonStyle(isEnabled: true))
-                        if state.pickingPatternPivot {
-                            Text("Click a center point on the canvas…")
-                                .font(PlasticityFont.label).foregroundColor(Color.accent)
-                        }
-                        Button("Apply Pattern") {
-                            state.applyPatternCircular(count: state.patternCircCount, angle: state.patternCircAngle)
-                        }
-                        .buttonStyle(PlasticityButtonStyle(isEnabled: !state.selectedHandles.isEmpty))
-                        .disabled(state.selectedHandles.isEmpty)
-                    } else if state.patternMode == "path" {
-                        HStack {
-                            Text("Spacing (mm)").font(PlasticityFont.label).foregroundColor(Color.text_secondary)
-                            Spacer()
-                            patternStepperField($state.patternPathSpacing, step: 1)
-                        }
-                        Button {
-                            state.pickingPatternPath = true
-                            state.pickingPatternPivot = false
-                        } label: {
-                            Label(state.patternPathHandle == nil ? "Pick Path…" : "Re-pick Path…", systemImage: "point.topleft.down.to.point.bottomright.curvepath")
-                        }
-                        .buttonStyle(PlasticityButtonStyle(isEnabled: true))
-                        if state.pickingPatternPath {
-                            Text("Click a guide path on the canvas…")
-                                .font(PlasticityFont.label).foregroundColor(Color.accent)
-                        } else if let handle = state.patternPathHandle {
-                            Text("Picked Path: \(handle)")
-                                .font(PlasticityFont.label).foregroundColor(Color.text_muted)
-                        }
-                        Button("Apply Pattern") {
-                            if let handle = state.patternPathHandle {
-                                state.applyPatternPath(pathHandle: handle, spacing: state.patternPathSpacing)
-                            }
-                        }
-                        .buttonStyle(PlasticityButtonStyle(isEnabled: !state.selectedHandles.isEmpty && state.patternPathHandle != nil))
-                        .disabled(state.selectedHandles.isEmpty || state.patternPathHandle == nil)
+            if state.patternMode == "rectangular" {
+                TORow(label: "Copies X / Y") {
+                    HStack(spacing: 6) {
+                        patternStepperField(Binding(get: { Double(state.patternCountX) },
+                                                    set: { state.patternCountX = max(1, Int($0)) }),
+                                            step: 1, minValue: 1, isInt: true)
+                        Text("×").foregroundColor(Color.to_textMut)
+                        patternStepperField(Binding(get: { Double(state.patternCountY) },
+                                                    set: { state.patternCountY = max(1, Int($0)) }),
+                                            step: 1, minValue: 1, isInt: true)
                     }
                 }
-                .padding(.vertical, 4)
+                VStack(alignment: .leading, spacing: 8) {
+                    TOLabel("Distance")
+                    TOSegmented(options: [("spacing", "Spacing"), ("extent", "Extent")],
+                                selection: $state.patternDistanceMode)
+                }
+                if state.patternDistanceMode == "spacing" {
+                    TORow(label: "Spacing X / Y") {
+                        HStack(spacing: 6) {
+                            patternStepperField($state.patternSpacingX, step: 1)
+                            Text("/").foregroundColor(Color.to_textMut)
+                            patternStepperField($state.patternSpacingY, step: 1)
+                        }
+                    }
+                } else {
+                    TORow(label: "Extent X / Y") {
+                        HStack(spacing: 6) {
+                            patternStepperField($state.patternExtentX, step: 1)
+                            Text("/").foregroundColor(Color.to_textMut)
+                            patternStepperField($state.patternExtentY, step: 1)
+                        }
+                    }
+                    TOHint(text: String(format: "≈ %.1f / %.1f mm between copies",
+                                        state.effectivePatternSpacingX, state.effectivePatternSpacingY))
+                }
+                TOPrimaryButton(title: "Apply Pattern", enabled: !state.selectedHandles.isEmpty) {
+                    state.applyPatternGrid(columns: state.patternCountX, rows: state.patternCountY,
+                                           colSpacing: state.effectivePatternSpacingX,
+                                           rowSpacing: state.effectivePatternSpacingY)
+                }
+            } else if state.patternMode == "circular" {
+                TORow(label: "Copies") {
+                    patternStepperField(Binding(get: { Double(state.patternCircCount) },
+                                                set: { state.patternCircCount = max(2, Int($0)) }),
+                                        step: 1, minValue: 2, isInt: true)
+                }
+                TORow(label: "Total angle (°)") {
+                    patternStepperField($state.patternCircAngle, step: 5)
+                }
+                TOSecondaryButton(title: state.patternPivotModel == nil ? "Pick center…" : "Re-pick center…",
+                                  icon: "scope") { state.pickingPatternPivot = true }
+                if state.pickingPatternPivot {
+                    TOStatus(color: .to_accent, text: "Click a center point on the canvas…")
+                }
+                TOPrimaryButton(title: "Apply Pattern", enabled: !state.selectedHandles.isEmpty) {
+                    state.applyPatternCircular(count: state.patternCircCount, angle: state.patternCircAngle)
+                }
+            } else if state.patternMode == "path" {
+                TORow(label: "Spacing (mm)") {
+                    patternStepperField($state.patternPathSpacing, step: 1)
+                }
+                TOSecondaryButton(title: state.patternPathHandle == nil ? "Pick path…" : "Re-pick path…",
+                                  icon: "point.topleft.down.to.point.bottomright.curvepath") {
+                    state.pickingPatternPath = true
+                    state.pickingPatternPivot = false
+                }
+                if state.pickingPatternPath {
+                    TOStatus(color: .to_accent, text: "Click a guide path on the canvas…")
+                } else if let handle = state.patternPathHandle {
+                    TOHint(text: "Picked path: \(handle)")
+                }
+                TOPrimaryButton(title: "Apply Pattern",
+                                enabled: !state.selectedHandles.isEmpty && state.patternPathHandle != nil) {
+                    if let handle = state.patternPathHandle {
+                        state.applyPatternPath(pathHandle: handle, spacing: state.patternPathSpacing)
+                    }
+                }
             }
-            }
-            .padding(8)
-            .background(Color.bg_input.opacity(0.4))
-            .cornerRadius(4)
-            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_subtle, lineWidth: 1))
+        }
     }
 
     /// Compact numeric field used across the patterning panel.
     private func patternField(_ value: Binding<Double>) -> some View {
-        TextField("", value: value, format: .number)
-            .textFieldStyle(PlainTextFieldStyle())
-            .padding(4)
-            .frame(width: 48)
-            .background(Color.bg_input)
-            .cornerRadius(4)
-            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+        TextField("", value: value, format: .number).toFieldStyle(width: 54)
     }
 
     /// Numeric field with little up/down stepper arrows so values can be nudged
@@ -2410,148 +1608,60 @@ extension ContentView {
                 }
                 .buttonStyle(PlainButtonStyle())
             }
-            .foregroundColor(Color.text_secondary)
-            .background(Color.bg_input)
-            .cornerRadius(3)
-            .overlay(RoundedRectangle(cornerRadius: 3).stroke(Color.border_strong, lineWidth: 1))
+            .foregroundColor(Color.to_textTer)
+            .background(Color.to_field)
+            .cornerRadius(6)
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.to_fieldBorder, lineWidth: 1))
         }
     }
 
     @ViewBuilder
     private var textPlacingSection: some View {
         if state.currentTool == .select || state.currentTool == .sketchText {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Image(systemName: "textformat")
-                        .foregroundColor(Color.accent)
-                    Text("TEXT PLACING")
-                        .font(PlasticityFont.header)
-                        .foregroundColor(Color.text_primary)
-                        .tracking(0.5)
-                    Spacer()
+            VStack(alignment: .leading, spacing: 14) {
+                TOToolTitle(icon: "textformat", title: "Text",
+                            help: "Draw a box on the canvas, then type. Shift+Enter for a new line, Enter to place. Style the text below; Fit to Box warps it to the box you drew.",
+                            helpOpen: $toolHelpOpen)
+
+                // Style for the next text (and live for the one being typed).
+                textStyleControls(
+                    font: textToolStyleBinding(\.editingTextFont, \.textToolFont),
+                    size: Binding(
+                        get: { state.isEditingText ? state.editingTextHeight : textHeight },
+                        set: { state.isEditingText ? (state.editingTextHeight = $0) : (textHeight = $0) }
+                    ),
+                    spacing: textToolStyleBinding(\.editingTextCharSpacing, \.textToolCharSpacing),
+                    bold: textToolStyleBinding(\.editingTextBold, \.textToolBold),
+                    italic: textToolStyleBinding(\.editingTextItalic, \.textToolItalic),
+                    underline: textToolStyleBinding(\.editingTextUnderline, \.textToolUnderline)
+                )
+
+                TODivider()
+                VStack(alignment: .leading, spacing: 8) {
+                    TOLabel("Fit to box")
+                    TOSegmented(options: [("none", "None"), ("height", "Height"), ("width", "Width"), ("both", "Both")],
+                                selection: $state.textFitMode)
                 }
 
-                if true {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Draw a box on the canvas, then type. Shift+Enter for a new line, Enter to place.")
-                            .font(PlasticityFont.label)
-                            .foregroundColor(Color.text_muted)
-
-                        // Style for the next text (and live for the one being typed).
-                        textStyleControls(
-                            font: textToolStyleBinding(\.editingTextFont, \.textToolFont),
-                            size: Binding(
-                                get: { state.isEditingText ? state.editingTextHeight : textHeight },
-                                set: { state.isEditingText ? (state.editingTextHeight = $0) : (textHeight = $0) }
-                            ),
-                            spacing: textToolStyleBinding(\.editingTextCharSpacing, \.textToolCharSpacing),
-                            bold: textToolStyleBinding(\.editingTextBold, \.textToolBold),
-                            italic: textToolStyleBinding(\.editingTextItalic, \.textToolItalic),
-                            underline: textToolStyleBinding(\.editingTextUnderline, \.textToolUnderline)
-                        )
-
-                        Divider().background(Color.border_subtle).padding(.vertical, 2)
-
-                        // Fit the text to its drawn bounding box (MAS-157). Standard
-                        // options found in other apps: warp to fit height, fit width,
-                        // or stretch to fill the whole box.
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Fit to Box")
-                                .font(PlasticityFont.label)
-                                .foregroundColor(Color.text_secondary)
-                            Picker("", selection: $state.textFitMode) {
-                                Text("None").tag("none")
-                                Text("Height").tag("height")
-                                Text("Width").tag("width")
-                                Text("Both").tag("both")
-                            }
-                            .pickerStyle(SegmentedPickerStyle())
-                            .labelsHidden()
-                            .help("Draw a box, then type. None keeps the font size; Height/Width fit one axis; Both warps to fill the whole box.")
-                        }
-
-                        Divider().background(Color.border_subtle).padding(.vertical, 2)
-
-                        HStack {
-                            Text("Text String")
-                                .font(PlasticityFont.label)
-                                .foregroundColor(Color.text_secondary)
-                            Spacer()
-                            TextField("Text", text: $textString)
-                                .textFieldStyle(PlainTextFieldStyle())
-                                .padding(4)
-                                .frame(width: 120)
-                                .background(Color.bg_input)
-                                .cornerRadius(4)
-                                .foregroundColor(Color.text_primary)
-                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                                .help("The text characters to place as a CAD text entity")
-                        }
-                        
-                        HStack {
-                            Text("Height (mm)")
-                                .font(PlasticityFont.label)
-                                .foregroundColor(Color.text_secondary)
-                            Spacer()
-                            TextField("Height", value: $textHeight, format: .number)
-                                .textFieldStyle(PlainTextFieldStyle())
-                                .padding(4)
-                                .frame(width: 80)
-                                .background(Color.bg_input)
-                                .cornerRadius(4)
-                                .foregroundColor(Color.text_primary)
-                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                                .help("Height of the text characters in millimeters")
-                        }
-                        
-                        HStack {
-                            Text("Insert X (mm)")
-                                .font(PlasticityFont.label)
-                                .foregroundColor(Color.text_secondary)
-                            Spacer()
-                            TextField("X", value: $textInsertX, format: .number)
-                                .textFieldStyle(PlainTextFieldStyle())
-                                .padding(4)
-                                .frame(width: 80)
-                                .background(Color.bg_input)
-                                .cornerRadius(4)
-                                .foregroundColor(Color.text_primary)
-                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                                .help("X insertion origin coordinate in millimeters")
-                        }
-                        
-                        HStack {
-                            Text("Insert Y (mm)")
-                                .font(PlasticityFont.label)
-                                .foregroundColor(Color.text_secondary)
-                            Spacer()
-                            TextField("Y", value: $textInsertY, format: .number)
-                                .textFieldStyle(PlainTextFieldStyle())
-                                .padding(4)
-                                .frame(width: 80)
-                                .background(Color.bg_input)
-                                .cornerRadius(4)
-                                .foregroundColor(Color.text_primary)
-                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                                .help("Y insertion origin coordinate in millimeters")
-                        }
-                        
-                        Button("Place Text") {
-                            state.applyAddText(text: textString, insert: CGPoint(x: textInsertX, y: textInsertY), height: textHeight,
-                                               font: state.textToolFont, bold: state.textToolBold, italic: state.textToolItalic,
-                                               underline: state.textToolUnderline, charSpacing: state.textToolCharSpacing)
-                        }
-                        .buttonStyle(PlasticityButtonStyle(isEnabled: !textString.isEmpty))
-                        .disabled(textString.isEmpty)
-                        .help("Create and place a text entity at the specified coordinates")
-                    }
-                    .padding(.vertical, 4)
+                TODivider()
+                TORow(label: "Text string") {
+                    TextField("Text", text: $textString).toFieldStyle(width: 130)
+                }
+                TORow(label: "Height (mm)") {
+                    TextField("Height", value: $textHeight, format: .number).toFieldStyle(width: 80)
+                }
+                TORow(label: "Insert X (mm)") {
+                    TextField("X", value: $textInsertX, format: .number).toFieldStyle(width: 80)
+                }
+                TORow(label: "Insert Y (mm)") {
+                    TextField("Y", value: $textInsertY, format: .number).toFieldStyle(width: 80)
+                }
+                TOPrimaryButton(title: "Place Text", enabled: !textString.isEmpty) {
+                    state.applyAddText(text: textString, insert: CGPoint(x: textInsertX, y: textInsertY), height: textHeight,
+                                       font: state.textToolFont, bold: state.textToolBold, italic: state.textToolItalic,
+                                       underline: state.textToolUnderline, charSpacing: state.textToolCharSpacing)
                 }
             }
-            .padding(8)
-            .background(Color.bg_input.opacity(0.4))
-            .cornerRadius(4)
-            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_subtle, lineWidth: 1))
         }
     }
 
@@ -2602,8 +1712,8 @@ extension ContentView {
     @ViewBuilder
     private func fieldLabel(_ text: String) -> some View {
         Text(text)
-            .font(PlasticityFont.label)
-            .foregroundColor(Color.text_secondary)
+            .font(.system(size: 13, weight: .medium))
+            .foregroundColor(Color.to_textSec)
             .lineLimit(1)
             .fixedSize(horizontal: false, vertical: true)
     }
@@ -2612,13 +1722,8 @@ extension ContentView {
     @ViewBuilder
     private func numberField(_ value: Binding<Double>, placeholder: String) -> some View {
         TextField(placeholder, value: value, format: .number)
-            .textFieldStyle(PlainTextFieldStyle())
-            .padding(4)
+            .toFieldStyle(height: 34)
             .frame(maxWidth: .infinity)
-            .background(Color.bg_input)
-            .cornerRadius(4)
-            .foregroundColor(Color.text_primary)
-            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
     }
 
     /// One bold/italic/underline toggle chip for `textStyleControls`.
@@ -2629,14 +1734,14 @@ extension ContentView {
         } label: {
             Text(label)
                 .font(font)
-                .frame(width: 28, height: 24)
-                .background(isOn.wrappedValue ? Color.accent.opacity(0.25) : Color.bg_input)
-                .foregroundColor(isOn.wrappedValue ? Color.accent : Color.text_primary)
-                .cornerRadius(4)
-                .overlay(RoundedRectangle(cornerRadius: 4)
-                    .stroke(isOn.wrappedValue ? Color.accent : Color.border_strong, lineWidth: 1))
+                .frame(width: 30, height: 30)
+                .background(RoundedRectangle(cornerRadius: 7)
+                    .fill(isOn.wrappedValue ? Color.to_accentTint : Color.to_field))
+                .foregroundColor(isOn.wrappedValue ? Color.to_accent : Color.to_textSec)
+                .overlay(RoundedRectangle(cornerRadius: 7)
+                    .stroke(isOn.wrappedValue ? Color.to_accent : Color.to_fieldBorder, lineWidth: 1))
         }
-        .buttonStyle(PlainButtonStyle())
+        .buttonStyle(.plain)
     }
 
     /// Routes a Text-tool style binding to the *live* editing value while a text
@@ -2660,30 +1765,18 @@ extension ContentView {
     private var textPropertiesSection: some View {
         if state.currentTool == .select, let textEnt = state.singleSelectedTextEntity {
             let handle = textEnt.handle
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Image(systemName: "textformat")
-                        .foregroundColor(Color.accent)
-                    Text("TEXT")
-                        .font(PlasticityFont.header)
-                        .foregroundColor(Color.text_primary)
-                        .tracking(0.5)
-                    Spacer()
-                }
+            VStack(alignment: .leading, spacing: 12) {
+                TODivider()
+                TOGroupLabel("Text")
 
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 6) {
                     fieldLabel("Content")
                     TextField("Text", text: Binding(
                         get: { textEnt.text ?? "" },
                         set: { state.updateTextEntity(handle: handle, text: $0) }
                     ))
-                    .textFieldStyle(PlainTextFieldStyle())
-                    .padding(4)
+                    .toFieldStyle(height: 34)
                     .frame(maxWidth: .infinity)
-                    .background(Color.bg_input)
-                    .cornerRadius(4)
-                    .foregroundColor(Color.text_primary)
-                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
                 }
 
                 textStyleControls(
@@ -2713,14 +1806,8 @@ extension ContentView {
                     )
                 )
 
-                Text("Double-click the text on the canvas to retype it.")
-                    .font(PlasticityFont.label)
-                    .foregroundColor(Color.text_muted)
+                TOHint(text: "Double-click the text on the canvas to retype it.")
             }
-            .padding(8)
-            .background(Color.bg_input.opacity(0.4))
-            .cornerRadius(4)
-            .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_subtle, lineWidth: 1))
         }
     }
 
@@ -2728,16 +1815,8 @@ extension ContentView {
     private var referenceImageSection: some View {
         if state.currentTool == .select {
             VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Image(systemName: "photo")
-                        .foregroundColor(Color.accent)
-                    Text("REFERENCE IMAGE")
-                        .font(PlasticityFont.header)
-                        .foregroundColor(Color.text_primary)
-                        .tracking(0.5)
-                    Spacer()
-                }
-                .padding(.bottom, 4)
+                toolHeader("photo", "REFERENCE IMAGE")
+                    .padding(.bottom, 4)
                 
                 VStack(alignment: .leading, spacing: 8) {
                     if state.refImage == nil {
@@ -2898,14 +1977,16 @@ extension ContentView {
     private var layersSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             // Header with action buttons
-            HStack(spacing: 8) {
+            HStack(spacing: 9) {
                 Image(systemName: "square.3.layers.3d")
-                    .foregroundColor(Color.accent)
+                    .font(.system(size: 13))
+                    .foregroundColor(Color.to_textMut)
                 Text("LAYERS")
-                    .font(PlasticityFont.header)
-                    .foregroundColor(Color.text_primary)
-                    .tracking(0.5)
-                
+                    .font(.system(size: 11, weight: .semibold))
+                    .tracking(1.0)
+                    .textCase(.uppercase)
+                    .foregroundColor(Color.to_textTer)
+
                 Spacer()
 
                 // Hide-all-construction-layers toggle (left of Add Layer).
@@ -3176,15 +2257,7 @@ extension ContentView {
     private var importSettingsSection: some View {
         if state.currentTool == .select {
             VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Image(systemName: "square.and.arrow.down")
-                        .foregroundColor(Color.accent)
-                    Text("IMPORT SETTINGS")
-                        .font(PlasticityFont.header)
-                        .foregroundColor(Color.text_primary)
-                        .tracking(0.5)
-                    Spacer()
-                }
+                toolHeader("square.and.arrow.down", "IMPORT SETTINGS")
                 .padding(.bottom, 4)
                 
                 VStack(alignment: .leading, spacing: 8) {
@@ -3248,28 +2321,102 @@ extension ContentView {
         }
     }
 
-    /// Active tool options — full-panel, always open, no collapse chevron and no
-    /// boxed sub-boundary (per user direction, superseding the earlier MAS-114
-    /// collapsible card). The per-tool option views fill the panel directly.
+    /// Tools whose body is built from full-width collapsible `TOSection`s (their
+    /// header rows + dividers bleed to the panel edge, like the reference). Every
+    /// other tool gets a uniform inset instead.
+    private var usesFullBleedSections: Bool {
+        state.currentTool == .addHoles
+    }
+
+    /// Active tool options — the scrolling settings region of the decluttered
+    /// shell. Section-based tools render full-bleed; simpler tools get a uniform
+    /// 16px inset matching the handoff's panel side padding.
     @ViewBuilder
     var activeToolOptionsPanel: some View {
         if hasActiveToolOptions {
-            activeToolOptions
-                .padding(.horizontal, 2)
+            if usesFullBleedSections {
+                activeToolOptions
+            } else {
+                activeToolOptions
+                    .padding(.horizontal, 16)
+                    .padding(.top, 12)
+                    .padding(.bottom, 16)
+            }
         }
+    }
+
+    // MARK: - Decluttered-shell pinned chrome (handoff)
+
+    /// Pinned chrome above the scroll: tool title + ⓘ help popover + live status.
+    /// Populated per tool; tools not yet migrated render their own header inside
+    /// the scroll, so this stays empty for them.
+    @ViewBuilder
+    var activeToolChrome: some View {
+        switch state.currentTool {
+        case .addHoles:
+            VStack(alignment: .leading, spacing: 0) {
+                TOToolTitle(
+                    icon: "circle.dashed",
+                    title: "Holes Sewing",
+                    help: state.sewingChainSelection
+                        ? "Whole-outline mode: click a shape to stitch its entire outline. The link button (A) toggles back to per-edge selection."
+                        : "Click an edge to add it to the seam. Add more edges to extend — they miter at corners; click an edge again to remove it. The link button (A) selects the whole outline at once.",
+                    helpOpen: $toolHelpOpen)
+                    .padding(.horizontal, 16).padding(.top, 14)
+                holesStatusLine
+                    .padding(.horizontal, 16).padding(.vertical, 13)
+            }
+            .background(Color.to_panel)
+        default:
+            EmptyView()
+        }
+    }
+
+    /// Live selection / status for the Holes Sewing tool (never collapses).
+    @ViewBuilder
+    private var holesStatusLine: some View {
+        if state.sewingChainSelection {
+            TOStatus(color: .to_accent, text: "Whole-outline mode", hint: "click a shape")
+        } else if !state.sewingEdges.isEmpty {
+            let n = state.sewingEdges.count
+            TOStatus(color: .to_accent, text: "\(n) edge\(n == 1 ? "" : "s") selected", hint: "ready to apply")
+        } else if !state.selectedHandles.isEmpty {
+            let n = state.selectedHandles.count
+            TOStatus(color: .to_accent, text: "\(n) path\(n == 1 ? "" : "s") selected", hint: "ready to apply")
+        } else {
+            TOStatus(color: .to_textFaint, text: "Nothing selected", hint: "click an edge or shape")
+        }
+    }
+
+    /// Pinned primary action below the scroll. Always sits directly above Layers,
+    /// never inside the scroll. Populated per single-action tool.
+    @ViewBuilder
+    var activeToolFooter: some View {
+        switch state.currentTool {
+        case .addHoles:
+            toolFooterButton("Apply Sewing Holes", enabled: !state.selectedHandles.isEmpty) {
+                state.applySewingHoles()
+            }
+        default:
+            EmptyView()
+        }
+    }
+
+    /// Standard pinned footer: a top divider + full-width accent primary button.
+    private func toolFooterButton(_ title: String, enabled: Bool,
+                                  _ action: @escaping () -> Void) -> some View {
+        VStack(spacing: 0) {
+            Rectangle().fill(Color.to_divider).frame(height: 1)
+            TOPrimaryButton(title: title, enabled: enabled, action: action)
+                .padding(.horizontal, 16).padding(.vertical, 14)
+        }
+        .background(Color.to_panel)
     }
 
     @ViewBuilder
     private var referenceImageSettingsSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Image(systemName: "photo").foregroundColor(Color.accent)
-                Text("REFERENCE IMAGE")
-                    .font(PlasticityFont.header)
-                    .foregroundColor(Color.text_primary)
-                    .tracking(0.5)
-                Spacer()
-            }
+            toolHeader("photo", "REFERENCE IMAGE")
             .padding(.bottom, 4)
             
             if let layer = state.activeLayer {
@@ -3424,14 +2571,7 @@ extension ContentView {
     @ViewBuilder
     private var imageVectorizationSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Image(systemName: "wand.and.stars").foregroundColor(Color.accent)
-                Text("IMAGE TRACING")
-                    .font(PlasticityFont.header)
-                    .foregroundColor(Color.text_primary)
-                    .tracking(0.5)
-                Spacer()
-            }
+            toolHeader("wand.and.stars", "IMAGE TRACING")
             .padding(.bottom, 4)
             
             Text("Adjust thresholds for auto-vectorization. Previews are drawn in cyan.")
@@ -3687,70 +2827,46 @@ extension ContentView {
     // MARK: - LeatherCraft-parity tool panels
 
     private func toolHeader(_ icon: String, _ title: String) -> some View {
-        HStack {
-            Image(systemName: icon).foregroundColor(Color.accent)
-            Text(title).font(PlasticityFont.header).foregroundColor(Color.text_primary).tracking(0.5)
+        HStack(spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundColor(Color.to_accent)
+            Text(title)
+                .font(.system(size: 15, weight: .semibold))
+                .tracking(1.05)
+                .textCase(.uppercase)
+                .foregroundColor(Color.to_textPri)
             Spacer()
         }
     }
 
-    /// Small grouped sub-section header used inside the Sewing-Holes panel to break
-    /// the long option list into scannable groups.
+    /// Small grouped sub-section header used to break a long option list into
+    /// scannable groups (matches the kit's group label).
     private func holesSubheader(_ title: String) -> some View {
-        Text(title)
-            .font(PlasticityFont.label).fontWeight(.bold)
-            .foregroundColor(Color.text_secondary)
-            .tracking(0.6)
-            .padding(.top, 2)
+        TOGroupLabel(title)
     }
 
     private func numberField(_ label: String, _ binding: Binding<Double>) -> some View {
-        HStack {
-            Text(label).font(PlasticityFont.label).foregroundColor(Color.text_primary)
-            Spacer()
-            TextField("", value: binding, format: .number)
-                .textFieldStyle(PlainTextFieldStyle()).padding(4).frame(width: 72)
-                .background(Color.bg_input).cornerRadius(4)
-                .foregroundColor(Color.text_primary)
-                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+        TORow(label: label) {
+            TextField("", value: binding, format: .number).toFieldStyle(width: 80)
         }
     }
 
     /// A row of one-tap preset chips that set a Double binding — common leathercraft
-    /// values so the user rarely has to type. The chip matching the current value is
-    /// highlighted. `onPick` runs after the binding is set (e.g. to apply live).
+    /// values so the user rarely has to type. Thin wrapper over the kit's chips.
     private func quickValues(_ values: [Double], _ binding: Binding<Double>,
                              unit: String = "", format: String = "%g",
                              onPick: ((Double) -> Void)? = nil) -> some View {
-        HStack(spacing: 4) {
-            ForEach(values, id: \.self) { v in
-                let active = abs(binding.wrappedValue - v) < 1e-6
-                Button {
-                    binding.wrappedValue = v
-                    onPick?(v)
-                } label: {
-                    Text(String(format: format, v) + unit)
-                        .font(.system(size: 10, weight: .medium, design: .monospaced))
-                        .foregroundColor(active ? Color.accent : Color.text_secondary)
-                        .padding(.horizontal, 7).padding(.vertical, 3)
-                        .background(RoundedRectangle(cornerRadius: 4)
-                            .fill(active ? Color.accent.opacity(0.18) : Color.bg_input))
-                        .overlay(RoundedRectangle(cornerRadius: 4)
-                            .stroke(active ? Color.accent.opacity(0.5) : Color.border_strong, lineWidth: 1))
-                }
-                .buttonStyle(PlainButtonStyle())
-            }
-            Spacer(minLength: 0)
-        }
+        TOPresetChips(values: values, value: binding,
+                      unit: unit.trimmingCharacters(in: .whitespaces).isEmpty ? "" : unit,
+                      onPick: onPick)
     }
 
     private func toolButtons(ok: String, okAction: @escaping () -> Void) -> some View {
-        HStack {
-            Button(ok) { okAction() }
-                .buttonStyle(.borderedProminent)
-            Button("Cancel") { state.currentTool = .select }
-                .buttonStyle(.bordered)
-            Spacer()
+        HStack(spacing: 8) {
+            TOPrimaryButton(title: ok) { okAction() }
+            TOSecondaryButton(title: "Cancel", tint: .to_textMut) { state.currentTool = .select }
+                .frame(width: 96)
         }
     }
 
@@ -3759,8 +2875,7 @@ extension ContentView {
     private var templateInsertSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             toolHeader("square.on.square.dashed", "TEMPLATES")
-            Text("Tap a template to insert it (centred at the origin) on the TEMPLATE layer.")
-                .font(.system(size: 10)).foregroundColor(Color.text_secondary)
+            TOHint(text: "Tap a template to insert it (centred at the origin) on the TEMPLATE layer.")
             ForEach(TemplateStore.shared.categories, id: \.self) { cat in
                 VStack(alignment: .leading, spacing: 4) {
                     Text(cat.uppercased())
@@ -3851,108 +2966,85 @@ extension ContentView {
             }
 
             Divider()
-            Button("Done") { state.currentTool = .select }.buttonStyle(.bordered)
+            TOSecondaryButton(title: "Done", tint: .to_textMut) { state.currentTool = .select }
         }
     }
 
     /// Box Stitch Helper — equalise hole counts across the two selected panels.
     private var boxStitchSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 14) {
             toolHeader("rectangle.connected.to.line.below", "BOX STITCH")
-            Text("Select two mating paths, then re-prick both with an equal hole count so the seams line up. Uses the active pricking iron.")
-                .font(.system(size: 10)).foregroundColor(Color.text_secondary)
-            HStack {
-                Text("Match").font(PlasticityFont.label).foregroundColor(Color.text_primary)
-                Spacer()
-                Picker("", selection: $state.boxStitchStrategy) {
-                    Text("Average").tag("average")
-                    Text("Match A").tag("a")
-                    Text("Match B").tag("b")
-                }.labelsHidden().frame(width: 150)
+            TOHint(text: "Select two mating paths, then re-prick both with an equal hole count so the seams line up. Uses the active pricking iron.")
+            TORow(label: "Match") {
+                TOSelect(options: [("average", "Average"), ("a", "Match A"), ("b", "Match B")],
+                         selection: $state.boxStitchStrategy)
             }
-            Text("\(state.selectedHandles.count) selected (need 2)")
-                .font(.system(size: 9)).foregroundColor(Color.text_secondary)
+            TOStatus(color: state.selectedHandles.count == 2 ? .to_accent : .to_textFaint,
+                     text: "\(state.selectedHandles.count) selected", hint: "need 2")
             toolButtons(ok: "Re-prick Both") { state.applyBoxStitch(exitAfterApply: true) }
         }
     }
 
     /// Mandala — radial / dihedral symmetry of the selected seed.
     private var mandalaSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 14) {
             toolHeader("circle.hexagongrid", "MANDALA")
-            Text("Replicates the selected seed around the origin. Mirror adds reflected copies (kaleidoscope).")
-                .font(.system(size: 10)).foregroundColor(Color.text_secondary)
-            Stepper("Segments: \(state.mandalaSegments)", value: $state.mandalaSegments, in: 2...64)
-                .font(PlasticityFont.label)
-            Toggle("Mirror (dihedral)", isOn: $state.mandalaMirror).font(PlasticityFont.label)
-            Text("= \(state.mandalaSegments * (state.mandalaMirror ? 2 : 1)) copies around the origin")
-                .font(PlasticityFont.label).foregroundColor(Color.text_muted)
-            Text("\(state.selectedHandles.count) seed object(s) selected")
-                .font(.system(size: 9)).foregroundColor(Color.text_secondary)
+            TOHint(text: "Replicates the selected seed around the origin. Mirror adds reflected copies (kaleidoscope).")
+            TORow(label: "Segments") { TOIntStepper(value: $state.mandalaSegments, range: 2...64) }
+            TOCheck(label: "Mirror (dihedral)", isOn: $state.mandalaMirror)
+            TOHint(text: "= \(state.mandalaSegments * (state.mandalaMirror ? 2 : 1)) copies around the origin")
+            TOStatus(color: state.selectedHandles.isEmpty ? .to_textFaint : .to_accent,
+                     text: "\(state.selectedHandles.count) seed object(s) selected")
             toolButtons(ok: "Bake") { state.applyMandala(exitAfterApply: true) }
         }
     }
 
     /// Box Joint Maker — interlocking finger joint + mate, sized numerically.
     private var boxJointSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 14) {
             toolHeader("puzzlepiece", "BOX JOINT")
-            Text("Select a straight edge (a line, or a shape — its longest side is used), then create an interlocking finger joint along it.")
-                .font(.system(size: 10)).foregroundColor(Color.text_secondary)
-            Text("\(state.selectedHandles.count) selected")
-                .font(.system(size: 9)).foregroundColor(Color.text_secondary)
+            TOHint(text: "Select a straight edge (a line, or a shape — its longest side is used), then create an interlocking finger joint along it.")
+            TOStatus(color: state.selectedHandles.isEmpty ? .to_textFaint : .to_accent,
+                     text: "\(state.selectedHandles.count) selected")
             numberField("Finger width (mm)", $state.boxJointFingerWidth)
             quickValues([4, 6, 8, 10, 12], $state.boxJointFingerWidth, unit: " mm")
             numberField("Depth (mm)", $state.boxJointDepth)
             numberField("Kerf (mm)", $state.boxJointKerf)
-            Toggle("Generate mating edge", isOn: $state.boxJointMate).font(PlasticityFont.label)
+            TOCheck(label: "Generate mating edge", isOn: $state.boxJointMate)
             toolButtons(ok: "Create") { state.applyBoxJoint(exitAfterApply: true) }
         }
     }
 
     /// Golden Ratio guides — spiral / phi rectangle / centre line.
     private var goldenGuideSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 14) {
             toolHeader("hurricane", "GOLDEN RATIO")
-            Picker("", selection: $state.goldenKind) {
-                Text("Spiral").tag("spiral")
-                Text("Rectangle").tag("rectangle")
-                Text("Centre Line").tag("centerline")
-            }.pickerStyle(SegmentedPickerStyle()).labelsHidden()
-            Text("Proportion guide on a construction layer (orange, never exported).")
-                .font(.system(size: 10)).foregroundColor(Color.text_secondary)
+            VStack(alignment: .leading, spacing: 8) {
+                TOLabel("Guide type")
+                TOSegmented(options: [("spiral", "Spiral"), ("rectangle", "Rectangle"), ("centerline", "Centre Line")],
+                            selection: $state.goldenKind)
+            }
+            TOHint(text: "Proportion guide on a construction layer (orange, never exported).")
 
-            Toggle("Fit to selection", isOn: $state.goldenFitSelection)
-                .font(PlasticityFont.label)
-                .help("Size the guide to the selected geometry's bounding box")
+            TOCheck(label: "Fit to selection", isOn: $state.goldenFitSelection)
             if !state.goldenFitSelection || state.selectionBoundingBox() == nil {
                 numberField("Width (mm)", $state.goldenWidth)
-                if state.goldenKind == "centerline" {
-                    numberField("Length (mm)", $state.goldenHeight)
-                } else {
-                    numberField("Height (mm)", $state.goldenHeight)
-                }
+                numberField(state.goldenKind == "centerline" ? "Length (mm)" : "Height (mm)", $state.goldenHeight)
             }
 
             if state.goldenKind == "spiral" {
-                HStack {
-                    Text("Coil").font(PlasticityFont.label).foregroundColor(Color.text_primary)
-                    Spacer()
-                    Picker("", selection: $state.goldenHandedness) {
-                        Text("CCW").tag("ccw")
-                        Text("CW").tag("cw")
-                    }.pickerStyle(SegmentedPickerStyle()).labelsHidden().frame(width: 110)
+                VStack(alignment: .leading, spacing: 8) {
+                    TOLabel("Coil")
+                    TOSegmented(options: [("ccw", "CCW"), ("cw", "CW")], selection: $state.goldenHandedness)
+                        .frame(width: 130)
                 }
-                Stepper("Turns: \(String(format: "%.1f", state.goldenTurns))",
-                        value: $state.goldenTurns, in: 0.5...8.0, step: 0.5)
-                    .font(PlasticityFont.label)
-                Toggle("Show golden rectangle", isOn: $state.goldenShowRect)
-                    .font(PlasticityFont.label)
+                TORow(label: "Turns") {
+                    TOStepper(value: $state.goldenTurns, unit: "", step: 0.5, range: 0.5...8.0, maxFrac: 1)
+                }
+                TOCheck(label: "Show golden rectangle", isOn: $state.goldenShowRect)
             }
             if state.goldenKind == "rectangle" {
-                Stepper("Subdivisions: \(state.goldenSubdivisions)",
-                        value: $state.goldenSubdivisions, in: 1...12)
-                    .font(PlasticityFont.label)
+                TORow(label: "Subdivisions") { TOIntStepper(value: $state.goldenSubdivisions, range: 1...12) }
             }
             toolButtons(ok: "Create") { state.applyGolden(exitAfterApply: true) }
         }
@@ -3960,48 +3052,41 @@ extension ContentView {
 
     /// 3D Pattern / Jig — extrude selected closed regions to a binary STL.
     private var jigExportSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 14) {
             toolHeader("cube.transparent", "3D PATTERN / JIG")
-            Text("Extrude the selected closed regions to a 3D-printable STL.")
-                .font(.system(size: 10)).foregroundColor(Color.text_secondary)
-            HStack {
-                Text("Mode").font(PlasticityFont.label).foregroundColor(Color.text_primary)
-                Spacer()
-                Picker("", selection: $state.jigMode) {
-                    Text("Solid pattern").tag("solid")
-                    Text("Stitch template").tag("stitch_template")
-                    Text("Corner jig").tag("corner_jig")
-                }.labelsHidden().frame(width: 150)
+            TOHint(text: "Extrude the selected closed regions to a 3D-printable STL.")
+            TORow(label: "Mode") {
+                TOSelect(options: [("solid", "Solid pattern"), ("stitch_template", "Stitch template"),
+                                   ("corner_jig", "Corner jig")],
+                         selection: $state.jigMode)
             }
             numberField("Thickness (mm)", $state.jigThickness)
             quickValues([3, 5, 8, 10, 15], $state.jigThickness, unit: " mm")
-            Text("\(state.selectedHandles.count) region(s) selected")
-                .font(.system(size: 9)).foregroundColor(Color.text_secondary)
+            TOStatus(color: state.selectedHandles.isEmpty ? .to_textFaint : .to_accent,
+                     text: "\(state.selectedHandles.count) region(s) selected")
 
             // Live isometric preview of the extruded mesh.
             ZStack {
-                RoundedRectangle(cornerRadius: 6).fill(Color.bg_input)
+                RoundedRectangle(cornerRadius: 9).fill(Color.to_field)
                 jigPreviewCanvas
                 if state.isComputingJigPreview {
                     ProgressView().scaleEffect(0.6)
                 } else if state.jigPreviewTris.isEmpty {
                     Text("Select regions and press Preview")
-                        .font(.system(size: 9)).foregroundColor(Color.text_muted)
+                        .font(.system(size: 12, weight: .medium)).foregroundColor(Color.to_textMut)
                 }
             }
             .frame(height: 150)
-            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.border_strong, lineWidth: 1))
+            .overlay(RoundedRectangle(cornerRadius: 9).stroke(Color.to_fieldBorder, lineWidth: 1))
             if state.jigPreviewTriCount > 0 {
-                Text("\(state.jigPreviewTriCount) triangles")
-                    .font(.system(size: 9)).foregroundColor(Color.text_secondary)
+                TOHint(text: "\(state.jigPreviewTriCount) triangles")
             }
 
-            HStack {
-                Button("Preview") { state.refreshJigPreview() }.buttonStyle(.bordered)
-                Button("Export STL…") { state.exportJig(exitAfterApply: true) }
-                    .buttonStyle(.borderedProminent)
-                Button("Cancel") { state.currentTool = .select }.buttonStyle(.bordered)
-                Spacer()
+            HStack(spacing: 8) {
+                TOSecondaryButton(title: "Preview") { state.refreshJigPreview() }
+                TOPrimaryButton(title: "Export STL…") { state.exportJig(exitAfterApply: true) }
+                TOSecondaryButton(title: "Cancel", tint: .to_textMut) { state.currentTool = .select }
+                    .frame(width: 84)
             }
             .onAppear { state.refreshJigPreview() }
             .onChange(of: state.jigMode) { _ in state.refreshJigPreview() }
@@ -4085,126 +3170,74 @@ extension ContentView {
 
     /// POLYGON tool options (MAS-118): the sides count for the next polygon.
     private var polygonToolSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Image(systemName: "hexagon").foregroundColor(Color.accent)
-                Text("POLYGON")
-                    .font(PlasticityFont.header)
-                    .foregroundColor(Color.text_primary).tracking(0.5)
-                Spacer()
-            }
-            Text("Drag from the center to set radius and rotation.")
-                .font(PlasticityFont.label)
-                .foregroundColor(Color.text_secondary)
-
-            HStack {
-                Text("Sides")
-                    .font(PlasticityFont.label)
-                    .foregroundColor(Color.text_secondary)
-                Spacer()
-                Stepper(value: Binding(
+        VStack(alignment: .leading, spacing: 14) {
+            TOToolTitle(icon: "hexagon", title: "Polygon",
+                        help: "Drag from the center on the canvas to set the polygon's radius and rotation. Choose how many sides below.",
+                        helpOpen: $toolHelpOpen)
+            TORow(label: "Sides") {
+                TOIntStepper(value: Binding(
                     get: { state.polygonSides },
-                    set: { state.polygonSides = max(3, min(64, $0)) }
-                ), in: 3...64) {
-                    Text("\(state.polygonSides)")
-                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                        .foregroundColor(Color.text_primary)
-                        .frame(minWidth: 24)
-                }
+                    set: { state.polygonSides = max(3, min(64, $0)) }), range: 3...64)
             }
             // One-tap common polygons (triangle … octagon) — faster than stepping.
-            HStack(spacing: 4) {
-                ForEach([3, 4, 5, 6, 8], id: \.self) { n in
-                    let active = state.polygonSides == n
-                    Button { state.polygonSides = n } label: {
-                        Text("\(n)")
-                            .font(.system(size: 10, weight: .medium, design: .monospaced))
-                            .foregroundColor(active ? Color.accent : Color.text_secondary)
-                            .padding(.horizontal, 7).padding(.vertical, 3)
-                            .background(RoundedRectangle(cornerRadius: 4).fill(active ? Color.accent.opacity(0.18) : Color.bg_input))
-                            .overlay(RoundedRectangle(cornerRadius: 4).stroke(active ? Color.accent.opacity(0.5) : Color.border_strong, lineWidth: 1))
-                    }.buttonStyle(PlainButtonStyle())
-                }
-                Spacer(minLength: 0)
-            }
+            TOPresetChips(values: [3, 4, 5, 6, 8],
+                          value: Binding(get: { Double(state.polygonSides) },
+                                         set: { state.polygonSides = Int($0) }),
+                          maxFrac: 0)
         }
     }
 
     /// SCALE tool options (MAS-128): pivot mode, factor entry, and a scale-point
     /// picker. Drag the on-canvas handle for a live scale, or type an exact factor.
     private var scaleToolSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Image(systemName: "arrow.up.left.and.arrow.down.right").foregroundColor(Color.accent)
-                Text("SCALE")
-                    .font(PlasticityFont.header)
-                    .foregroundColor(Color.text_primary).tracking(0.5)
-                Spacer()
-            }
-            Text("Select geometry, then drag the handle or enter a factor.")
-                .font(PlasticityFont.label)
-                .foregroundColor(Color.text_secondary)
+        VStack(alignment: .leading, spacing: 14) {
+            TOToolTitle(icon: "arrow.up.left.and.arrow.down.right", title: "Scale",
+                        help: "Select geometry, then drag the on-canvas handle for a live scale, or type an exact factor and press Enter.",
+                        helpOpen: $toolHelpOpen)
 
-            Text("Scale From")
-                .font(PlasticityFont.label)
-                .foregroundColor(Color.text_secondary)
-            Picker("", selection: Binding(
-                get: { state.scaleFromCenter },
-                set: { useCenter in
-                    state.scaleFromCenter = useCenter
-                    if useCenter { state.scalePivotModel = nil; state.pickingScalePivot = false }
-                }
-            )) {
-                Text("Center").tag(true)
-                Text("Point").tag(false)
+            if state.selectedHandles.isEmpty {
+                TOStatus(color: .to_textFaint, text: "Nothing selected", hint: "select geometry to scale")
+            } else {
+                let n = state.selectedHandles.count
+                TOStatus(color: .to_accent, text: "\(n) object\(n == 1 ? "" : "s") selected")
             }
-            .pickerStyle(SegmentedPickerStyle())
-            .help("Scale around the selection's own center, or a point you pick.")
+
+            VStack(alignment: .leading, spacing: 8) {
+                TOLabel("Scale from")
+                TOSegmented(options: [(true, "Center"), (false, "Point")], selection: Binding(
+                    get: { state.scaleFromCenter },
+                    set: { useCenter in
+                        state.scaleFromCenter = useCenter
+                        if useCenter { state.scalePivotModel = nil; state.pickingScalePivot = false }
+                    }))
+            }
 
             if !state.scaleFromCenter {
-                Button {
+                TOSecondaryButton(title: state.scalePivotModel == nil ? "Pick scale point…" : "Re-pick scale point…",
+                                  icon: "scope") {
                     state.pickingScalePivot = true
-                } label: {
-                    Label(state.scalePivotModel == nil ? "Pick Scale Point…" : "Re-pick Scale Point…",
-                          systemImage: "scope")
                 }
-                .buttonStyle(PlasticityButtonStyle(isEnabled: true))
-                .help("Click a point on the canvas to scale around")
                 if state.pickingScalePivot {
-                    Text("Click a point on the canvas…")
-                        .font(PlasticityFont.label)
-                        .foregroundColor(Color.accent)
+                    TOStatus(color: .to_accent, text: "Click a point on the canvas…")
                 }
             }
 
-            Text("Factor")
-                .font(PlasticityFont.label)
-                .foregroundColor(Color.text_secondary)
-            TextField("1.0", value: $state.scaleFactor, format: .number)
-                .textFieldStyle(PlainTextFieldStyle())
-                .padding(6)
-                .background(Color.bg_input)
-                .cornerRadius(4)
-                .foregroundColor(Color.text_primary)
-                .font(PlasticityFont.body)
-                .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
-                // Enter commits the staged/typed factor and returns to Select,
-                // the way other tools confirm (MAS-111).
-                .onSubmit {
-                    state.confirmScaleAndExit()
+            VStack(alignment: .leading, spacing: 8) {
+                TORow(label: "Factor") {
+                    TextField("1.0", value: $state.scaleFactor, format: .number)
+                        .toFieldStyle(width: 96)
+                        .onSubmit { state.confirmScaleAndExit() }
                 }
-
-            quickValues([0.5, 0.75, 1, 1.5, 2], $state.scaleFactor, unit: "×")
+                TOPresetChips(values: [0.5, 0.75, 1, 1.5, 2], value: $state.scaleFactor, unit: "×")
+            }
             if state.scaleFactor > 0 {
-                Text(String(format: "= %.0f%% of current size", state.scaleFactor * 100))
-                    .font(PlasticityFont.label).foregroundColor(Color.text_muted)
+                TOHint(text: String(format: "= %.0f%% of current size", state.scaleFactor * 100))
             }
 
-            Button("Apply Scale") {
+            TOPrimaryButton(title: "Apply Scale",
+                            enabled: !state.selectedHandles.isEmpty && state.scaleFactor > 0) {
                 state.confirmScaleAndExit()
             }
-            .buttonStyle(PlasticityButtonStyle(isEnabled: !state.selectedHandles.isEmpty && state.scaleFactor > 0))
-            .disabled(state.selectedHandles.isEmpty || state.scaleFactor <= 0)
         }
     }
 
@@ -4212,39 +3245,28 @@ extension ContentView {
     /// parameter table so the user can reference variables in formulas.
     private var dimensionToolSection: some View {
         let params = state.dimensionEngine.params
-        return VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Image(systemName: "ruler.fill").foregroundColor(Color.accent)
-                Text("DIMENSION")
-                    .font(PlasticityFont.header)
-                    .foregroundColor(Color.text_primary).tracking(0.5)
-                Spacer()
-            }
-            Text("Click a line for length, a circle for radius, or two points for a distance. Type a value or formula and press Enter.")
-                .font(PlasticityFont.label)
-                .foregroundColor(Color.text_secondary)
-            Text("Formulas: 20*2, d1*0.5+10, sqrt(d2^2+d3^2). Units: 50, 2.54cm, 1 inch.")
-                .font(PlasticityFont.label)
-                .foregroundColor(Color.text_muted)
+        return VStack(alignment: .leading, spacing: 14) {
+            TOToolTitle(icon: "ruler.fill", title: "Dimension",
+                        help: "Click a line for its length, a circle for its radius, or two points for a distance. Type a value or formula and press Enter.\n\nFormulas: 20*2, d1*0.5+10, sqrt(d2^2+d3^2). Units: 50, 2.54cm, 1 inch.",
+                        helpOpen: $toolHelpOpen)
+            TOHint(text: "Click a line, circle, or two points; then type a value or formula.")
 
             if !params.isEmpty {
-                Divider().background(Color.border_subtle)
-                Text("PARAMETERS")
-                    .font(PlasticityFont.label)
-                    .foregroundColor(Color.text_secondary).tracking(0.5)
+                TODivider()
+                TOGroupLabel("Parameters")
                 ForEach(params) { p in
                     HStack(spacing: 6) {
                         Text(p.id)
                             .font(.system(size: 11, weight: .bold, design: .monospaced))
-                            .foregroundColor(p.driven ? Color.text_muted : Color.accent)
+                            .foregroundColor(p.driven ? Color.to_textMut : Color.to_accent)
                         Text(p.isFormula ? "= \(p.expression)" : "")
                             .font(.system(size: 10, design: .monospaced))
-                            .foregroundColor(Color.text_secondary)
+                            .foregroundColor(Color.to_textTer)
                             .lineLimit(1)
                         Spacer()
                         Text(String(format: p.driven ? "(%.2f)" : "%.2f", p.value))
-                            .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                            .foregroundColor(Color.text_primary)
+                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                            .foregroundColor(Color.to_textPri)
                     }
                 }
             }
@@ -4257,73 +3279,54 @@ extension ContentView {
         let editingGroup = state.selectedConvertedGroupId
         let style = state.convertLineStyle
         let keys = AppState.convertLineParamKeys[style] ?? []
-        return VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Image(systemName: "scribble").foregroundColor(Color.accent)
-                Text("CONVERT LINES")
-                    .font(PlasticityFont.header)
-                    .foregroundColor(Color.text_primary).tracking(0.5)
-                Spacer()
+        return VStack(alignment: .leading, spacing: 14) {
+            TOToolTitle(icon: "scribble", title: "Convert Lines",
+                        help: "Replace the selected straight lines with a styled pattern (dashed, dotted, wavy, …). Pick a style and tune its parameters, then Convert.",
+                        helpOpen: $toolHelpOpen)
+
+            TORow(label: "Style") {
+                TOSelect(options: AppState.convertLineStyles.map { ($0, $0.capitalized) },
+                         selection: Binding(
+                            get: { state.convertLineStyle },
+                            set: { newStyle in
+                                state.convertLineStyle = newStyle
+                                if let gid = editingGroup {
+                                    state.reconvertGroup(gid, style: newStyle, settings: state.convertLineSettings[newStyle])
+                                }
+                            }))
             }
-            Picker("Style", selection: Binding(
-                get: { state.convertLineStyle },
-                set: { newStyle in
-                    state.convertLineStyle = newStyle
-                    if let gid = editingGroup { state.reconvertGroup(gid, style: newStyle, settings: state.convertLineSettings[newStyle]) }
-                }
-            )) {
-                ForEach(AppState.convertLineStyles, id: \.self) { s in
-                    Text(s.capitalized).tag(s)
-                }
-            }
-            .pickerStyle(.menu)
 
             LinePatternPreview(style: style, settings: state.convertLineSettings[style] ?? [:])
-                .padding(.vertical, 4)
+                .padding(.vertical, 2)
 
             ForEach(keys, id: \.self) { key in
-                HStack {
-                    Text(convertParamLabel(key))
-                        .font(PlasticityFont.label)
-                        .foregroundColor(Color.text_secondary)
-                    Spacer()
+                TORow(label: convertParamLabel(key)) {
                     TextField("", value: convertParamBinding(key), format: .number)
-                        .textFieldStyle(PlainTextFieldStyle())
-                        .padding(4)
-                        .frame(width: 60)
-                        .background(Color.bg_input)
-                        .cornerRadius(4)
-                        .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+                        .toFieldStyle(width: 70)
                 }
             }
 
             if let gid = editingGroup {
-                Button("Update Lines") {
+                TOPrimaryButton(title: "Update Lines") {
                     state.reconvertGroup(gid, style: style, settings: state.convertLineSettings[style])
                 }
-                .buttonStyle(PlasticityButtonStyle(isEnabled: true))
             } else {
-                Button("Convert Selection") {
+                TOPrimaryButton(title: "Convert Selection", enabled: state.selectionHasConvertibleLines) {
                     state.convertSelectedLines(style: style, settings: state.convertLineSettings[style] ?? [:])
                 }
-                .buttonStyle(PlasticityButtonStyle(isEnabled: state.selectionHasConvertibleLines))
-                .disabled(!state.selectionHasConvertibleLines)
-                .help("Replace the selected straight lines with the chosen style")
             }
 
-            Divider().background(Color.border_subtle)
+            TODivider()
             // Edge finish (Phase 2): treatments that change the cut pattern.
-            Text("EDGE FINISH (selected edge)")
-                .font(PlasticityFont.label).fontWeight(.bold).foregroundColor(Color.accent)
-            Text("Turn = a folded-over hem (adds material + a crease). Bind = a binding strip sized to wrap the edge.")
-                .font(.system(size: 10)).foregroundColor(Color.text_secondary)
-            numberField("Allowance (mm)", $state.edgeFinishAllowanceMm)
-            quickValues([4, 6, 8, 10, 12], $state.edgeFinishAllowanceMm, unit: " mm")
-            HStack {
-                Button("Turn edge") { state.applyEdgeTreatment("turn") }
-                    .buttonStyle(PlasticityButtonStyle(isEnabled: true))
-                Button("Bind edge") { state.applyEdgeTreatment("bind") }
-                    .buttonStyle(PlasticityButtonStyle(isEnabled: true))
+            TOGroupLabel("Edge finish (selected edge)")
+            TOHint(text: "Turn = a folded-over hem (adds material + a crease). Bind = a binding strip sized to wrap the edge.")
+            TORow(label: "Allowance (mm)") {
+                TextField("", value: $state.edgeFinishAllowanceMm, format: .number).toFieldStyle(width: 70)
+            }
+            TOPresetChips(values: [4, 6, 8, 10, 12], value: $state.edgeFinishAllowanceMm, unit: "")
+            HStack(spacing: 8) {
+                TOSecondaryButton(title: "Turn edge") { state.applyEdgeTreatment("turn") }
+                TOSecondaryButton(title: "Bind edge") { state.applyEdgeTreatment("bind") }
             }
         }
     }
@@ -4352,108 +3355,82 @@ extension ContentView {
 
     /// MOVE tool options (MAS-80): create-copy, point-to-point, scaling.
     private var moveSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Image(systemName: "arrow.up.and.down.and.arrow.left.and.right").foregroundColor(Color.accent)
-                Text("MOVE")
-                    .font(PlasticityFont.header)
-                    .foregroundColor(Color.text_primary).tracking(0.5)
-                Spacer()
-            }
-            Text("Drag the gizmo to move/rotate. Use the options below for precise moves.")
-                .font(PlasticityFont.label)
-                .foregroundColor(Color.text_secondary)
+        VStack(alignment: .leading, spacing: 14) {
+            TOToolTitle(icon: "arrow.up.and.down.and.arrow.left.and.right", title: "Move",
+                        help: "Drag the on-canvas gizmo to move / rotate. Use the options below for precise point-to-point moves and scaling.",
+                        helpOpen: $toolHelpOpen)
 
-            Toggle("Create copy (move duplicates)", isOn: $state.moveCreateCopy)
-                .font(PlasticityFont.label)
+            TOCheck(label: "Create copy (move duplicates)", isOn: $state.moveCreateCopy)
 
-            Divider().background(Color.border_subtle)
-
-            Text("POINT TO POINT")
-                .font(PlasticityFont.label).fontWeight(.bold).foregroundColor(Color.accent)
-            Button(state.moveP2PActive ? (state.moveP2PFrom == nil ? "Click source point…" : "Click destination…") : "Start Point-to-Point") {
+            TODivider()
+            TOGroupLabel("Point to point")
+            TOSecondaryButton(title: state.moveP2PActive
+                                ? (state.moveP2PFrom == nil ? "Click source point…" : "Click destination…")
+                                : "Start point-to-point",
+                              enabled: !state.selectedHandles.isEmpty) {
                 state.moveP2PActive.toggle()
                 state.moveP2PFrom = nil
             }
-            .buttonStyle(PlasticityButtonStyle(isEnabled: !state.selectedHandles.isEmpty))
-            .disabled(state.selectedHandles.isEmpty)
 
-            Divider().background(Color.border_subtle)
-
-            Text("SCALE")
-                .font(PlasticityFont.label).fontWeight(.bold).foregroundColor(Color.accent)
-            Toggle("From center (off = corner)", isOn: $state.moveScaleFromCenter)
-                .font(PlasticityFont.label)
-            HStack {
-                Text("Factor").font(PlasticityFont.label).foregroundColor(Color.text_secondary)
-                Spacer()
-                TextField("", value: $state.moveScaleFactor, format: .number)
-                    .textFieldStyle(PlainTextFieldStyle())
-                    .padding(4).frame(width: 60)
-                    .background(Color.bg_input).cornerRadius(4)
-                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+            TODivider()
+            TOGroupLabel("Scale")
+            TOCheck(label: "From center (off = corner)", isOn: $state.moveScaleFromCenter)
+            TORow(label: "Factor") {
+                TextField("", value: $state.moveScaleFactor, format: .number).toFieldStyle(width: 80)
             }
-            Button("Apply Scale") { state.scaleSelected(factor: state.moveScaleFactor) }
-                .buttonStyle(PlasticityButtonStyle(isEnabled: !state.selectedHandles.isEmpty && state.moveScaleFactor > 0))
-                .disabled(state.selectedHandles.isEmpty || state.moveScaleFactor <= 0)
+            TOPrimaryButton(title: "Apply Scale",
+                            enabled: !state.selectedHandles.isEmpty && state.moveScaleFactor > 0) {
+                state.scaleSelected(factor: state.moveScaleFactor)
+            }
         }
     }
 
     /// MIRROR tool options (MAS-55).
     private var mirrorSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Image(systemName: "flip.horizontal").foregroundColor(Color.accent)
-                Text("MIRROR")
-                    .font(PlasticityFont.header)
-                    .foregroundColor(Color.text_primary).tracking(0.5)
-                Spacer()
-            }
+        VStack(alignment: .leading, spacing: 14) {
+            TOToolTitle(icon: "flip.horizontal", title: "Mirror",
+                        help: "Objects mode: click the shapes to mirror. Mirror Line mode: click a line (or two points) to set the reflection axis. Then press Apply.",
+                        helpOpen: $toolHelpOpen)
+
             // Selection mode (MAS-119): Objects (pick geometry) vs Mirror Line (pick axis).
-            Picker("", selection: $state.mirrorLineMode) {
-                Text("Objects").tag(false)
-                Text("Mirror Line").tag(true)
+            VStack(alignment: .leading, spacing: 8) {
+                TOLabel("Selection mode")
+                TOSegmented(options: [(false, "Objects"), (true, "Mirror Line")],
+                            selection: $state.mirrorLineMode)
             }
-            .pickerStyle(SegmentedPickerStyle())
-            .help("Objects: click shapes to mirror.  Mirror Line: click a line (or two points) for the axis.")
 
             // Objects select box (count + clear).
-            HStack {
-                Text("Objects: \(state.selectedHandles.count)")
-                    .font(PlasticityFont.label).foregroundColor(Color.text_secondary)
-                Spacer()
+            HStack(spacing: 8) {
+                TOStatus(color: state.selectedHandles.isEmpty ? .to_textFaint : .to_accent,
+                         text: "Objects: \(state.selectedHandles.count)")
                 if !state.selectedHandles.isEmpty {
                     Button { state.selectedHandles.removeAll() } label: {
-                        Image(systemName: "xmark.circle.fill").foregroundColor(Color.text_muted)
-                    }.buttonStyle(PlainButtonStyle()).help("Clear objects")
+                        Image(systemName: "xmark.circle.fill").foregroundColor(Color.to_textMut)
+                    }.buttonStyle(.plain).help("Clear objects")
                 }
             }
             // Mirror line select box.
-            HStack {
-                Text(state.mirrorAxisEnd != nil ? "Mirror line: set" : "Mirror line: —")
-                    .font(PlasticityFont.label)
-                    .foregroundColor(state.mirrorAxisEnd != nil ? Color.accent : Color.text_secondary)
-                Spacer()
+            HStack(spacing: 8) {
+                TOStatus(color: state.mirrorAxisEnd != nil ? .to_accent : .to_textFaint,
+                         text: state.mirrorAxisEnd != nil ? "Mirror line: set" : "Mirror line: not set")
                 if state.mirrorAxisStart != nil {
                     Button { state.mirrorAxisStart = nil; state.mirrorAxisEnd = nil } label: {
-                        Image(systemName: "xmark.circle.fill").foregroundColor(Color.text_muted)
-                    }.buttonStyle(PlainButtonStyle()).help("Clear mirror line")
+                        Image(systemName: "xmark.circle.fill").foregroundColor(Color.to_textMut)
+                    }.buttonStyle(.plain).help("Clear mirror line")
                 }
             }
 
-            Toggle("Mirror (flip) copy", isOn: $state.mirrorFlip)
-                .font(PlasticityFont.label)
-            Toggle("Keep live link", isOn: $state.mirrorKeepLink)
-                .font(PlasticityFont.label)
-            Text(state.mirrorStageHint)
-                .font(PlasticityFont.label)
-                .foregroundColor(Color.text_secondary)
+            TOCheck(label: "Mirror (flip) copy", isOn: $state.mirrorFlip)
+            TOCheck(label: "Keep live link", isOn: $state.mirrorKeepLink)
+            TOHint(text: state.mirrorStageHint)
+
             HStack(spacing: 8) {
-                Button("OK") { state.confirmMirror() }
-                    .buttonStyle(PlasticityButtonStyle(isEnabled: state.mirrorAxisEnd != nil && !state.selectedHandles.isEmpty))
-                    .disabled(state.mirrorAxisEnd == nil || state.selectedHandles.isEmpty)
-                Button("Cancel") { state.resetMirrorTool() }
-                    .buttonStyle(PlasticityButtonStyle(isEnabled: true))
+                TOPrimaryButton(title: "Apply Mirror",
+                                enabled: state.mirrorAxisEnd != nil && !state.selectedHandles.isEmpty) {
+                    state.confirmMirror()
+                }
+                TOSecondaryButton(title: "Cancel", tint: .to_textMut) { state.resetMirrorTool() }
+                    .frame(width: 96)
             }
         }
     }
@@ -4878,32 +3855,33 @@ extension ContentView {
 
                 VStack(alignment: .leading, spacing: 0) {
                     VSplitView(
+                        // Decluttered-shell layout (design handoff): pinned tool
+                        // title + ⓘ help + live status, a single scrolling settings
+                        // region, then the pinned primary action. Only step 4 (the
+                        // scroll) absorbs a tool having more or fewer settings.
                         top: VStack(spacing: 0) {
-                            ScrollView {
-                                activeToolOptionsPanel
-                                    .padding(14)
-                            }
-                            // Keep the Sewing-Holes apply action pinned and always
-                            // reachable, no matter how many options are expanded.
-                            if state.currentTool == .addHoles {
-                                holesApplyFooter
-                            }
-                        },
+                            activeToolChrome
+                            ScrollView { activeToolOptionsPanel }
+                            activeToolFooter
+                        }
+                        .onChange(of: state.currentTool) { _ in toolHelpOpen = false },
                         bottom: ScrollView {
                             layersSection
                                 .padding(14)
                                 .tutorialAnchor(.layersPanel)
-                        },
+                        }
+                        .background(Color.to_panelDeep),
                         topHeight: $leftSidebarTopHeight,
                         minTopHeight: 100,
                         minBottomHeight: 100,
+                        // Layers is pinned to ~⅓ of the panel height (handoff).
                         defaultTopFraction: 2.0 / 3.0
                     )
                 }
                 .frame(maxWidth: .infinity)
             }
             .frame(width: rightPanelWidth)
-            .background(Color.bg_panel)
+            .background(Color.to_panel)
         }
     }
 

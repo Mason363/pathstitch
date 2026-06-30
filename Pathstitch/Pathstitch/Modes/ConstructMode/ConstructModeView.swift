@@ -64,8 +64,8 @@ struct ConstructModeView: View {
 
             inspector
                 .frame(width: 280)
-                .background(Color.bg_panel)
-                .border(Color.border_subtle, width: 1)
+                .background(Color.to_panel)
+                .border(Color.to_panelBorder, width: 1)
         }
         .onAppear {
             // Re-fold from the *current* sketch each time we enter the mode, so
@@ -138,22 +138,21 @@ struct ConstructModeView: View {
 
     private var stepCard: some View {
         let g = toolGuide
-        return HStack(alignment: .top, spacing: 9) {
+        return HStack(alignment: .top, spacing: 10) {
             Image(systemName: g.icon).font(.system(size: 14, weight: .semibold))
-                .foregroundColor(.accent).frame(width: 18)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(g.name.uppercased()).font(PlasticityFont.label.weight(.semibold))
-                    .foregroundColor(.text_primary).tracking(1)
-                Text(g.step).font(PlasticityFont.label).foregroundColor(.text_secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                .foregroundColor(.to_accent).frame(width: 18)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(g.name).font(.system(size: 13, weight: .semibold)).tracking(0.4)
+                    .textCase(.uppercase).foregroundColor(.to_textPri)
+                Text(g.step).font(.system(size: 12, weight: .medium)).foregroundColor(.to_textTer)
+                    .lineSpacing(2).fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 0)
         }
-        .padding(10)
+        .padding(11)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 6).fill(Color.accent.opacity(0.10)))
-        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.accent.opacity(0.30), lineWidth: 1))
-        .padding(.top, 12)
+        .background(RoundedRectangle(cornerRadius: 11).fill(Color.to_accentTint))
+        .overlay(RoundedRectangle(cornerRadius: 11).stroke(Color.to_accent.opacity(0.35), lineWidth: 1))
     }
 
     // One enclosed area sits inside another — ask how to treat the inner one.
@@ -206,71 +205,83 @@ struct ConstructModeView: View {
     }
 
     private var inspector: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        // Construct/3D shell (design handoff, Shell B): pinned construct header,
+        // Edit/Mockup toggle, and active-tool card; a single scrolling settings
+        // region; then the pinned solver readout + (collapsed) Display Options.
+        let editing = !state.constructArtworkMode && state.constructRenderMode != "mockup"
+        return VStack(alignment: .leading, spacing: 0) {
+            // Construct header (pinned).
             HStack(spacing: 12) {
-                Text("Construct").font(PlasticityFont.header).foregroundColor(.text_primary)
+                Text("Construct")
+                    .font(.system(size: 15, weight: .semibold)).tracking(1.05).textCase(.uppercase)
+                    .foregroundColor(.to_textPri)
                 Spacer()
                 Button { state.undoConstruct() } label: {
                     Image(systemName: "arrow.uturn.backward").font(.system(size: 12))
                 }
                 .buttonStyle(.plain).disabled(!state.canUndoConstruct)
-                .foregroundColor(state.canUndoConstruct ? .text_secondary : .text_secondary.opacity(0.3))
+                .foregroundColor(state.canUndoConstruct ? .to_textTer : .to_textTer.opacity(0.3))
                 .help("Undo (⌘Z)")
                 Button { state.redoConstruct() } label: {
                     Image(systemName: "arrow.uturn.forward").font(.system(size: 12))
                 }
                 .buttonStyle(.plain).disabled(!state.canRedoConstruct)
-                .foregroundColor(state.canRedoConstruct ? .text_secondary : .text_secondary.opacity(0.3))
+                .foregroundColor(state.canRedoConstruct ? .to_textTer : .to_textTer.opacity(0.3))
                 .help("Redo (⇧⌘Z)")
                 Button { state.constructHome() } label: {
                     Image(systemName: "house").font(.system(size: 12))
                 }
-                .buttonStyle(.plain).foregroundColor(.text_secondary).help("Recenter view")
+                .buttonStyle(.plain).foregroundColor(.to_textTer).help("Recenter view")
             }
-            .padding(.horizontal, 14).padding(.top, 14).padding(.bottom, 6)
+            .padding(.horizontal, 14).padding(.top, 14).padding(.bottom, 10)
 
-            Divider().background(Color.border_subtle)
+            // Pinned overview (size / stitches / health + Assemble + Export),
+            // Edit ↔ Mockup, and the active-tool card.
+            VStack(alignment: .leading, spacing: 12) {
+                overviewStrip
+                renderModeSection
+                if editing { stepCard }
+            }
+            .padding(.horizontal, 14).padding(.bottom, 12)
 
+            TODivider()
+
+            // Scrolling settings — the only region that scrolls.
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
-                    // Always-on overview: finished size / stitches / health + Export +
-                    // Assemble. Stays put no matter which tool is active.
-                    overviewStrip
-                    Divider().background(Color.border_subtle)
-
-                    // Edit ↔ Mockup. Mockup swaps the editing tools for material +
-                    // lighting (presentation) controls.
-                    renderModeSection
-
-                    // Controls-first: the active tool's options lead the inspector.
                     if state.constructArtworkMode {
                         artworkPanel
                     } else if state.constructRenderMode == "mockup" {
                         materialSection
                         ConstructLightingView(state: state)
                     } else {
-                        stepCard
                         toolOptions
-                        stretchSection
-                    }
-
-                    // Display-only aids (shading + cutting mat), collapsed by default
-                    // so they don't crowd the tool controls. Apply in Edit and Mockup.
-                    Divider().background(Color.border_subtle)
-                    DisclosureGroup(isExpanded: $showDisplay) {
-                        VStack(alignment: .leading, spacing: 14) {
-                            shadingSection
-                            matSection
-                        }
-                        .padding(.top, 8)
-                    } label: {
-                        Text("DISPLAY OPTIONS").font(PlasticityFont.label)
-                            .foregroundColor(.text_secondary).tracking(1)
                     }
                 }
                 .padding(14)
             }
-            Spacer()
+
+            // Pinned solver readout + (collapsed) Display Options.
+            VStack(alignment: .leading, spacing: 0) {
+                if editing {
+                    TODivider()
+                    stretchSection
+                        .padding(.horizontal, 14).padding(.vertical, 10)
+                }
+                TODivider()
+                DisclosureGroup(isExpanded: $showDisplay) {
+                    VStack(alignment: .leading, spacing: 14) {
+                        shadingSection
+                        matSection
+                    }
+                    .padding(.top, 8).padding(.horizontal, 14).padding(.bottom, 12)
+                } label: {
+                    TOGroupLabel("Display Options")
+                        .padding(.horizontal, 14).padding(.vertical, 11)
+                }
+                .tint(Color.to_textTer)
+            }
+            .background(Color.to_panel)
         }
     }
 
@@ -1093,32 +1104,31 @@ struct ConstructModeView: View {
 
     private func readoutRow(_ label: String, _ value: String) -> some View {
         HStack {
-            Text(label).font(PlasticityFont.label).foregroundColor(.text_secondary)
+            Text(label).font(.system(size: 13, weight: .medium)).foregroundColor(.to_textSec)
             Spacer()
-            Text(value).font(PlasticityFont.label.monospacedDigit()).foregroundColor(.text_primary)
+            Text(value).font(.system(size: 12.5, weight: .semibold)).monospacedDigit()
+                .foregroundColor(.to_textPri)
         }
     }
 
     private var stretchSection: some View {
         let pct = state.constructMaxStretchPct
-        return VStack(alignment: .leading, spacing: 4) {
+        return VStack(alignment: .leading, spacing: 6) {
             sectionHeader("Solver")
             HStack {
-                Text("Max stretch").font(PlasticityFont.label).foregroundColor(.text_secondary)
+                Text("Max stretch").font(.system(size: 13, weight: .medium)).foregroundColor(.to_textSec)
                 Spacer()
                 Text(String(format: "%.2f%%", pct))
-                    .font(PlasticityFont.label.monospacedDigit())
-                    .foregroundColor(pct < 1 ? .green : .orange)
+                    .font(.system(size: 12.5, weight: .semibold)).monospacedDigit()
+                    .foregroundColor(pct < 1 ? .to_ok : .to_warn)
             }
             Text("Leather is inextensible — this should stay near 0%.")
-                .font(PlasticityFont.label).foregroundColor(.text_secondary.opacity(0.7))
+                .font(.system(size: 12, weight: .medium)).foregroundColor(.to_textMut)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
     private func sectionHeader(_ title: String) -> some View {
-        Text(title.uppercased())
-            .font(PlasticityFont.label)
-            .foregroundColor(.text_secondary)
-            .tracking(1)
+        TOGroupLabel(title)
     }
 }
