@@ -52,6 +52,11 @@ const scene=new THREE.Scene();
 scene.background=new THREE.Color(0x1e1f22);
 let camera=new THREE.PerspectiveCamera(45, window.innerWidth/window.innerHeight, 0.1, 100000);
 camera.position.set(120,140,180);
+// Frame the model to the camera only the FIRST time it loads. Every later rebuild
+// (tool change, confirm, fold, crease…) reloads the model, but the user's orbit /
+// zoom must be preserved — re-framing on each rebuild was the "camera keeps
+// resetting" bug. The Home button still re-frames on demand via recenterCamera().
+let CAMERA_FRAMED=false;
 const renderer=new THREE.WebGLRenderer({canvas, antialias:true});
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
@@ -489,8 +494,10 @@ window.loadConstructModel=function(jsonStr){
   }
   CONTROLS.groundPanel = m.groundPanel||0;
   buildHoleChains(m.holeChains||[]);
-  // Pose once (flat) so the meshes have real positions, then frame the camera.
-  recomputePose(); recenterCamera();
+  // Pose once (flat) so the meshes have real positions. Frame the camera only on
+  // the first load; later rebuilds keep wherever the user orbited/zoomed to.
+  recomputePose();
+  if(!CAMERA_FRAMED){ recenterCamera(); CAMERA_FRAMED=true; }
 };
 
 // Build the sewing-hole markers (one InstancedMesh; each instance rides its
@@ -1793,6 +1800,7 @@ window.recenterCamera=function(){
   controls.target.copy(c);
   camera.position.set(c.x+dist*0.6, c.y+dist*0.7, c.z+dist*0.9);
   camera.near=Math.max(r*0.01,0.1); camera.far=r*100; camera.updateProjectionMatrix();
+  CAMERA_FRAMED=true;   // an explicit frame counts; rebuilds won't override it
 };
 
 // ---- picking --------------------------------------------------------------
