@@ -3782,6 +3782,45 @@ extension ContentView {
                     }
                 }
             }
+
+            Divider()
+            // Hardware (Phase 2): stamp a part's footprint (holes / slots) on the
+            // HARDWARE layer. The cuts double as stitch keep-outs.
+            Text("HARDWARE")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundColor(Color.text_secondary)
+            Text("Tap a part to stamp its holes/slots (centred at the origin) on the HARDWARE layer — they also keep the stitch line clear.")
+                .font(.system(size: 10)).foregroundColor(Color.text_secondary)
+            ForEach(HardwareStore.shared.categories, id: \.self) { cat in
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(cat.uppercased())
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundColor(Color.text_secondary)
+                    ForEach(HardwareStore.shared.items(in: cat)) { h in
+                        let fits = h.clampFits(state.constructThicknessMm)
+                        Button { state.insertHardware(h) } label: {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(h.name).font(PlasticityFont.label).foregroundColor(Color.text_primary)
+                                    Text(h.clampLabel).font(.system(size: 9)).foregroundColor(Color.text_secondary)
+                                }
+                                Spacer()
+                                Image(systemName: fits ? "checkmark.circle" : "exclamationmark.triangle")
+                                    .foregroundColor(fits ? Color.text_secondary.opacity(0.6) : .orange)
+                                    .help(fits ? "Fits the current \(String(format: "%.1f", state.constructThicknessMm)) mm leather"
+                                               : "Current \(String(format: "%.1f", state.constructThicknessMm)) mm leather is outside this part's clamp range")
+                                Image(systemName: "plus.circle").foregroundColor(Color.accent)
+                            }
+                            .padding(6)
+                            .background(Color.bg_input)
+                            .cornerRadius(5)
+                        }
+                        .buttonStyle(PlainButtonStyle())
+                        .help("\(h.partNumber) · \(h.vendor)")
+                    }
+                }
+            }
+
             Divider()
             Button("Done") { state.currentTool = .select }.buttonStyle(.bordered)
         }

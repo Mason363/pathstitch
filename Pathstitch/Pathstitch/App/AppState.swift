@@ -5802,6 +5802,42 @@ class AppState {
         }
     }
 
+    /// Insert Hardware (Phase 2) — stamp a part's footprint (the holes / slots it
+    /// cuts) onto the HARDWARE layer at the origin. The cuts double as stitch
+    /// keep-outs, so the saddle stitch automatically gives the part a wide berth.
+    func insertHardware(_ h: HardwareItem) {
+        saveToHistory()
+        let activeDxfURL = ensureActiveDXFFileExists()
+        isProcessing = true
+        let footprint = h.footprintPayload
+        Task {
+            do {
+                await reconcileBufferIfNeeded()
+                _ = try await PythonBridge.shared.run(
+                    module: "dxf_ops",
+                    op: "place_hardware",
+                    args: [
+                        "input": activeDxfURL.path,
+                        "output": activeDxfURL.path,
+                        "footprint": footprint,
+                        "center": [0.0, 0.0],
+                        "rotation": 0.0,
+                        "layer": "HARDWARE"
+                    ]
+                )
+                await MainActor.run {
+                    self.reloadDXF()
+                    self.isProcessing = false
+                }
+            } catch {
+                await MainActor.run {
+                    self.errorMessage = error.localizedDescription
+                    self.isProcessing = false
+                }
+            }
+        }
+    }
+
     /// Box Stitch Helper — re-prick the two selected panels with equal hole counts.
     func applyBoxStitch(exitAfterApply: Bool = false) {
         let handles = Array(selectedHandles)

@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "hardware": [
+    { "id": "snap-line20", "name": "Line 20 Snap", "category": "Snaps", "partNumber": "Line 20", "vendor": "Generic", "clampMinMm": 0.8, "clampMaxMm": 2.5, "clearanceMm": 8.0, "capDiameterMm": 12.5, "footprint": [ { "kind": "hole", "dx": 0, "dy": 0, "dia": 4.0 } ], "builtin": true },
+    { "id": "snap-line24", "name": "Line 24 Snap", "category": "Snaps", "partNumber": "Line 24", "vendor": "Generic", "clampMinMm": 1.0, "clampMaxMm": 3.0, "clearanceMm": 9.0, "capDiameterMm": 15.0, "footprint": [ { "kind": "hole", "dx": 0, "dy": 0, "dia": 4.0 } ], "builtin": true },
+    { "id": "rivet-dc-7", "name": "Double-Cap Rivet 7 mm", "category": "Rivets", "partNumber": "DCR-7", "vendor": "Generic", "clampMinMm": 1.5, "clampMaxMm": 4.5, "clearanceMm": 5.0, "capDiameterMm": 7.0, "footprint": [ { "kind": "hole", "dx": 0, "dy": 0, "dia": 3.0 } ], "builtin": true },
+    { "id": "rivet-dc-9", "name": "Double-Cap Rivet 9 mm", "category": "Rivets", "partNumber": "DCR-9", "vendor": "Generic", "clampMinMm": 3.0, "clampMaxMm": 6.5, "clearanceMm": 6.0, "capDiameterMm": 9.0, "footprint": [ { "kind": "hole", "dx": 0, "dy": 0, "dia": 4.0 } ], "builtin": true },
+    { "id": "chicago-screw", "name": "Chicago Screw", "category": "Rivets", "partNumber": "CS-standard", "vendor": "Generic", "clampMinMm": 3.0, "clampMaxMm": 9.0, "clearanceMm": 6.0, "capDiameterMm": 10.0, "footprint": [ { "kind": "hole", "dx": 0, "dy": 0, "dia": 4.0 } ], "builtin": true },
+    { "id": "magsnap-18", "name": "Magnetic Snap 18 mm", "category": "Closures", "partNumber": "MS-18", "vendor": "Generic", "clampMinMm": 1.0, "clampMaxMm": 3.0, "clearanceMm": 12.0, "capDiameterMm": 18.0, "footprint": [ { "kind": "slot", "dx": -6.5, "dy": 0, "length": 5.0, "width": 1.2, "angle": 90.0 }, { "kind": "slot", "dx": 6.5, "dy": 0, "length": 5.0, "width": 1.2, "angle": 90.0 } ], "builtin": true },
+    { "id": "eyelet-6", "name": "Eyelet 6 mm", "category": "Eyelets", "partNumber": "EY-6", "vendor": "Generic", "clampMinMm": 0.8, "clampMaxMm": 3.0, "clearanceMm": 5.0, "capDiameterMm": 11.0, "footprint": [ { "kind": "hole", "dx": 0, "dy": 0, "dia": 6.0 } ], "builtin": true }
+  ]
+}

@@ -869,6 +869,98 @@ def op_add_entity(args: Dict[str, Any]) -> Dict[str, Any]:
     except Exception as e:
         return {"status": "error", "message": f"Failed to add entity: {str(e)}"}
 
+# ---------------------------------------------------------------------------
+# hardware footprints (assembly_workflow.md Phase 2)
+# ---------------------------------------------------------------------------
+#
+# A piece of hardware (snap, rivet, magnetic clasp, eyelet …) brings its own
+# *footprint*: the holes and slots it cuts into the leather. Placing a part stamps
+# that footprint onto a HARDWARE layer at a point, so the cut file is correct and
+# the part can't drift out of registration. The stamped cuts also double as
+# keep-out geometry — `op_add_holes` already gaps the stitch line around tagged
+# hardware (the MAS-120 avoidance path), so a placed snap automatically pushes the
+# saddle stitch away from itself.
+
+def _hw_rotate_pt(x: float, y: float, ang_rad: float) -> Tuple[float, float]:
+    c, s = math.cos(ang_rad), math.sin(ang_rad)
+    return (x * c - y * s, x * s + y * c)
+
+
+def _hw_stadium_points(cx: float, cy: float, length: float, width: float,
+                       ang_rad: float, n_cap: int = 10) -> List[Tuple[float, float]]:
+    """Closed stadium (rounded-slot) outline centred at (cx,cy): a `length`-long,
+    `width`-wide capsule whose long axis is +x rotated by `ang_rad`."""
+    r = max(width, 0.0) / 2.0
+    half = max(length / 2.0 - r, 0.0)
+    local: List[Tuple[float, float]] = []
+    # right cap: +90° → -90° (through the rightmost point)
+    for k in range(n_cap + 1):
+        a = math.pi / 2.0 - math.pi * k / n_cap
+        local.append((half + r * math.cos(a), r * math.sin(a)))
+    # left cap: -90° → -270° (through the leftmost point)
+    for k in range(n_cap + 1):
+        a = -math.pi / 2.0 - math.pi * k / n_cap
+        local.append((-half + r * math.cos(a), r * math.sin(a)))
+    return [(cx + rx, cy + ry)
+            for (rx, ry) in (_hw_rotate_pt(x, y, ang_rad) for (x, y) in local)]
+
+
+def op_place_hardware(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Stamps a hardware footprint — the holes / slots a part cuts — into the sketch.
+
+    args:
+      input, output : DXF paths
+      footprint      : [{kind:"hole", dx, dy, dia}
+                        | {kind:"slot", dx, dy, length, width, angle}]
+                       offsets are in the part's local frame (mm), about `center`.
+      center         : [x, y] placement point (default origin)
+      rotation       : whole-part rotation (degrees, default 0)
+      layer          : target layer (default "HARDWARE")
+
+    Returns the new entity handles. The stamped cuts double as keep-out geometry.
+    """
+    input_path = args.get("input")
+    output_path = args.get("output")
+    if not input_path or not output_path:
+        return {"status": "error", "message": "Input and output paths are required."}
+    footprint = args.get("footprint") or []
+    center = args.get("center") or [0.0, 0.0]
+    cx, cy = float(center[0]), float(center[1])
+    rot = math.radians(float(args.get("rotation", 0.0) or 0.0))
+    layer = sanitize_layer_name(args.get("layer", "HARDWARE"))
+
+    doc = ezdxf.new(dxfversion="R2010") if not os.path.exists(input_path) else ezdxf.readfile(input_path)
+    msp = doc.modelspace()
+    if layer not in doc.layers:
+        doc.layers.new(layer, dxfattribs={"color": 6})  # magenta — hardware cuts
+
+    handles: List[str] = []
+    try:
+        for prim in footprint:
+            kind = prim.get("kind", "hole")
+            ox, oy = _hw_rotate_pt(float(prim.get("dx", 0.0)), float(prim.get("dy", 0.0)), rot)
+            px, py = cx + ox, cy + oy
+            if kind == "hole":
+                r = float(prim.get("dia", 1.0)) / 2.0
+                if r > 0:
+                    e = msp.add_circle(center=(px, py), radius=r, dxfattribs={"layer": layer})
+                    handles.append(e.dxf.handle)
+            elif kind == "slot":
+                ang = rot + math.radians(float(prim.get("angle", 0.0) or 0.0))
+                pts = _hw_stadium_points(px, py, float(prim.get("length", 1.0)),
+                                         float(prim.get("width", 1.0)), ang)
+                e = msp.add_lwpolyline(pts, dxfattribs={"layer": layer, "closed": True})
+                handles.append(e.dxf.handle)
+            else:
+                return {"status": "error", "message": f"Unknown footprint primitive: {kind}"}
+        if not handles:
+            return {"status": "error", "message": "Hardware footprint produced no cuts."}
+        doc.saveas(output_path)
+        return {"status": "ok", "data": {"handles": handles, "count": len(handles), "layer": layer}}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to place hardware: {e}"}
+
+
 def get_entities_bounds(msp, handles: List[str]) -> Optional[Tuple[float, float, float, float]]:
     """Calculates bounds of specific entity handles in modelspace, or all if empty."""
     from ezdxf.path import make_path
@@ -6690,6 +6782,7 @@ OPERATIONS = {
     "export_svg": op_export_svg,
     "chain_select": op_chain_select,
     "add_entity": op_add_entity,
+    "place_hardware": op_place_hardware,
     "offset_bbox": op_offset_bbox,
     "update_entity": op_update_entity,
     "set_layer": op_set_layer,
