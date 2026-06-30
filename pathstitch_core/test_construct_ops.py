@@ -162,6 +162,63 @@ def test_match_chains_reversed():
     print(f"reversed match auto-flipped: {len(d['pairs'])} clean pairs")
 
 
+# ---------------------------------------------------------------------------
+# bend allowance — the sheet-metal flat ↔ folded relationship (Phase 1)
+# ---------------------------------------------------------------------------
+
+def test_bend_allowance_known_values():
+    # 90° bend, R=1, T=2, K=0.5 → BA = (π/2)(1 + 0.5·2) = π·1 ... actually
+    # (π/2)·(1+1) = π. OSSB = tan45·(1+2) = 3. BD = 2·3 − π.
+    ba = construct_ops.bend_allowance(90, 1.0, 2.0, 0.5)
+    assert abs(ba - math.pi) < 1e-9, ba
+    ossb = construct_ops.outside_setback(90, 1.0, 2.0)
+    assert abs(ossb - 3.0) < 1e-9, ossb
+    bd = construct_ops.bend_deduction(90, 1.0, 2.0, 0.5)
+    assert abs(bd - (6.0 - math.pi)) < 1e-9, bd
+
+    # zero inside radius, 90°, T=2, K=0.5 → BA = (π/2)(0+1) = π/2, OSSB = 2.
+    assert abs(construct_ops.bend_allowance(90, 0.0, 2.0, 0.5) - math.pi / 2) < 1e-9
+    assert abs(construct_ops.outside_setback(90, 0.0, 2.0) - 2.0) < 1e-9
+
+    # textbook aluminium check: 90°, R=1, T=1, K=0.33 → BA = (π/2)(1.33).
+    assert abs(construct_ops.bend_allowance(90, 1.0, 1.0, 0.33)
+               - (math.pi / 2) * 1.33) < 1e-9
+
+    # a flat fold consumes nothing; sign of the angle doesn't matter.
+    assert construct_ops.bend_allowance(0, 2.0, 2.0, 0.45) == 0.0
+    assert abs(construct_ops.bend_allowance(-90, 1.0, 2.0, 0.5) - math.pi) < 1e-9
+    print("bend allowance formulas match the sheet-metal references")
+
+
+def test_fold_metrics_op_totals_and_validation():
+    res = construct_ops.op_fold_metrics({
+        "thickness": 2.0, "kFactor": 0.45, "minBendRadiusMm": 1.5,
+        "folds": [
+            {"id": "0-0", "angleDeg": 90, "radiusMm": 2.0},   # OK (≥ 1.5)
+            {"id": "0-1", "angleDeg": 90, "radiusMm": 0.5},   # too tight → warn
+            {"id": "0-2", "angleDeg": 0,  "radiusMm": 0.0},   # flat → ignored
+        ],
+    })
+    assert res["status"] == "ok", res
+    d = res["data"]
+    assert d["count"] == 3
+    # totals only sum the two bent folds
+    expect_ba = (construct_ops.bend_allowance(90, 2.0, 2.0, 0.45)
+                 + construct_ops.bend_allowance(90, 0.5, 2.0, 0.45))
+    assert abs(d["totalBendAllowance"] - expect_ba) < 1e-9, d["totalBendAllowance"]
+    # validation: exactly the tight, non-flat fold warns
+    assert d["folds"][0]["radiusOk"] and not d["folds"][1]["radiusOk"]
+    assert d["folds"][2]["radiusOk"]   # flat fold never warns
+    assert len(d["warnings"]) == 1 and "0-1" in d["warnings"][0], d["warnings"]
+    # radius defaults to the leather minimum when omitted
+    res2 = construct_ops.op_fold_metrics({
+        "thickness": 2.0, "minBendRadiusMm": 1.5, "folds": [{"angleDeg": 90}]})
+    assert abs(res2["data"]["folds"][0]["radiusMm"] - 1.5) < 1e-9
+    assert not res2["data"]["warnings"], "default-radius fold should sit at the minimum"
+    print(f"op_fold_metrics: ΣBA {d['totalBendAllowance']:.2f} mm, "
+          f"ΣBD {d['totalBendDeduction']:.2f} mm, {len(d['warnings'])} warning(s)")
+
+
 if __name__ == "__main__":
     test_square_with_center_fold()
     test_two_panels_no_folds()
@@ -170,4 +227,6 @@ if __name__ == "__main__":
     test_match_chains_equal_counts()
     test_match_chains_mismatched_counts()
     test_match_chains_reversed()
+    test_bend_allowance_known_values()
+    test_fold_metrics_op_totals_and_validation()
     print("ALL CONSTRUCT TESTS PASSED")

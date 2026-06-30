@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "leathers": [
+    { "id": "vt-2-3oz",  "name": "Veg-Tan 2–3 oz",   "category": "Veg-Tan",     "thicknessOz": 2.5, "thicknessMm": 1.0, "temper": "medium", "bendingStiffness": 0.30, "minBendRadiusMm": 0.5, "kFactor": 0.44, "stretchPct": 3.0, "burnishable": true,  "moldable": true,  "paintable": true,  "colorHex": "C9A36A", "builtin": true },
+    { "id": "vt-4-5oz",  "name": "Veg-Tan 4–5 oz",   "category": "Veg-Tan",     "thicknessOz": 4.5, "thicknessMm": 1.8, "temper": "firm",   "bendingStiffness": 0.55, "minBendRadiusMm": 1.4, "kFactor": 0.42, "stretchPct": 2.5, "burnishable": true,  "moldable": true,  "paintable": true,  "colorHex": "8A5A2B", "builtin": true },
+    { "id": "vt-6-7oz",  "name": "Veg-Tan 6–7 oz",   "category": "Veg-Tan",     "thicknessOz": 6.5, "thicknessMm": 2.6, "temper": "firm",   "bendingStiffness": 0.72, "minBendRadiusMm": 2.1, "kFactor": 0.40, "stretchPct": 2.0, "burnishable": true,  "moldable": true,  "paintable": true,  "colorHex": "7A4A22", "builtin": true },
+    { "id": "vt-8-9oz",  "name": "Veg-Tan 8–9 oz",   "category": "Veg-Tan",     "thicknessOz": 8.5, "thicknessMm": 3.4, "temper": "firm",   "bendingStiffness": 0.88, "minBendRadiusMm": 2.8, "kFactor": 0.40, "stretchPct": 1.5, "burnishable": true,  "moldable": true,  "paintable": true,  "colorHex": "6E4220", "builtin": true },
+    { "id": "bridle-5-6oz", "name": "Bridle 5–6 oz", "category": "Bridle",      "thicknessOz": 5.5, "thicknessMm": 2.2, "temper": "firm",   "bendingStiffness": 0.68, "minBendRadiusMm": 1.8, "kFactor": 0.41, "stretchPct": 1.5, "burnishable": true,  "moldable": false, "paintable": false, "colorHex": "4A2F1B", "builtin": true },
+    { "id": "ct-3-4oz",  "name": "Chrome-Tan 3–4 oz","category": "Chrome-Tan",  "thicknessOz": 3.5, "thicknessMm": 1.4, "temper": "soft",   "bendingStiffness": 0.25, "minBendRadiusMm": 0.5, "kFactor": 0.45, "stretchPct": 6.0, "burnishable": false, "moldable": false, "paintable": true,  "colorHex": "3A2418", "builtin": true },
+    { "id": "ct-garment","name": "Chrome-Tan Garment","category": "Chrome-Tan", "thicknessOz": 2.0, "thicknessMm": 0.8, "temper": "soft",   "bendingStiffness": 0.12, "minBendRadiusMm": 0.3, "kFactor": 0.46, "stretchPct": 8.0, "burnishable": false, "moldable": false, "paintable": true,  "colorHex": "1C1C1E", "builtin": true },
+    { "id": "lining-pig","name": "Pig Suede Lining", "category": "Lining",      "thicknessOz": 1.5, "thicknessMm": 0.6, "temper": "soft",   "bendingStiffness": 0.08, "minBendRadiusMm": 0.2, "kFactor": 0.47, "stretchPct": 7.0, "burnishable": false, "moldable": false, "paintable": false, "colorHex": "C9A36A", "builtin": true }
+  ]
+}

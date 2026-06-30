@@ -2242,6 +2242,15 @@ class AppState {
     var constructThicknessMm: Double = 2.0
     var constructMaterialToken: Int = 0
 
+    // Physical leather (Phase 1 — Material & Bend-Allowance Foundation). Picked
+    // from `LeatherStore`; drives bend allowance + the fold-radius DFM. Thickness
+    // above is set from the chosen leather but stays manually overridable.
+    var constructMaterialId: String? = nil      // selected LeatherStore id (nil = unset/custom)
+    var constructTemper: String = ""            // firm | medium | soft (display)
+    var constructThicknessOz: Double = 0        // weight in oz (display)
+    var constructKFactor: Double = 0.45         // neutral-axis K-factor for bend allowance
+    var constructMinBendRadiusMm: Double = 1.5  // fold-radius DFM threshold (mm)
+
     // Custom artwork decals (Phase 4): panelId → image data URL. Visual-only,
     // ride the folded mesh, never touch the 2D cut geometry. Persisted in .stch.
     var constructDecals: [Int: String] = [:]
@@ -7370,12 +7379,18 @@ class AppState {
                     ConstructAssembly(
                         groundPanel: constructGroundPanel,
                         folds: constructFolds,
-                        material: MaterialRef(source: "bundled", id: "",
+                        material: MaterialRef(source: constructMaterialId == nil ? "bundled" : "leather",
+                                              id: constructMaterialId ?? "",
                                               thicknessMm: constructThicknessMm,
                                               colorHex: constructMaterialHex,
                                               finish: constructFinish,
                                               leatherTextureURL: constructLeatherTextureURL,
-                                              leatherTiling: constructLeatherTiling),
+                                              leatherTiling: constructLeatherTiling,
+                                              materialId: constructMaterialId,
+                                              temper: constructTemper.isEmpty ? nil : constructTemper,
+                                              thicknessOz: constructThicknessOz > 0 ? constructThicknessOz : nil,
+                                              kFactor: constructKFactor,
+                                              minBendRadiusMm: constructMinBendRadiusMm),
                         seams: constructSeams.isEmpty ? nil : constructSeams,
                         holeChains: constructHoleChains.isEmpty ? nil : constructHoleChains,
                         userFolds: constructUserFolds.isEmpty ? nil : constructUserFolds,
@@ -7499,6 +7514,14 @@ class AppState {
                     self.constructFinish = mat.finish ?? "satin"
                     self.constructLeatherTextureURL = mat.leatherTextureURL
                     self.constructLeatherTiling = mat.leatherTiling ?? 2
+                    // Physical leather (Phase 1) — restore cached props; fall back to
+                    // the live library entry, then to sane defaults for older files.
+                    self.constructMaterialId = mat.materialId
+                    let lib = mat.materialId.flatMap { LeatherStore.shared.material(id: $0) }
+                    self.constructTemper = mat.temper ?? lib?.temper ?? ""
+                    self.constructThicknessOz = mat.thicknessOz ?? lib?.thicknessOz ?? 0
+                    self.constructKFactor = mat.kFactor ?? lib?.kFactor ?? 0.45
+                    self.constructMinBendRadiusMm = mat.minBendRadiusMm ?? lib?.minBendRadiusMm ?? 1.5
                 }
                 if let lights = asm.lights, !lights.isEmpty { self.constructLights = lights }
                 if let amb = asm.ambient { self.constructAmbient = amb }

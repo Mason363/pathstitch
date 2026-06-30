@@ -956,8 +956,122 @@ def op_export_assembly(args: Dict[str, Any]) -> Dict[str, Any]:
     return {"status": "ok", "data": {"solids": made, "output": out, "format": fmt}}
 
 
+# ---------------------------------------------------------------------------
+# bend allowance — the sheet-metal flat ↔ folded relationship (Phase 1)
+# ---------------------------------------------------------------------------
+#
+# Leather is modelled as sheet metal: a flat blank bent along a line to a finite
+# inside radius R, through a bend *angle* A (the turn away from straight — a
+# right-angle fold is A = 90°). The neutral axis sits K·T from the inside
+# surface, so the material the bend actually consumes (the developed arc of the
+# neutral axis) is the **bend allowance**:
+#
+#     BA = A_rad · (R + K·T)
+#
+# The **outside setback** is how far the bend's tangent line sits from the apex
+# (the mould-line intersection) measured along a flange:
+#
+#     OSSB = tan(A_rad / 2) · (R + T)
+#
+# and the **bend deduction** ties the two flat-measuring conventions together —
+# flat length = (sum of outside flange lengths) − BD, where:
+#
+#     BD = 2·OSSB − BA
+#
+# These are the standard SOLIDWORKS / Fusion sheet-metal formulas; K is
+# calibrated per leather temper. They're plain functions so they unit-test
+# trivially; the Swift Construct inspector mirrors `bend_allowance` for the live
+# read-out, and `op_fold_metrics` is the authority used by export / BOM / DFM.
+
+_MAX_BEND_DEG = 179.0   # clamp for the setback's tan(A/2) → keeps it off the 180° pole
+
+
+def bend_allowance(angle_deg: float, radius_mm: float,
+                   thickness_mm: float, k_factor: float) -> float:
+    """Developed length of the neutral axis through one bend (mm)."""
+    a = math.radians(abs(angle_deg))
+    return a * (radius_mm + k_factor * thickness_mm)
+
+
+def outside_setback(angle_deg: float, radius_mm: float, thickness_mm: float) -> float:
+    """Distance from a bend's tangent line to its apex, along a flange (mm)."""
+    a = math.radians(min(abs(angle_deg), _MAX_BEND_DEG))
+    return math.tan(a / 2.0) * (radius_mm + thickness_mm)
+
+
+def bend_deduction(angle_deg: float, radius_mm: float,
+                   thickness_mm: float, k_factor: float) -> float:
+    """How much to subtract from the summed outside flange lengths for the flat blank."""
+    return (2.0 * outside_setback(angle_deg, radius_mm, thickness_mm)
+            - bend_allowance(angle_deg, radius_mm, thickness_mm, k_factor))
+
+
+def op_fold_metrics(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Per-fold bend allowance / deduction for the current leather (Phase 1).
+
+    args:
+      thickness        : material thickness (mm, default 2.0)
+      kFactor          : neutral-axis K-factor 0…0.5 (default 0.45)
+      minBendRadiusMm  : leather's minimum inside bend radius (mm; <=0 disables the check)
+      folds            : [{ id?, angleDeg, radiusMm? }, ...]
+                         radiusMm defaults to minBendRadiusMm when omitted.
+
+    The *radius policy* (how a fold's roundness maps to an inside radius) is the
+    caller's — this op consumes an explicit radius and returns pure physics:
+    per-fold {bendAllowance, bendDeduction, outsideSetback, radiusOk}, the totals,
+    and human-readable warnings for folds tighter than the leather's minimum (a
+    grain-crack risk). Flat folds (angle ≈ 0) contribute nothing to the totals.
+    """
+    thickness = float(args.get("thickness", 2.0) or 0.0)
+    k = float(args.get("kFactor", 0.45) or 0.0)
+    min_r = float(args.get("minBendRadiusMm", 0.0) or 0.0)
+    folds = args.get("folds") or []
+
+    out: List[Dict[str, Any]] = []
+    warnings: List[str] = []
+    total_ba = 0.0
+    total_bd = 0.0
+    for f in folds:
+        ang = float(f.get("angleDeg", 0.0) or 0.0)
+        r_in = f.get("radiusMm")
+        r = max(float(r_in) if r_in is not None else min_r, 0.0)
+        ba = bend_allowance(ang, r, thickness, k)
+        bd = bend_deduction(ang, r, thickness, k)
+        ossb = outside_setback(ang, r, thickness)
+        # A flat fold (no bend) is trivially safe; otherwise the inside radius
+        # must meet the leather minimum. Keeps the flag consistent with warnings.
+        radius_ok = (abs(ang) <= 1e-6) or (min_r <= 0.0) or (r + 1e-9 >= min_r)
+        fid = f.get("id")
+        out.append({
+            "id": fid, "angleDeg": ang, "radiusMm": r,
+            "bendAllowance": ba, "bendDeduction": bd, "outsideSetback": ossb,
+            "radiusOk": radius_ok,
+        })
+        if abs(ang) > 1e-6:
+            total_ba += ba
+            total_bd += bd
+            if not radius_ok:
+                label = fid if fid is not None else f"{ang:.0f}°"
+                warnings.append(
+                    f"Fold {label}: inside radius {r:.2f} mm is tighter than the "
+                    f"{min_r:.2f} mm minimum for this leather — the grain may crack. "
+                    f"Round the fold or skive the bend.")
+
+    return {"status": "ok", "data": {
+        "folds": out,
+        "count": len(out),
+        "totalBendAllowance": total_ba,
+        "totalBendDeduction": total_bd,
+        "thickness": thickness,
+        "kFactor": k,
+        "minBendRadiusMm": min_r,
+        "warnings": warnings,
+    }}
+
+
 OPERATIONS = {
     "build_construct_model": op_build_construct_model,
     "match_chains": op_match_chains,
     "export_assembly": op_export_assembly,
+    "fold_metrics": op_fold_metrics,
 }

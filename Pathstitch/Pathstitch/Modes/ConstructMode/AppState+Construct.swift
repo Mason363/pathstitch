@@ -256,7 +256,11 @@ extension AppState {
         ConstructUndoState(groundPanel: constructGroundPanel, folds: constructFolds,
                            seams: constructSeams, glues: constructGlues,
                            userFolds: constructUserFolds, materialHex: constructMaterialHex,
-                           thicknessMm: constructThicknessMm, decals: constructDecals,
+                           thicknessMm: constructThicknessMm,
+                           materialId: constructMaterialId, temper: constructTemper,
+                           thicknessOz: constructThicknessOz, kFactor: constructKFactor,
+                           minBendRadiusMm: constructMinBendRadiusMm,
+                           decals: constructDecals,
                            decalXforms: constructDecalXforms,
                            includeHandles: constructIncludeHandles,
                            areaTreatments: constructAreaTreatments,
@@ -277,7 +281,9 @@ extension AppState {
     private func sameConstruct(_ a: ConstructUndoState, _ b: ConstructUndoState) -> Bool {
         a.groundPanel == b.groundPanel && a.folds == b.folds && a.seams == b.seams
         && a.glues == b.glues && a.userFolds == b.userFolds && a.materialHex == b.materialHex
-        && a.thicknessMm == b.thicknessMm && a.decals == b.decals && a.decalXforms == b.decalXforms
+        && a.thicknessMm == b.thicknessMm && a.materialId == b.materialId
+        && a.kFactor == b.kFactor && a.minBendRadiusMm == b.minBendRadiusMm
+        && a.decals == b.decals && a.decalXforms == b.decalXforms
         && a.includeHandles == b.includeHandles && a.areaTreatments == b.areaTreatments
         && a.baseRegions == b.baseRegions && a.panelXf == b.panelXf
     }
@@ -289,6 +295,11 @@ extension AppState {
         constructGlues = s.glues
         constructMaterialHex = s.materialHex
         constructThicknessMm = s.thicknessMm
+        constructMaterialId = s.materialId
+        constructTemper = s.temper
+        constructThicknessOz = s.thicknessOz
+        constructKFactor = s.kFactor
+        constructMinBendRadiusMm = s.minBendRadiusMm
         constructDecals = s.decals
         constructDecalXforms = s.decalXforms
         // userFolds / include set / area treatments change the topology → rebuild;
@@ -480,6 +491,81 @@ extension AppState {
         constructThicknessMm = mm
         constructMaterialToken += 1
         hasUnsavedChanges = true
+    }
+
+    // MARK: - Physical leather (Phase 1 — Material & Bend-Allowance Foundation)
+
+    /// Picks a physical leather from `LeatherStore`: sets thickness, default tint,
+    /// and the physical properties (temper, K-factor, min bend radius) that drive
+    /// bend allowance and the fold-radius DFM. Thickness and tint stay overridable.
+    func selectConstructMaterial(_ m: LeatherMaterial) {
+        pushConstructUndo()
+        constructMaterialId = m.id
+        constructTemper = m.temper
+        constructThicknessOz = m.thicknessOz
+        constructThicknessMm = m.thicknessMm
+        constructKFactor = m.kFactor
+        constructMinBendRadiusMm = m.minBendRadiusMm
+        constructMaterialHex = m.colorHex
+        constructMaterialToken += 1
+        hasUnsavedChanges = true
+    }
+
+    /// The leather currently selected (nil for older / custom assemblies).
+    var constructLeather: LeatherMaterial? {
+        constructMaterialId.flatMap { LeatherStore.shared.material(id: $0) }
+    }
+
+    /// One fold's inside bend radius, derived from its roundness and the leather:
+    /// even a "sharp" leather fold has a natural inside radius near half the
+    /// thickness (you can't crease thick stock to a knife edge), and rounding it
+    /// opens the radius toward a comfortable maximum. Drives both the bend
+    /// allowance and the min-radius check. (The Python `fold_metrics` op is pure
+    /// physics and takes this radius explicitly; this is the app-side policy.)
+    func constructFoldRadius(_ spec: FoldSpec) -> Double {
+        let comfortable = max(constructMinBendRadiusMm * 4, constructThicknessMm * 3)
+        return max(constructThicknessMm * 0.5, spec.roundness * comfortable)
+    }
+
+    /// Bend allowance for one fold — the developed neutral-axis arc, mm. Mirrors
+    /// `construct_ops.bend_allowance`: BA = θ·(R + K·T).
+    func constructBendAllowance(_ spec: FoldSpec) -> Double {
+        let theta = abs(spec.angleDeg) * .pi / 180.0
+        return theta * (constructFoldRadius(spec) + constructKFactor * constructThicknessMm)
+    }
+
+    /// Bend deduction for one fold — flat length = outside flange sum − BD. Mirrors
+    /// `construct_ops.bend_deduction`.
+    func constructBendDeduction(_ spec: FoldSpec) -> Double {
+        let a = min(abs(spec.angleDeg), 179.0) * .pi / 180.0
+        let r = constructFoldRadius(spec)
+        let ossb = tan(a / 2.0) * (r + constructThicknessMm)
+        return 2.0 * ossb - constructBendAllowance(spec)
+    }
+
+    /// True when a fold's inside radius meets the leather's minimum (a flat fold is
+    /// trivially safe). A soft check — surfaced as a warning, never a hard block.
+    func constructFoldRadiusOK(_ spec: FoldSpec) -> Bool {
+        if abs(spec.angleDeg) <= 1e-6 { return true }
+        return constructMinBendRadiusMm <= 0
+            || constructFoldRadius(spec) + 1e-9 >= constructMinBendRadiusMm
+    }
+
+    /// Bent folds whose inside radius is tighter than the leather minimum.
+    var constructTightFolds: [FoldSpec] {
+        constructFolds.filter { abs($0.angleDeg) > 0.5 && !constructFoldRadiusOK($0) }
+    }
+
+    /// Total bend allowance across all bent folds (mm).
+    var constructTotalBendAllowance: Double {
+        constructFolds.filter { abs($0.angleDeg) > 0.5 }
+            .reduce(0) { $0 + constructBendAllowance($1) }
+    }
+
+    /// Total bend deduction across all bent folds (mm).
+    var constructTotalBendDeduction: Double {
+        constructFolds.filter { abs($0.angleDeg) > 0.5 }
+            .reduce(0) { $0 + constructBendDeduction($1) }
     }
 
     /// Hex string → 0xRRGGBB int for the viewport.

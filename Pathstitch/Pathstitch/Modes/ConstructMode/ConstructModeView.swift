@@ -521,6 +521,7 @@ struct ConstructModeView: View {
                 ForEach(state.constructFolds) { spec in
                     foldRow(spec)
                 }
+                bendSummary
             }
             // Which side stays flat vs folds — shown for the selected fold, with a
             // one-click Flip. (Ground tool can also click the base face directly.)
@@ -608,6 +609,25 @@ struct ConstructModeView: View {
         switch m { case "face": return "face"; case "edge": return "edge"; default: return "piece" }
     }
 
+    // Bend-allowance summary for the whole assembly (Phase 1). Only shown once
+    // something is actually folded; the per-fold numbers live in `foldRow`.
+    @ViewBuilder private var bendSummary: some View {
+        if state.constructFolds.contains(where: { abs($0.angleDeg) > 0.5 }) {
+            Divider().background(Color.border_subtle).padding(.vertical, 2)
+            readoutRow("Bend allowance", String(format: "%.1f mm", state.constructTotalBendAllowance))
+            readoutRow("Flat blank deduction", String(format: "−%.1f mm", state.constructTotalBendDeduction))
+            readoutRow("Min bend radius", String(format: "%.1f mm", state.constructMinBendRadiusMm))
+            let tight = state.constructTightFolds.count
+            if tight > 0 {
+                let mat = state.constructLeather?.name ?? "this leather"
+                Label("\(tight) fold\(tight == 1 ? "" : "s") tighter than \(mat) allows — grain may crack",
+                      systemImage: "exclamationmark.triangle.fill")
+                    .font(PlasticityFont.label).foregroundColor(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
     private func foldRow(_ spec: FoldSpec) -> some View {
         let selected = state.selectedFoldId == spec.id
         return VStack(alignment: .leading, spacing: 2) {
@@ -643,6 +663,21 @@ struct ConstructModeView: View {
                     .font(PlasticityFont.label).foregroundColor(.text_secondary)
             }
             .help("Fold roundness — 0 = sharp crease, 1 = rounded")
+            // Bend allowance for this fold (sheet-metal: BA = θ·(R + K·T)), plus a
+            // soft warning when the fold is tighter than the leather can take.
+            if abs(spec.angleDeg) > 0.5 {
+                HStack(spacing: 6) {
+                    Text(String(format: "Bend allowance %.1f mm", state.constructBendAllowance(spec)))
+                        .font(PlasticityFont.label.monospacedDigit())
+                        .foregroundColor(.text_secondary.opacity(0.8))
+                    if !state.constructFoldRadiusOK(spec) {
+                        Spacer(minLength: 4)
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 9)).foregroundColor(.orange)
+                            .help("Inside radius is tighter than this leather's minimum bend radius — the grain may crack. Round the fold or skive the bend.")
+                    }
+                }
+            }
         }
         .padding(6)
         .background(selected ? Color.bg_selected : Color.clear)
@@ -814,6 +849,23 @@ struct ConstructModeView: View {
     private var materialSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             sectionHeader("Material")
+
+            // Physical leather — sets thickness, tint, and the bend-allowance
+            // properties (temper, K-factor, min bend radius). Thickness + tint
+            // below stay overridable afterwards.
+            Picker(selection: Binding<String>(
+                get: { state.constructMaterialId ?? "" },
+                set: { id in if let m = LeatherStore.shared.material(id: id) { state.selectConstructMaterial(m) } })) {
+                Text("Choose leather…").tag("")
+                ForEach(LeatherStore.shared.all) { m in Text(m.name).tag(m.id) }
+            } label: { EmptyView() }
+            .pickerStyle(.menu).controlSize(.small).labelsHidden()
+            if let m = state.constructLeather {
+                Text(m.summary)
+                    .font(PlasticityFont.label).foregroundColor(.text_secondary.opacity(0.85))
+            }
+
+            Text("Tint").font(PlasticityFont.label).foregroundColor(.text_secondary).tracking(1)
             HStack(spacing: 8) {
                 ForEach(leatherSwatches, id: \.0) { hex, name in
                     Circle()

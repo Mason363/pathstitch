@@ -153,10 +153,13 @@ struct StitchSeam: Codable, Identifiable, Hashable {
     }
 }
 
-/// PBR material + thickness for the Posing & Mockup phase (Phase 4). Stored now
-/// so the `.stch` schema is stable; unused until materials land.
+/// The leather an assembly is made of: PBR look (tint / finish / texture) **and**
+/// the physical properties that drive the sheet-metal bend allowance and the
+/// fold-radius DFM (Phase 1). `materialId` links back to a `LeatherStore` entry;
+/// the physical scalars are cached alongside it so a saved assembly stays
+/// self-contained even if that library entry is later edited or removed.
 struct MaterialRef: Codable, Hashable {
-    var source: String = "polyhaven"  // "polyhaven" | "bundled" | "custom"
+    var source: String = "polyhaven"  // "polyhaven" | "bundled" | "custom" | "leather"
     var id: String = ""               // PolyHaven slug or bundled name
     var thicknessMm: Double = 2.0
     var colorHex: String = "8A5A2B"   // leather tint
@@ -164,6 +167,13 @@ struct MaterialRef: Codable, Hashable {
     var finish: String? = nil         // "matte" | "satin" | "glossy"
     var leatherTextureURL: String? = nil  // custom albedo data URL (visual only)
     var leatherTiling: Double? = nil  // repeats per panel for the custom texture
+    // Physical leather (Phase 1) — all optional so older `.stch` files decode
+    // untouched and fall back to the defaults.
+    var materialId: String? = nil     // LeatherStore id this was picked from
+    var temper: String? = nil         // firm | medium | soft
+    var thicknessOz: Double? = nil    // weight in ounces (display)
+    var kFactor: Double? = nil        // neutral-axis K-factor for bend allowance
+    var minBendRadiusMm: Double? = nil // fold-radius DFM threshold
 }
 
 /// Everything needed to reopen an assembly exactly as posed. Optional in the
@@ -221,6 +231,13 @@ struct ConstructUndoState {
     var userFolds: [ConstructUserFold]
     var materialHex: String
     var thicknessMm: Double
+    // Physical leather (Phase 1) — restored on undo so bend allowance / validation
+    // track a material change.
+    var materialId: String?
+    var temper: String
+    var thicknessOz: Double
+    var kFactor: Double
+    var minBendRadiusMm: Double
     var decals: [Int: String]
     var decalXforms: [Int: [Double]]
     var includeHandles: Set<String>
