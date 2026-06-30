@@ -354,6 +354,10 @@ struct PathstitchApp: App {
             CommandMenu("Manufacturing") {
                 Button("Bill of Materials & Validate") { NSApp.activeAppState?.runManufactureReport() }
                 Button("Nest on Hide (cutting-mat size)") { NSApp.activeAppState?.nestOnHide() }
+                Divider()
+                // Phase 4 scripting API: drop *.py plugins here; the worker's
+                // `plugins` module picks them up.
+                Button("Open Plugins Folder…") { NSApp.activeAppState?.openPluginsFolder() }
             }
 
             // View ▸ Zoom controls. The 2D canvas owns the view size, so these

@@ -5873,6 +5873,17 @@ class AppState {
         }
     }
 
+    /// Opens (creating if needed) the user plugins folder where `*.py` scripts that
+    /// expose an `OPERATIONS` dict are picked up by the worker's `plugins` module
+    /// (Phase 4 scripting API). Mirrors `plugins.plugins_dir()` on the Python side.
+    func openPluginsFolder() {
+        guard let base = FileManager.default.urls(for: .applicationSupportDirectory,
+                                                  in: .userDomainMask).first else { return }
+        let dir = base.appendingPathComponent("Pathstitch/plugins", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(dir)
+    }
+
     /// Insert a fold-up net (Phase 2 assembly template): stamp panel outline(s) +
     /// fold lines so switching to Construct mode folds the blank into the object.
     func insertNet(_ name: String, panels: [[[Double]]], folds: [[[Double]]]) {

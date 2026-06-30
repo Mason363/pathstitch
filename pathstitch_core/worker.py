@@ -48,6 +48,13 @@ def _get_operations(module):
         from pathstitch_core import manufacture_ops
         _MODULES[module] = manufacture_ops.OPERATIONS
         return _MODULES[module]
+    if module == "plugins":
+        # User plugins (Phase 4): NOT cached, so a freshly dropped *.py is picked up
+        # without restarting the worker. Built-in `list` + discovered user ops.
+        from pathstitch_core import plugins
+        merged = dict(plugins.OPERATIONS)
+        merged.update(plugins.load_operations())
+        return merged
     return None
 
 

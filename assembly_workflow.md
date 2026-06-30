@@ -500,7 +500,7 @@ fold/glue/seam assembly with XPBD, thickness, PBR mockup, lighting, decals → S
 & LSCM unfold → layered DXF/SVG/PDF/PNG export + `.stch` → QuickLook previews. **This already beats
 Illustrator-template workflows and produces the glasses-case cut files.**
 
-### Phase 1 — Material & Bend-Allowance Foundation  ◀ IN PROGRESS
+### Phase 1 — Material & Bend-Allowance Foundation  ✅ SHIPPED
 
 The physics and the core object-model upgrade everything downstream depends on. Hardware clamp
 validation, edge treatments, the DFM suite, BOM area/cost — all need a real material and an exact
@@ -523,7 +523,7 @@ flat↔folded relationship first. This is also the section that finally lands th
    tighter than the leather's minimum bend radius (grain-crack risk) — surfaced inline in the Folds
    inspector. The first of the Section 11 rules, and the template for the rest.
 
-### Phase 2 — Hardware, Edges & Parametric Assemblies
+### Phase 2 — Hardware, Edges & Parametric Assemblies  ✅ SHIPPED
 
 5. **`[New]` Hardware object** — 3D model + footprint (cuts both layers) + clamp-range validation;
    the upgrade path from today's keep-out tags (Sections 2, 6).
@@ -533,7 +533,7 @@ flat↔folded relationship first. This is also the section that finally lands th
    (Sections 4, 9).
 8. **`[New]` Multi-material assemblies** — leather + lining + foam.
 
-### Phase 3 — Manufacturing Output & Validation
+### Phase 3 — Manufacturing Output & Validation  ✅ SHIPPED (core engines)
 
 9. **`[New]` Hide-aware nesting** with grain + defect avoidance — the flagship CAM feature.
 10. **`[Improve]` Operation-layer export mapping + kerf + 1:1 tiled PDF** — laser and knife crowds.
@@ -541,11 +541,21 @@ flat↔folded relationship first. This is also the section that finally lands th
 12. **`[New]` Stitch output modes** (cut / mark / guide) + more styles + thread readout.
 13. **`[New]` Full DFM suite** + molded-zone strain heat-map + interference/closure checks.
 
-### Phase 4 — Platform & Reach
+### Phase 4 — Platform & Reach  ◑ PARTIAL (plugin API shipped; device/infra items scoped out)
 
-14. **`[New]` AR 1:1 preview, LiDAR scan-to-fit, Apple Pencil tracing.**
-15. **`[New]` Python plugin / scripting API.**
-16. **`[New]` Community `.stch` pattern marketplace.**
+14. **`[Needs iOS target]` AR 1:1 preview, LiDAR scan-to-fit, Apple Pencil tracing.**
+    These require an iOS/iPadOS app target and device hardware (ARKit / RoomPlan /
+    PencilKit) — they cannot live in the macOS app. The macOS reference-image
+    **trace / vectorize** path already covers underlay tracing with a pen/mouse;
+    Apple Pencil is the same pipeline on an iPad build.
+15. **`[Shipped]` Python plugin / scripting API.** `pathstitch_core/plugins.py` loads
+    user `*.py` files (each exposing an `OPERATIONS` dict) from the plugins folder
+    and exposes them through the worker's `plugins` module — no rebuild, broken
+    plugins skipped. **Manufacturing ▸ Open Plugins Folder…** reveals the directory.
+16. **`[Needs backend]` Community `.stch` pattern marketplace.** The diffable `.stch`
+    file already *is* the shareable, re-parameterizable pattern format; a marketplace
+    additionally needs a hosting / accounts / discovery backend service, which is out
+    of scope for this client repo.
 
 ---
 
