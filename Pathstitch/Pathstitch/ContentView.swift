@@ -247,12 +247,12 @@ struct ContentView: View {
     @State private var rotationAngle: Double = 90.0
     @State private var leftSidebarTopHeight: CGFloat = 350
     // Resizable panel widths (MAS-131). Right inspector drag-resizes; left tool
-    // sidebar widens in whole-column steps. The minimum matches the decluttered-
-    // shell reference width (380pt card + the 6pt resize grabber) so the tool
-    // options — segmented controls, summaries, the Default badge — never clip;
-    // the user can still drag wider.
-    static let rightPanelMinWidth: CGFloat = 386
-    @State private var rightPanelWidth: CGFloat = ContentView.rightPanelMinWidth
+    // sidebar widens in whole-column steps. The tool-option rows reflow (controls
+    // drop under their label, segmented controls shrink, preset chips scroll), so
+    // the panel can collapse to roughly half the reference width without clipping;
+    // the user can still drag it much wider.
+    static let rightPanelMinWidth: CGFloat = 186
+    @State private var rightPanelWidth: CGFloat = 210
     @State private var leftToolbarWidth: CGFloat = 48
     // Active-tool option panels are always fully expanded — no collapse chevron
     // or sub-menu feel (MAS-60). Their options render directly in the panel.
@@ -939,7 +939,7 @@ extension ContentView {
                 VStack(alignment: .leading, spacing: 8) {
                     TOLabel("Offset mode")
                     TOSegmented(options: [("curve", "Curve"), ("bbox", "BBox")], selection: $offsetMode)
-                        .frame(width: 150)
+                        .frame(maxWidth: 150)
                 }
                 if offsetMode == "curve" {
                     TORow(label: "Offset distance (mm)") {
@@ -1106,9 +1106,9 @@ extension ContentView {
             TOSegmented(options: [("ends", "Spread"), ("fill", "From start"), ("even", "Centered")],
                         selection: $state.holeEndMode)
         }
-        TORow(label: "Margin unit") {
+        VStack(alignment: .leading, spacing: 8) {
+            TOLabel("Margin unit")
             TOSegmented(options: [("mm", "mm"), ("pitch", "× pitch")], selection: $state.holeInsetUnit)
-                .frame(width: 130)
         }
         if state.holeInsetLinked {
             TORow(label: "Margin (\(state.holeInsetUnitLabel))") {
@@ -1262,10 +1262,10 @@ extension ContentView {
                 }
             })
 
-        TORow(label: "Distribution") {
+        VStack(alignment: .leading, spacing: 8) {
+            TOLabel("Distribution")
             TOSegmented(options: [("spacing", "Fill"), ("count", "Count")],
                         selection: $state.holeDistribution)
-                .frame(width: 150)
         }
         if state.holeDistribution == "count" {
             TORow(label: "Hole count") {
@@ -1276,10 +1276,10 @@ extension ContentView {
             TOSlider(value: spacingSlider, range: 1...20, unit: "mm",
                      minLabel: "1", maxLabel: "20", maxFrac: 1)
         }
-        TORow(label: "Pattern style") {
+        VStack(alignment: .leading, spacing: 8) {
+            TOLabel("Pattern style")
             TOSegmented(options: [("single", "Single"), ("saddle", "Saddle")],
                         selection: $state.holePattern)
-                .frame(width: 150)
         }
         if state.holePattern == "saddle" {
             TORow(label: "Saddle row distance") {
@@ -1356,18 +1356,16 @@ extension ContentView {
                 TextField("Clearance", value: $state.holeAvoidanceRadius, format: .number)
                     .toFieldStyle(width: 64)
             }
+            TOLabel("Tagged: \(state.sewingKeepoutHandles.count)", color: .to_textTer)
             HStack(spacing: 8) {
-                TOLabel("Tagged: \(state.sewingKeepoutHandles.count)", color: .to_textTer)
-                Spacer(minLength: 8)
                 TOSecondaryButton(title: "Tag selected", enabled: !state.selectedHandles.isEmpty) {
                     state.sewingKeepoutHandles.formUnion(state.selectedHandles)
                 }
-                .frame(width: 110)
                 if !state.sewingKeepoutHandles.isEmpty {
                     TOSecondaryButton(title: "Clear", tint: .to_textMut) {
                         state.sewingKeepoutHandles.removeAll()
                     }
-                    .frame(width: 64)
+                    .frame(width: 72)
                 }
             }
         }
@@ -1408,7 +1406,7 @@ extension ContentView {
                 VStack(alignment: .leading, spacing: 8) {
                     TOLabel("Continuity")
                     TOSegmented(options: [("G1", "G1"), ("G2", "G2")], selection: $state.filletContinuity)
-                        .frame(width: 150)
+                        .frame(maxWidth: 150)
                 }
             }
 
@@ -1465,7 +1463,7 @@ extension ContentView {
             VStack(alignment: .leading, spacing: 8) {
                 TOLabel("Side")
                 TOSegmented(options: [("left", "Left"), ("right", "Right")], selection: $state.glueTabSide)
-                    .frame(width: 150)
+                    .frame(maxWidth: 150)
             }
             TORow(label: "Start offset (mm)") {
                 TextField("Start", value: $state.glueTabStartOffset, format: .number).toFieldStyle(width: 80)
@@ -3040,7 +3038,7 @@ extension ContentView {
                 VStack(alignment: .leading, spacing: 8) {
                     TOLabel("Coil")
                     TOSegmented(options: [("ccw", "CCW"), ("cw", "CW")], selection: $state.goldenHandedness)
-                        .frame(width: 130)
+                        .frame(maxWidth: 130)
                 }
                 TORow(label: "Turns") {
                     TOStepper(value: $state.goldenTurns, unit: "", step: 0.5, range: 0.5...8.0, maxFrac: 1)

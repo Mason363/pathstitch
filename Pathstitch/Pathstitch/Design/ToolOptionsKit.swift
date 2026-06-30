@@ -79,6 +79,8 @@ struct TOToolTitle: View {
                     .tracking(1.05)
                     .foregroundColor(Color.to_textPri)
                     .textCase(.uppercase)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
                 Spacer(minLength: 6)
                 if help != nil {
                     Button { withAnimation(.easeInOut(duration: 0.15)) { helpOpen.toggle() } } label: {
@@ -212,7 +214,9 @@ struct TOSection<Content: View>: View {
                         .tracking(1.0)
                         .textCase(.uppercase)
                         .foregroundColor(Color.to_textTer)
-                        .fixedSize()
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                        .layoutPriority(1)
                     if isDefault { TODefaultBadge() }
                     Spacer(minLength: 8)
                     // The summary hides while a "Default" section is open — the live
@@ -291,15 +295,23 @@ struct TOGroupLabel: View {
     }
 }
 
-/// label · spacer · trailing control row.
+/// label · spacer · trailing control row. Adaptive: when the label and control
+/// don't both fit on one line (a narrow panel), the control drops below the
+/// label instead of clipping.
 struct TORow<Trailing: View>: View {
     let label: String
     @ViewBuilder var trailing: () -> Trailing
     var body: some View {
-        HStack(spacing: 14) {
-            TOLabel(label)
-            Spacer(minLength: 8)
-            trailing()
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 12) {
+                TOLabel(label).fixedSize(horizontal: true, vertical: false)
+                Spacer(minLength: 10)
+                trailing()
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                TOLabel(label)
+                trailing()
+            }
         }
     }
 }
@@ -415,6 +427,9 @@ struct TOSegmented<T: Hashable>: View {
         .padding(3)
         .background(RoundedRectangle(cornerRadius: 9).fill(Color.to_card))
         .overlay(RoundedRectangle(cornerRadius: 9).stroke(Color.to_trackBorder, lineWidth: 1))
+        // Fills its container up to a cap, so it stays compact on a wide panel and
+        // simply shrinks (never clips) on a narrow one.
+        .frame(maxWidth: 240)
     }
 }
 
@@ -536,19 +551,21 @@ struct TOSelect<T: Hashable>: View {
                 Text(currentLabel)
                     .font(.system(size: 13, weight: .medium))
                     .foregroundColor(Color.to_textPri)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
                 Image(systemName: "chevron.down")
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundColor(Color.to_textTer)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
+            .frame(maxWidth: 220)
             .background(RoundedRectangle(cornerRadius: 8).fill(Color.to_field))
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.to_fieldBorder, lineWidth: 1))
             .contentShape(Rectangle())
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
-        .fixedSize()
     }
 }
 
@@ -607,28 +624,32 @@ struct TOPresetChips: View {
     var onPick: ((Double) -> Void)? = nil
 
     var body: some View {
-        HStack(spacing: 6) {
-            ForEach(values, id: \.self) { v in
-                let active = abs(value - v) < 1e-6
-                Button {
-                    value = v
-                    onPick?(v)
-                } label: {
-                    Text(toNum(v, maxFrac: maxFrac) + unit)
-                        .font(.system(size: 11, weight: .semibold))
-                        .monospacedDigit()
-                        .foregroundColor(active ? .white : Color.to_textTer)
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 5)
-                        .background(RoundedRectangle(cornerRadius: 7)
-                            .fill(active ? Color.to_accent : Color.to_field))
-                        .overlay(RoundedRectangle(cornerRadius: 7)
-                            .stroke(active ? Color.to_accent : Color.to_fieldBorder, lineWidth: 1))
-                        .contentShape(Rectangle())
+        // Scrolls horizontally if the chips don't fit, so a narrow panel never
+        // clips them.
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(values, id: \.self) { v in
+                    let active = abs(value - v) < 1e-6
+                    Button {
+                        value = v
+                        onPick?(v)
+                    } label: {
+                        Text(toNum(v, maxFrac: maxFrac) + unit)
+                            .font(.system(size: 11, weight: .semibold))
+                            .monospacedDigit()
+                            .foregroundColor(active ? .white : Color.to_textTer)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 5)
+                            .background(RoundedRectangle(cornerRadius: 7)
+                                .fill(active ? Color.to_accent : Color.to_field))
+                            .overlay(RoundedRectangle(cornerRadius: 7)
+                                .stroke(active ? Color.to_accent : Color.to_fieldBorder, lineWidth: 1))
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
             }
-            Spacer(minLength: 0)
+            .padding(.vertical, 1)
         }
     }
 }
@@ -684,6 +705,8 @@ struct TOPrimaryButton: View {
         Button(action: action) {
             Text(title)
                 .font(.system(size: 14, weight: .semibold))
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
                 .foregroundColor(.white)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 13)
@@ -709,6 +732,7 @@ struct TOSecondaryButton: View {
             HStack(spacing: 6) {
                 if let icon { Image(systemName: icon).font(.system(size: 11, weight: .semibold)) }
                 Text(title).font(.system(size: 12.5, weight: .semibold))
+                    .lineLimit(1).minimumScaleFactor(0.8)
             }
             .foregroundColor(enabled ? tint : Color.to_textMut)
             .frame(maxWidth: .infinity)
