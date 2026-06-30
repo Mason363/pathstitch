@@ -7,7 +7,7 @@ Run from repo root with the pathstitch env:
 import math
 import tempfile
 import ezdxf
-from shapely.geometry import LinearRing, Point
+from shapely.geometry import LinearRing, LineString, Point
 
 from pathstitch_core.dxf_ops import op_add_holes
 
@@ -219,6 +219,46 @@ def test_end_modes():
           f"even margins {even[0]:.1f}/{95.0 - even[-1]:.1f}")
 
 
+def test_segment_override():
+    """Clicking ONE edge of a single shape places holes on only that edge, not the
+    whole outline (the single-polyline case)."""
+    out = tempfile.NamedTemporaryFile(suffix=".dxf", delete=False); out.close()
+    doc, h = _square_doc(side=100.0)   # closed square (0,0)-(100,0)-(100,100)-(0,100)
+    path = _save(doc)
+    # Pretend the user clicked the bottom edge (0,0)->(100,0).
+    holes = _run(h, path, out.name, hole_spacing=10.0, side="left",
+                 segment_override=[[0.0, 0.0], [100.0, 0.0]],
+                 enable_proximity_filter=False, enable_line_proximity_filter=False)
+    assert len(holes) > 3, f"too few holes on the clicked edge: {len(holes)}"
+    for x, y in holes:
+        assert -1.0 <= x <= 101.0, f"hole ran off the clicked edge in x: {x:.1f}"
+        # On the bottom edge only: y stays near 0 (± offset). A hole on any other
+        # side would show y up near 100, which this catches.
+        assert abs(y) <= 3.0 + 1.5, f"hole landed off the clicked edge (y={y:.1f})"
+    print(f"Segment override OK: {len(holes)} holes on the clicked edge only")
+
+
+def test_segment_multi_corner():
+    """Two clicked adjacent edges merge so the stitch lines miter at their shared
+    corner (a hole near the corner, nothing on the far edges)."""
+    out = tempfile.NamedTemporaryFile(suffix=".dxf", delete=False); out.close()
+    doc, h = _square_doc(side=100.0)   # (0,0)-(100,0)-(100,100)-(0,100) closed
+    path = _save(doc)
+    # Click the bottom edge and the right edge: they share the corner (100,0).
+    holes = _run(h, path, out.name, hole_spacing=10.0, side="left", corner_holes=True,
+                 segment_overrides=[[[0.0, 0.0], [100.0, 0.0]],
+                                    [[100.0, 0.0], [100.0, 100.0]]],
+                 enable_proximity_filter=False, enable_line_proximity_filter=False)
+    assert len(holes) > 6, f"too few holes on the two edges: {len(holes)}"
+    lpath = LineString([(0, 0), (100, 0), (100, 100)])   # the selected L
+    for x, y in holes:
+        assert lpath.distance(Point(x, y)) <= 3.0 + 1.6, \
+            f"hole off the two selected edges (would be on the far side): ({x:.1f},{y:.1f})"
+    assert min(math.hypot(x - 100.0, y) for x, y in holes) < 6.0, \
+        "no hole near the shared corner (edges didn't miter)"
+    print(f"Segment multi-corner OK: {len(holes)} holes mitered across the corner")
+
+
 def test_concave_in_band_even():
     """An L-shaped (concave) contour must keep holes in the offset band and evenly
     spaced — the old side-flip/scatter bug hit concave shapes hardest."""
@@ -363,6 +403,8 @@ def run():
     test_saddle_rows()
     test_open_path_even()
     test_end_modes()
+    test_segment_override()
+    test_segment_multi_corner()
     test_iron_shapes_emit_closed_paths()
     test_iron_oval_is_ellipse()
     test_iron_slit_orientation()

@@ -602,13 +602,13 @@ struct TitleBarView: View {
                         .buttonStyle(PlainButtonStyle())
                         .help(state.snapEnabled ? "Snapping: On" : "Snapping: Off")
 
-                        Button(action: { state.chainSelectionEnabled.toggle() }) {
-                            Image(systemName: state.chainSelectionEnabled ? "link.circle.fill" : "link.circle")
-                                .foregroundColor(state.chainSelectionEnabled ? Color.accent : Color.text_secondary)
+                        Button(action: { state.toggleChainSelection() }) {
+                            Image(systemName: state.effectiveChainSelection ? "link.circle.fill" : "link.circle")
+                                .foregroundColor(state.effectiveChainSelection ? Color.accent : Color.text_secondary)
                                 .font(.system(size: 11))
                         }
                         .buttonStyle(PlainButtonStyle())
-                        .help(state.chainSelectionEnabled ? "Chain Selection: On" : "Chain Selection: Off")
+                        .help(state.effectiveChainSelection ? "Chain Selection: On" : "Chain Selection: Off")
 
                         Button(action: { state.gridVisible.toggle() }) {
                             Image(systemName: state.gridVisible ? "grid" : "grid.circle")

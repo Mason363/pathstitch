@@ -385,6 +385,7 @@ struct ContentView: View {
         .onChange(of: state.holeRowSpacing) { _ in state.updateLivePreview() }
         .onChange(of: state.holeSaddleSpacing) { _ in state.updateLivePreview() }
         .onChange(of: state.chainSelectionEnabled) { _ in state.updateLivePreview() }
+        .onChange(of: state.sewingChainSelection) { _ in state.updateLivePreview() }
         .onChange(of: state.holeStartInset) { _ in state.updateLivePreview() }
         .onChange(of: state.holeEndInset) { _ in state.updateLivePreview() }
         .onChange(of: state.holeEndMode) { _ in state.updateLivePreview() }
@@ -1087,6 +1088,8 @@ extension ContentView {
                                 if state.addThicknessWidth > 0 { state.addThickness(exitAfterApply: true) }
                             }
 
+                        quickValues([2, 3, 4, 5, 6], $state.addThicknessWidth, unit: " mm")
+
                         HStack(spacing: 8) {
                             Button("OK") {
                                 state.addThickness(exitAfterApply: true)
@@ -1143,7 +1146,9 @@ extension ContentView {
                                 .onSubmit {
                                     if !state.selectedHandles.isEmpty { state.applyOffset(exitAfterApply: true) }
                                 }
-                            
+
+                            quickValues([2, 3, 4, 5, 6], $state.offsetDistance, unit: " mm")
+
                             Text("Side")
                                 .font(PlasticityFont.label)
                                 .foregroundColor(Color.text_secondary)
@@ -1246,7 +1251,9 @@ extension ContentView {
                             .font(PlasticityFont.body)
                             .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
                             .help("Endpoint distance tolerance gap in millimeters to join segments")
-                        
+
+                        quickValues([0.1, 0.25, 0.5, 1.0], $state.cleanupTolerance, unit: " mm")
+
                         Button("Apply Join/Cleanup") {
                             state.applyCleanup()
                         }
@@ -1547,7 +1554,7 @@ extension ContentView {
                 Text("Margin (\(state.holeInsetUnitLabel))")
                     .font(PlasticityFont.label).foregroundColor(Color.text_primary)
                 Spacer()
-                TextField("Margin", value: bothMargin, format: .number)
+                TextField("Margin", value: bothMargin, format: .number.precision(.fractionLength(0...2)))
                     .frame(width: 60).textFieldStyle(.roundedBorder)
             }
             .help("How far the first AND last holes sit in from each tip of the line.")
@@ -1562,7 +1569,7 @@ extension ContentView {
                 Text("Start (\(state.holeInsetUnitLabel))")
                     .font(PlasticityFont.label).foregroundColor(Color.text_primary)
                 Spacer()
-                TextField("Start", value: startMargin, format: .number)
+                TextField("Start", value: startMargin, format: .number.precision(.fractionLength(0...2)))
                     .frame(width: 60).textFieldStyle(.roundedBorder)
             }
             .help("How far the FIRST hole sits in from the line's start point.")
@@ -1570,7 +1577,7 @@ extension ContentView {
                 Text("End (\(state.holeInsetUnitLabel))")
                     .font(PlasticityFont.label).foregroundColor(Color.text_primary)
                 Spacer()
-                TextField("End", value: endMargin, format: .number)
+                TextField("End", value: endMargin, format: .number.precision(.fractionLength(0...2)))
                     .frame(width: 60).textFieldStyle(.roundedBorder)
             }
             .help("How far the LAST hole sits in from the line's end point.")
@@ -1595,15 +1602,41 @@ extension ContentView {
                     Spacer()
                 }
 
+                if state.currentTool == .addHoles {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(alignment: .top, spacing: 6) {
+                            Image(systemName: state.sewingChainSelection ? "link" : "hand.tap")
+                                .font(.system(size: 11)).foregroundColor(Color.accent)
+                            Text(state.sewingChainSelection
+                                 ? "Whole-outline mode. Click a shape to stitch its entire outline; link button (A) toggles per-edge."
+                                 : "Click an edge to stitch it. Click more to add (they miter at corners); click again to remove. Link button (A) = whole outline.")
+                                .font(PlasticityFont.label)
+                                .foregroundColor(Color.text_secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Spacer(minLength: 0)
+                        }
+                        if !state.sewingChainSelection && !state.sewingEdges.isEmpty {
+                            Text("\(state.sewingEdges.count) edge\(state.sewingEdges.count == 1 ? "" : "s") selected")
+                                .font(PlasticityFont.label).fontWeight(.semibold)
+                                .foregroundColor(Color.accent)
+                        }
+                    }
+                    .padding(7)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(RoundedRectangle(cornerRadius: 4).fill(Color.accent.opacity(0.08)))
+                    .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.accent.opacity(0.25), lineWidth: 1))
+                }
+
                 prickingIronPicker
 
                 VStack(alignment: .leading, spacing: 8) {
+                        holesSubheader("BASICS")
                         HStack {
                             Text("Offset Distance (mm)")
                                 .font(PlasticityFont.label)
                                 .foregroundColor(Color.text_primary)
                             Spacer()
-                            TextField("Offset", value: $state.holeOffsetDistance, format: .number)
+                            TextField("Offset", value: $state.holeOffsetDistance, format: .number.precision(.fractionLength(0...2)))
                                 .textFieldStyle(PlainTextFieldStyle())
                                 .padding(4)
                                 .frame(width: 80)
@@ -1630,6 +1663,7 @@ extension ContentView {
                                 .help("Diameter of each sewing hole in millimeters")
                         }
                         
+                        holesSubheader("SPACING & PATTERN")
                         HStack {
                             Text("Distribution")
                                 .font(PlasticityFont.label)
@@ -1713,7 +1747,7 @@ extension ContentView {
                                 }
                                 HStack {
                                     Spacer()
-                                    TextField("", value: spacingSlider, format: .number)
+                                    TextField("", value: spacingSlider, format: .number.precision(.fractionLength(0...1)))
                                         .textFieldStyle(PlainTextFieldStyle())
                                         .multilineTextAlignment(.center)
                                         .padding(4)
@@ -1747,13 +1781,14 @@ extension ContentView {
                             .help("Choose between a single row or double-row saddle stitch hole pattern")
                         }
                         
+                        holesSubheader("CORNERS & ENDS")
                         Toggle("Hole at Corners", isOn: $state.holeCornerHoles)
                             .toggleStyle(.checkbox)
                             .font(PlasticityFont.label)
                             .foregroundColor(Color.text_primary)
                             .help("Place a stitch on — or as near as possible to — every corner sharper than ~45°, flexing the spacing between holes so one lands on each corner. On by default.")
 
-                        if !state.chainSelectionEnabled {
+                        if !state.sewingChainSelection {
                             holeSingleLineControls
                         }
 
@@ -1848,11 +1883,13 @@ extension ContentView {
                             .padding(.leading, 8)
                         }
                         
+                        DisclosureGroup {
                         Toggle("Proximity Filter", isOn: $state.holeEnableProximityFilter)
                             .toggleStyle(.checkbox)
                             .font(PlasticityFont.label)
                             .foregroundColor(Color.text_primary)
                             .help("Filter out generated holes that are too close to other canvas paths")
+                            .padding(.top, 4)
                         
                         if state.holeEnableProximityFilter {
                             HStack {
@@ -1938,6 +1975,10 @@ extension ContentView {
                             }
                             .padding(.leading, 8)
                         }
+                        } label: {
+                            holesSubheader("FILTERS & KEEP-OUT")
+                        }
+                        .tint(Color.accent)
 
                         // NOTE: the "Apply Sewing Holes" action is rendered as a
                         // pinned footer (holesApplyFooter) below the scrolling
@@ -2034,6 +2075,12 @@ extension ContentView {
                 .font(PlasticityFont.body)
                 .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
                 .onSubmit { state.setActiveCornerValue(state.filletToolRadius) }
+
+            quickValues([2, 3, 5, 8, 10],
+                        Binding(get: { state.filletToolRadius },
+                                set: { state.filletToolRadius = $0 }),
+                        unit: " mm",
+                        onPick: { if activeCorners > 0 { state.setActiveCornerValue($0) } })
 
             Text(activeCorners == 0
                  ? "Select a shape (or click its corners) to \(isChamfer ? "chamfer" : "fillet")."
@@ -3644,6 +3691,16 @@ extension ContentView {
         }
     }
 
+    /// Small grouped sub-section header used inside the Sewing-Holes panel to break
+    /// the long option list into scannable groups.
+    private func holesSubheader(_ title: String) -> some View {
+        Text(title)
+            .font(PlasticityFont.label).fontWeight(.bold)
+            .foregroundColor(Color.text_secondary)
+            .tracking(0.6)
+            .padding(.top, 2)
+    }
+
     private func numberField(_ label: String, _ binding: Binding<Double>) -> some View {
         HStack {
             Text(label).font(PlasticityFont.label).foregroundColor(Color.text_primary)
@@ -3653,6 +3710,34 @@ extension ContentView {
                 .background(Color.bg_input).cornerRadius(4)
                 .foregroundColor(Color.text_primary)
                 .overlay(RoundedRectangle(cornerRadius: 4).stroke(Color.border_strong, lineWidth: 1))
+        }
+    }
+
+    /// A row of one-tap preset chips that set a Double binding — common leathercraft
+    /// values so the user rarely has to type. The chip matching the current value is
+    /// highlighted. `onPick` runs after the binding is set (e.g. to apply live).
+    private func quickValues(_ values: [Double], _ binding: Binding<Double>,
+                             unit: String = "", format: String = "%g",
+                             onPick: ((Double) -> Void)? = nil) -> some View {
+        HStack(spacing: 4) {
+            ForEach(values, id: \.self) { v in
+                let active = abs(binding.wrappedValue - v) < 1e-6
+                Button {
+                    binding.wrappedValue = v
+                    onPick?(v)
+                } label: {
+                    Text(String(format: format, v) + unit)
+                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .foregroundColor(active ? Color.accent : Color.text_secondary)
+                        .padding(.horizontal, 7).padding(.vertical, 3)
+                        .background(RoundedRectangle(cornerRadius: 4)
+                            .fill(active ? Color.accent.opacity(0.18) : Color.bg_input))
+                        .overlay(RoundedRectangle(cornerRadius: 4)
+                            .stroke(active ? Color.accent.opacity(0.5) : Color.border_strong, lineWidth: 1))
+                }
+                .buttonStyle(PlainButtonStyle())
+            }
+            Spacer(minLength: 0)
         }
     }
 
@@ -3732,6 +3817,8 @@ extension ContentView {
             Stepper("Segments: \(state.mandalaSegments)", value: $state.mandalaSegments, in: 2...64)
                 .font(PlasticityFont.label)
             Toggle("Mirror (dihedral)", isOn: $state.mandalaMirror).font(PlasticityFont.label)
+            Text("= \(state.mandalaSegments * (state.mandalaMirror ? 2 : 1)) copies around the origin")
+                .font(PlasticityFont.label).foregroundColor(Color.text_muted)
             Text("\(state.selectedHandles.count) seed object(s) selected")
                 .font(.system(size: 9)).foregroundColor(Color.text_secondary)
             toolButtons(ok: "Bake") { state.applyMandala(exitAfterApply: true) }
@@ -3747,6 +3834,7 @@ extension ContentView {
             Text("\(state.selectedHandles.count) selected")
                 .font(.system(size: 9)).foregroundColor(Color.text_secondary)
             numberField("Finger width (mm)", $state.boxJointFingerWidth)
+            quickValues([4, 6, 8, 10, 12], $state.boxJointFingerWidth, unit: " mm")
             numberField("Depth (mm)", $state.boxJointDepth)
             numberField("Kerf (mm)", $state.boxJointKerf)
             Toggle("Generate mating edge", isOn: $state.boxJointMate).font(PlasticityFont.label)
@@ -3818,6 +3906,7 @@ extension ContentView {
                 }.labelsHidden().frame(width: 150)
             }
             numberField("Thickness (mm)", $state.jigThickness)
+            quickValues([3, 5, 8, 10, 15], $state.jigThickness, unit: " mm")
             Text("\(state.selectedHandles.count) region(s) selected")
                 .font(.system(size: 9)).foregroundColor(Color.text_secondary)
 
@@ -3955,6 +4044,21 @@ extension ContentView {
                         .frame(minWidth: 24)
                 }
             }
+            // One-tap common polygons (triangle … octagon) — faster than stepping.
+            HStack(spacing: 4) {
+                ForEach([3, 4, 5, 6, 8], id: \.self) { n in
+                    let active = state.polygonSides == n
+                    Button { state.polygonSides = n } label: {
+                        Text("\(n)")
+                            .font(.system(size: 10, weight: .medium, design: .monospaced))
+                            .foregroundColor(active ? Color.accent : Color.text_secondary)
+                            .padding(.horizontal, 7).padding(.vertical, 3)
+                            .background(RoundedRectangle(cornerRadius: 4).fill(active ? Color.accent.opacity(0.18) : Color.bg_input))
+                            .overlay(RoundedRectangle(cornerRadius: 4).stroke(active ? Color.accent.opacity(0.5) : Color.border_strong, lineWidth: 1))
+                    }.buttonStyle(PlainButtonStyle())
+                }
+                Spacer(minLength: 0)
+            }
         }
     }
 
@@ -4021,6 +4125,12 @@ extension ContentView {
                 .onSubmit {
                     state.confirmScaleAndExit()
                 }
+
+            quickValues([0.5, 0.75, 1, 1.5, 2], $state.scaleFactor, unit: "×")
+            if state.scaleFactor > 0 {
+                Text(String(format: "= %.0f%% of current size", state.scaleFactor * 100))
+                    .font(PlasticityFont.label).foregroundColor(Color.text_muted)
+            }
 
             Button("Apply Scale") {
                 state.confirmScaleAndExit()

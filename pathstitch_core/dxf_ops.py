@@ -2588,6 +2588,16 @@ def op_add_holes(args: Dict[str, Any]) -> Dict[str, Any]:
     end_mode = str(args.get("end_mode", "fill")).lower()
     if end_mode not in ("fill", "even", "ends"):
         end_mode = "fill"
+    # Edge override(s): when the user clicks one or more edges of a shape with the
+    # sewing tool, the app passes each clicked edge's endpoints here. Holes are then
+    # placed on just those edges (all the single-line spacing / inset / end_mode /
+    # side controls still apply), instead of the whole selected outline. Adjacent
+    # selected edges are merged so the stitch lines miter at their shared corner.
+    #   segment_overrides : [[[x,y],[x,y]], ...]   (preferred, multi-edge)
+    #   segment_override  : [[x,y],[x,y]]          (legacy single edge)
+    segment_overrides = args.get("segment_overrides")
+    if not segment_overrides and args.get("segment_override"):
+        segment_overrides = [args.get("segment_override")]
 
     # Pricking-iron shape (Pricking Iron Toolbox). Each stitch is emitted as a real,
     # closed cut-path oriented to the local stitch-line tangent + the iron's own
@@ -2692,6 +2702,47 @@ def op_add_holes(args: Dict[str, Any]) -> Dict[str, Any]:
         # Single-line mode: each selected line is its own path, holes only on it (no
         # snap/merge across joints), so per-end insets apply to the picked line's ends.
         paths.extend(geoms)
+
+    # Clicked edge(s) override the path entirely: place holes on just those edges. The
+    # selected entity is still loaded above (so `other_geoms` knows the surrounding
+    # shape), but the stitch line is only the picked edge(s). Connected edges are
+    # snapped + merged so adjacent ones share a corner — the offset stitch lines then
+    # miter to meet at that corner (with a corner hole) instead of overshooting.
+    if segment_overrides:
+        seg_lines: List[LineString] = []
+        for seg in segment_overrides:
+            try:
+                pts = [(float(p[0]), float(p[1])) for p in seg]
+            except (TypeError, ValueError, IndexError):
+                continue
+            if len(pts) >= 2 and math.hypot(pts[-1][0] - pts[0][0],
+                                            pts[-1][1] - pts[0][1]) > 1e-6:
+                seg_lines.append(LineString(pts))
+        if seg_lines:
+            merged = linemerge(snap_endpoints(seg_lines))
+            if isinstance(merged, MultiLineString):
+                paths = list(merged.geoms)
+            elif isinstance(merged, LineString):
+                paths = [merged]
+            else:
+                paths = seg_lines
+
+            # The selected shape's OTHER edges are not in `other_geoms` (its handle is
+            # excluded there). Add back only the edges that are FAR from the stitched
+            # path so holes near a far side of a narrow shape get filtered out — while
+            # skipping edges that touch the stitch path (the adjacent ones that share a
+            # corner), so the corner holes survive.
+            for g in geoms:
+                try:
+                    coords = list(g.coords)
+                except Exception:
+                    continue
+                for i in range(len(coords) - 1):
+                    edge = LineString([coords[i], coords[i + 1]])
+                    if edge.length < 1e-6:
+                        continue
+                    if min((edge.distance(p) for p in paths), default=1.0) > 0.05:
+                        other_geoms.append(edge)
 
     # Drop redundant near-collinear vertices before the hot loop. Arc length is
     # preserved within 0.03 mm, so hole placement is unchanged, but interpolate /

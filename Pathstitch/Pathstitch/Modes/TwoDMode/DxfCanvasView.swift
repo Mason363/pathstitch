@@ -197,10 +197,19 @@ struct DxfCanvasView: View {
                     if let coords = newCoords {
                         if let nearest = findNearestEntity(modelPt: coords, maxDistanceScreen: 12.0, size: geo.size, bounds: modelBounds) {
                             state.hoveredHandle = nearest.handle
+                            // Add Holes (per-edge): remember the edge under the cursor so
+                            // the hover highlight lights up just that line, not the shape.
+                            if state.currentTool == .addHoles && !state.sewingChainSelection,
+                               let e = nearestSewingEdge(of: nearest, near: coords) {
+                                state.hoveredSewingEdge = SewingEdge(handle: nearest.handle, index: e.index, p0: e.p0, p1: e.p1)
+                            } else {
+                                state.hoveredSewingEdge = nil
+                            }
                         } else {
                             state.hoveredHandle = nil
+                            state.hoveredSewingEdge = nil
                         }
-                        
+
                         if let nearestMeasure = findNearestMeasurement(screenPt: mouseLocation, size: geo.size, bounds: modelBounds) {
                             hoveredMeasurementId = nearestMeasure.id
                         } else {
@@ -208,6 +217,7 @@ struct DxfCanvasView: View {
                         }
                     } else {
                         state.hoveredHandle = nil
+                        state.hoveredSewingEdge = nil
                         hoveredMeasurementId = nil
                     }
                 }
@@ -937,7 +947,8 @@ struct DxfCanvasView: View {
                                 let vecX = modelPt.x - handleInfo.basePoint.x
                                 let vecY = modelPt.y - handleInfo.basePoint.y
                                 let proj = vecX * handleInfo.normal.x + vecY * handleInfo.normal.y
-                                state.holeOffsetDistance = max(0.0, abs(proj))
+                                // Snap to 0.1 mm so the field reads "3.2", not "3.198741".
+                                state.holeOffsetDistance = (max(0.0, abs(proj)) * 10).rounded() / 10
                                 // For circles / arcs / curves the perpendicular handle
                                 // direction can't be expressed as a winding-correct
                                 // left/right, so use outer/inner (grow/shrink), which
@@ -968,16 +979,35 @@ struct DxfCanvasView: View {
                     .allowsHitTesting(false)
             }
 
-            // Add Holes — START / END margin (inset) tip handles. Single-line mode
-            // only (chain-off) and only when a single open line is selected: drag the
-            // teal markers along the line to set how far the first / last holes sit in
-            // from each tip. Teal keeps them distinct from the purple offset handle.
+            // Add Holes — highlight every PICKED edge (solid teal) and the edge under
+            // the cursor (faint teal), so it's obvious which lines get holes. Per-edge
+            // mode only; the whole-entity highlight is suppressed above.
+            if state.currentTool == .addHoles, !state.sewingChainSelection {
+                ForEach(Array(state.sewingEdges.enumerated()), id: \.offset) { _, e in
+                    let a = toScreen(dx: e.p0[0], dy: e.p0[1], size: viewSize, bounds: modelBounds)
+                    let b = toScreen(dx: e.p1[0], dy: e.p1[1], size: viewSize, bounds: modelBounds)
+                    Path { p in p.move(to: a); p.addLine(to: b) }
+                        .stroke(Color.teal, style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                        .allowsHitTesting(false)
+                }
+                if let h = state.hoveredSewingEdge, !state.sewingEdges.contains(h) {
+                    let a = toScreen(dx: h.p0[0], dy: h.p0[1], size: viewSize, bounds: modelBounds)
+                    let b = toScreen(dx: h.p1[0], dy: h.p1[1], size: viewSize, bounds: modelBounds)
+                    Path { p in p.move(to: a); p.addLine(to: b) }
+                        .stroke(Color.teal.opacity(0.45), style: StrokeStyle(lineWidth: 3, lineCap: .round))
+                        .allowsHitTesting(false)
+                }
+            }
+
+            // Add Holes — START / END margin (inset) tip handles. Shown only when a
+            // SINGLE edge (or one standalone line) is selected: drag the teal markers
+            // along the line to set how far the first / last holes sit in from each
+            // tip. Teal keeps them distinct from the purple offset handle.
             if state.currentTool == .addHoles,
-               !state.chainSelectionEnabled,
-               let ent = getSelectedLineEntity(),
-               let s = ent.start, let e = ent.end {
-                let p1 = CGPoint(x: s[0], y: s[1])
-                let p2 = CGPoint(x: e[0], y: e[1])
+               !state.sewingChainSelection,
+               let edge = sewingEdgeEndpoints() {
+                let p1 = edge.0
+                let p2 = edge.1
                 let dx = p2.x - p1.x
                 let dy = p2.y - p1.y
                 let L = hypot(dx, dy)
@@ -1010,7 +1040,7 @@ struct DxfCanvasView: View {
                                     // Linked: keep both ends equal; clamped so the two
                                     // margins never cross (leave ~1 mm of run).
                                     let other = state.holeInsetLinked ? 0.0 : state.holeEndInset
-                                    state.holeStartInset = max(0.0, min(Double(L) - other - 1.0, Double(proj)))
+                                    state.holeStartInset = (max(0.0, min(Double(L) - other - 1.0, Double(proj))) * 10).rounded() / 10
                                     if state.holeInsetLinked { state.holeEndInset = state.holeStartInset }
                                     state.updateLivePreview()
                                 }
@@ -1037,7 +1067,7 @@ struct DxfCanvasView: View {
                                     let modelPt = toModel(point: val.location, size: viewSize, bounds: modelBounds)
                                     let proj = (p2.x - modelPt.x) * ux + (p2.y - modelPt.y) * uy
                                     let other = state.holeInsetLinked ? 0.0 : state.holeStartInset
-                                    state.holeEndInset = max(0.0, min(Double(L) - other - 1.0, Double(proj)))
+                                    state.holeEndInset = (max(0.0, min(Double(L) - other - 1.0, Double(proj))) * 10).rounded() / 10
                                     if state.holeInsetLinked { state.holeStartInset = state.holeEndInset }
                                     state.updateLivePreview()
                                 }
@@ -1403,12 +1433,17 @@ struct DxfCanvasView: View {
             // Viewport culling (MAS-74): skip entities whose screen bounds fall
             // entirely outside the visible canvas. Selected entities are never
             // culled (the gizmo transform can move them into view mid-drag).
-            let isSelected = state.selectedHandles.contains(ent.handle)
-            if !isSelected, let sb = entityScreenBounds(ent, size: size, modelBounds: modelBounds),
+            // In Add Holes per-edge mode the WHOLE entity must not light up — only
+            // the picked / hovered edges do (drawn separately below). So suppress the
+            // entity-level selected/hover highlight there.
+            let perEdgeSewing = state.currentTool == .addHoles && !state.sewingChainSelection
+            let isSelected = state.selectedHandles.contains(ent.handle) && !perEdgeSewing
+            if !state.selectedHandles.contains(ent.handle),
+               let sb = entityScreenBounds(ent, size: size, modelBounds: modelBounds),
                !sb.intersects(viewRect) {
                 continue
             }
-            let isHovered = (state.hoveredHandle == ent.handle)
+            let isHovered = (state.hoveredHandle == ent.handle) && !perEdgeSewing
             let isGuidePath = (state.currentTool == .patterning && state.patternMode == "path" && state.patternPathHandle == ent.handle)
             
             let baseColor: Color = matchedLayer?.color ?? Color.text_primary
@@ -3466,7 +3501,25 @@ struct DxfCanvasView: View {
                     state.selectedMeasurement = nil
 
                     if let nearest = findNearestEntity(modelPt: clickedModelPt, maxDistanceScreen: Self.selectionHitTolerance, size: size, bounds: modelBounds) {
-                        if state.chainSelectionEnabled {
+                        if state.currentTool == .addHoles {
+                            // Add Holes targets the INDIVIDUAL EDGE under the cursor.
+                            // Each click toggles that edge in/out of the selection (no
+                            // Shift needed — click several to stitch several edges; they
+                            // miter at shared corners). The link/chain toggle switches
+                            // to the whole outline. Never chain-selects.
+                            if state.sewingChainSelection {
+                                state.sewingEdges = []
+                                state.selectedHandles = [nearest.handle]
+                            } else if let e = nearestSewingEdge(of: nearest, near: clickedModelPt) {
+                                state.toggleSewingEdge(SewingEdge(handle: nearest.handle,
+                                                                  index: e.index, p0: e.p0, p1: e.p1))
+                            } else {
+                                // Arc / circle: no straight edge — stitch the whole entity.
+                                state.sewingEdges = []
+                                state.selectedHandles = [nearest.handle]
+                            }
+                            state.updateLivePreview()
+                        } else if state.effectiveChainSelection {
                             state.triggerChainSelect(seedHandle: nearest.handle)
                         } else {
                             if NSEvent.modifierFlags.contains(.shift) {
@@ -3487,6 +3540,8 @@ struct DxfCanvasView: View {
                             state.applyOffset(exitAfterApply: true)
                         } else if !NSEvent.modifierFlags.contains(.shift) {
                             state.selectedHandles.removeAll()
+                            state.sewingEdges = []
+                            state.updateLivePreview()
                         }
                     }
                 }
@@ -3658,6 +3713,20 @@ struct DxfCanvasView: View {
     }
     
     private func getOffsetHandleInfo() -> OffsetHandleInfo? {
+        // Add Holes per-edge: anchor the offset (margin-distance) handle on the picked
+        // edge — its midpoint and outward normal — so it tracks the actual edge being
+        // stitched rather than the polyline's first segment.
+        if state.currentTool == .addHoles, let e = state.sewingEdges.first {
+            let startPt = CGPoint(x: e.p0[0], y: e.p0[1])
+            let endPt = CGPoint(x: e.p1[0], y: e.p1[1])
+            let dx = endPt.x - startPt.x
+            let dy = endPt.y - startPt.y
+            let len = hypot(dx, dy)
+            if len > 1e-5 {
+                let midPt = CGPoint(x: (startPt.x + endPt.x) / 2, y: (startPt.y + endPt.y) / 2)
+                return OffsetHandleInfo(basePoint: midPt, normal: CGPoint(x: -dy / len, y: dx / len))
+            }
+        }
         for handle in state.selectedHandles {
             guard let ent = state.entities.first(where: { $0.handle == handle }) else { continue }
             if ent.type == "LINE", let s = ent.start, let e = ent.end {
@@ -4198,6 +4267,49 @@ struct DxfCanvasView: View {
             }
         }
         return nearest
+    }
+
+    /// Endpoints of the SINGLE edge the sewing tool is targeting (for the tip drag
+    /// handles): the one clicked edge if exactly one is selected, otherwise a single
+    /// selected standalone LINE. nil when zero or several edges are selected.
+    private func sewingEdgeEndpoints() -> (CGPoint, CGPoint)? {
+        if state.sewingEdges.count == 1, let e = state.sewingEdges.first {
+            return (CGPoint(x: e.p0[0], y: e.p0[1]), CGPoint(x: e.p1[0], y: e.p1[1]))
+        }
+        if state.sewingEdges.isEmpty, let ent = getSelectedLineEntity(),
+           let s = ent.start, let e = ent.end {
+            return (CGPoint(x: s[0], y: s[1]), CGPoint(x: e[0], y: e[1]))
+        }
+        return nil
+    }
+
+    /// The single edge of `ent` nearest to `pt`: its segment index plus the two
+    /// endpoints (model coords). For a LINE that's the whole line (index 0); for a
+    /// polyline it's the clicked side; for an arc/circle/text there is no straight
+    /// edge to pick, so nil (the caller then stitches the whole entity).
+    private func nearestSewingEdge(of ent: DXFEntity, near pt: CGPoint) -> (index: Int, p0: [Double], p1: [Double])? {
+        if ent.type == "LINE", let s = ent.start, let e = ent.end {
+            return (0, s, e)
+        }
+        if let verts = ent.vertices, verts.count >= 2 {
+            let n = verts.count
+            let closed = (ent.closed == true)
+            var bestIdx = -1
+            var bestDist = Double.infinity
+            for i in 0..<n {
+                let j = (i + 1) % n
+                if j == 0 && !closed { continue }   // open polyline: no wrap edge
+                let d = distanceToSegment(pt: pt,
+                    start: CGPoint(x: verts[i][0], y: verts[i][1]),
+                    end: CGPoint(x: verts[j][0], y: verts[j][1]))
+                if d < bestDist { bestDist = d; bestIdx = i }
+            }
+            if bestIdx >= 0 {
+                let j = (bestIdx + 1) % n
+                return (bestIdx, verts[bestIdx], verts[j])
+            }
+        }
+        return nil
     }
 
     private func findNearestEntity(modelPt: CGPoint, maxDistanceScreen: CGFloat, size: CGSize, bounds: CGRect) -> DXFEntity? {

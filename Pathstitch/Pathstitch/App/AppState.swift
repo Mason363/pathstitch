@@ -799,6 +799,19 @@ struct ExportOptions {
     }
 }
 
+/// One edge picked with the Add Holes tool: the owning entity, the segment index
+/// within it (0 for a standalone LINE), and the two endpoints in model coords.
+/// Identity is handle+index, so the same edge toggles cleanly regardless of which
+/// end of it the user clicked.
+struct SewingEdge: Equatable, Hashable {
+    let handle: String
+    let index: Int
+    let p0: [Double]
+    let p1: [Double]
+    static func == (a: SewingEdge, b: SewingEdge) -> Bool { a.handle == b.handle && a.index == b.index }
+    func hash(into h: inout Hasher) { h.combine(handle); h.combine(index) }
+}
+
 @MainActor @Observable
 class AppState {
     /// Presents the one-off Export Options panel (MAS-156).
@@ -984,27 +997,37 @@ class AppState {
                 pickingPatternPath = false
             }
             if currentTool == .addHoles {
-                // The sewing tool ALWAYS starts in single-segment selection — NOT
-                // chain select — so a click grabs only the line the user picked and
-                // holes land on that individual line (per-end insets apply). We snap-
-                // shot the prior chain state on entry and force it off, decoupling the
-                // tool from the global flag (the Offset tool, for instance, turns chain
-                // ON). The user can still toggle chain ON *while in the tool* (A key /
-                // link button); on exit we restore the snapshot so that choice never
-                // leaks into any other tool.
-                holesEntryChainSelection = chainSelectionEnabled
-                chainSelectionEnabled = false
-            } else if oldValue == .addHoles {
-                chainSelectionEnabled = holesEntryChainSelection ?? false
-                holesEntryChainSelection = nil
+                // The sewing tool has its OWN chain flag (`sewingChainSelection`),
+                // fully decoupled from the global `chainSelectionEnabled` that the
+                // Offset/Select tools use — so the Offset tool turning chain ON can
+                // never leak into sewing. Entering the tool ALWAYS starts in single-
+                // line selection: a click grabs only the line you picked and holes
+                // land on that individual line. The user can opt back into chaining
+                // with the link button / A key while in the tool.
+                sewingChainSelection = false
+                sewingEdges = []
+                hoveredSewingEdge = nil
             }
         }
     }
     var chainSelectionEnabled: Bool = false
-    /// Snapshot of `chainSelectionEnabled` taken when the sewing (Add Holes) tool
-    /// is entered, so a chain-select toggled on only for that tool session can be
-    /// reverted on exit. `nil` whenever the sewing tool isn't active.
-    private var holesEntryChainSelection: Bool? = nil
+    /// Chain selection for the Add Holes (sewing) tool ONLY. Kept separate from the
+    /// global `chainSelectionEnabled` so the sewing tool defaults to single-line
+    /// selection regardless of what the Offset/Select tools left the global flag at.
+    /// Reset to false every time the sewing tool is entered.
+    var sewingChainSelection: Bool = false
+    /// The chain-selection flag that applies to the active tool: the sewing tool uses
+    /// its own `sewingChainSelection`, every other tool uses the global one. Use this
+    /// for click-selection and the link-button / shortcut display so the two never
+    /// cross-contaminate.
+    var effectiveChainSelection: Bool {
+        currentTool == .addHoles ? sewingChainSelection : chainSelectionEnabled
+    }
+    /// Toggle the chain flag that applies to the active tool (link button / A key).
+    func toggleChainSelection() {
+        if currentTool == .addHoles { sewingChainSelection.toggle() }
+        else { chainSelectionEnabled.toggle() }
+    }
     /// Offset tool: emit construction (dashed reference) lines instead of normal
     /// solid sketch lines (MAS-109).
     var offsetConstruction: Bool = false
@@ -1233,12 +1256,12 @@ class AppState {
     // Distance between the two staggered rows of a saddle stitch (only used when
     // holePattern == "saddle"). Separate from the legacy single-pattern spacing.
     var holeSaddleSpacing: Double = 3.0
-    // Chain selection for the sewing tool is driven by the global
-    // `chainSelectionEnabled` toggle (the link button above the tool options),
-    // not a separate per-tool flag. When off, holes are placed only on each
-    // selected line with per-end insets controlling how far the end holes sit
-    // from each tip; when on, the selected connected lines are joined into one
-    // perimeter and holes run all the way around.
+    // Chain selection for the sewing tool is driven by its OWN `sewingChainSelection`
+    // flag (toggled by the link button / A key while in the tool), decoupled from the
+    // global `chainSelectionEnabled`. Default OFF: holes are placed only on each
+    // selected line with per-end insets controlling how far the end holes sit from
+    // each tip. When ON, the selected connected lines are joined into one perimeter
+    // and holes run all the way around.
     var holeStartInset: Double = 0.0
     var holeEndInset: Double = 0.0
     // End-placement mode for the single-line run (open paths only). "ends" = legacy:
@@ -1253,6 +1276,22 @@ class AppState {
     // Unit the inset/margin fields are typed in: "mm" or "pitch" (× the stitch
     // spacing). Canonical storage stays in mm; the UI converts for display/entry.
     var holeInsetUnit: String = "mm"
+    /// The EDGES the sewing tool targets. Each click with the Add Holes tool toggles
+    /// the clicked edge in/out of this set (no Shift needed), so holes land only on
+    /// the picked edges instead of the whole outline; adjacent edges miter at their
+    /// shared corner. Empty = whole selected entity/outline (chain/link toggle on, a
+    /// circle/arc, or nothing picked yet). Cleared on tool entry and after applying.
+    var sewingEdges: [SewingEdge] = []
+    /// The edge currently under the cursor in the Add Holes tool, for the per-edge
+    /// hover highlight (so hovering lights up just the one line, not the whole shape).
+    var hoveredSewingEdge: SewingEdge? = nil
+    /// Toggle an edge in the sewing selection and keep `selectedHandles` in sync with
+    /// the owning entities (so Apply/obstacle context still work).
+    func toggleSewingEdge(_ edge: SewingEdge) {
+        if let i = sewingEdges.firstIndex(of: edge) { sewingEdges.remove(at: i) }
+        else { sewingEdges.append(edge) }
+        selectedHandles = Set(sewingEdges.map { $0.handle })
+    }
     // Corner treatment of the offset stitch line: false = sharp (mitre, default),
     // true = filleted (rounded) corners on the offset.
     var holeOffsetCornerFillet: Bool = false
@@ -5261,7 +5300,7 @@ class AppState {
     /// and apply paths all build the same payload — only input/output/handles
     /// differ — so they share this builder to stay in lockstep.
     func sewingHoleArgs(input: String, output: String, handles: [String]) -> [String: Any] {
-        return [
+        var args: [String: Any] = [
             "input": input,
             "output": output,
             "handles": handles,
@@ -5276,7 +5315,7 @@ class AppState {
             "side": holeSide,
             "row_spacing": holeRowSpacing,
             "saddle_spacing": holeSaddleSpacing,
-            "chain_selection": chainSelectionEnabled,
+            "chain_selection": sewingChainSelection,
             "start_inset": holeStartInset,
             "end_inset": holeEndInset,
             "end_mode": holeEndMode,
@@ -5300,6 +5339,12 @@ class AppState {
             "snap_to_chisel": snapToChisel,
             "chisel_prongs": selectedIronBladeCount
         ]
+        // Clicked one or more edges of a shape → holes go on just those edges
+        // (adjacent ones miter at their shared corner).
+        if !sewingEdges.isEmpty {
+            args["segment_overrides"] = sewingEdges.map { [$0.p0, $0.p1] }
+        }
+        return args
     }
 
     /// Divisor used when margins are entered in "× pitch" units (the stitch
@@ -5358,6 +5403,8 @@ class AppState {
                 await MainActor.run {
                     self.currentFilePath = activeDxfURL
                     self.selectedHandles.removeAll()
+                    self.sewingEdges = []
+                    self.hoveredSewingEdge = nil
                     self.reloadDXF()
                     if exitAfterApply { self.currentTool = .select }
                 }
